@@ -29,6 +29,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - 保持 `main.rs` 足够薄，可复用逻辑放到 `lib.rs`。
 - 共享依赖版本通过 workspace dependency inheritance 管理。
 - Cargo features 必须是 additive，不要让 feature 之间互相排斥或改变已有行为。
+- 每个 crate 自己维护与自身相关的轻量测试资产，例如 `docker-compose.test.yml`、`Makefile` 和 `tests/`。
 
 ## API 设计
 
@@ -118,6 +119,10 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - async 测试使用 `#[tokio::test]`。
 - agent、LLM、tool、MCP 相关测试使用 mock provider 和基于 trait 的依赖。
 - parser、validator、graph scheduling、schema conversion 优先考虑 property tests。
+- 需要真实外部依赖的集成测试放在对应 crate 的 `tests/` 目录，并默认标记 `#[ignore]`，避免普通 `cargo test --workspace --all-targets` 依赖容器。
+- 每个 crate 的集成测试容器使用独立的 `docker-compose.test.yml`；compose project name 使用 crate 名加 `-test`，例如 `wyse-infra-test`。
+- 本地集成测试优先通过 crate 内 `Makefile` 运行；默认使用 `podman compose`，需要 Docker 时用 `COMPOSE="docker compose"` 覆盖。
+- CI 中普通单测和容器集成测试分成不同 job；集成测试 job 显式启动对应 crate 的 compose 测试栈，运行 ignored tests，最后 `down -v` 清理。
 
 ## Lint 和格式化
 
