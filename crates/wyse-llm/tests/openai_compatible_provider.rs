@@ -34,7 +34,7 @@ async fn chat_posts_chat_completion_and_maps_response() {
 
     let response = provider
         .chat(
-            ChatRequest::new(ModelId::from("request-model"))
+            ChatRequest::new(ModelId::from("gpt-configured"))
                 .with_message(ChatMessage::user("say hello")),
         )
         .await
@@ -58,6 +58,25 @@ async fn chat_posts_chat_completion_and_maps_response() {
 }
 
 #[tokio::test]
+async fn chat_rejects_request_model_that_differs_from_provider_model() {
+    let provider = OpenAICompatibleProvider::new(
+        "http://127.0.0.1:9/v1",
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let error = provider
+        .chat(ChatRequest::new(ModelId::from("other-model")))
+        .await
+        .expect_err("model mismatch should fail before transport");
+
+    assert!(matches!(
+        error,
+        LlmError::InvalidRequest("request model does not match provider model")
+    ));
+}
+
+#[tokio::test]
 async fn chat_maps_provider_status_error_payload() {
     let server = TestServer::spawn(TestResponse::status(
         429,
@@ -76,7 +95,7 @@ async fn chat_maps_provider_status_error_payload() {
     );
 
     let error = provider
-        .chat(ChatRequest::new(ModelId::from("ignored")))
+        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
         .await
         .expect_err("status should fail");
 
@@ -117,7 +136,7 @@ async fn chat_maps_success_body_decode_errors_to_response_decode() {
     );
 
     let error = provider
-        .chat(ChatRequest::new(ModelId::from("ignored")))
+        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
         .await
         .expect_err("invalid success body should fail");
 
@@ -134,7 +153,7 @@ async fn chat_maps_status_body_decode_errors_to_provider_payload_decode() {
     );
 
     let error = provider
-        .chat(ChatRequest::new(ModelId::from("ignored")))
+        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
         .await
         .expect_err("invalid status body should fail");
 

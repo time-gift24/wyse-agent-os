@@ -32,6 +32,9 @@ impl fmt::Debug for ApiKey {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum LlmError {
+    /// Request is invalid before it reaches a provider.
+    #[error("invalid request: {0}")]
+    InvalidRequest(&'static str),
     /// Request construction failed.
     #[error("failed to build request")]
     RequestBuild(#[source] Box<dyn Error + Send + Sync + 'static>),

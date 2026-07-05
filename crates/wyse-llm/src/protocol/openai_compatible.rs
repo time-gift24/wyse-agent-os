@@ -58,8 +58,12 @@ impl OpenAICompatibleProvider {
 
 impl LlmProvider for OpenAICompatibleProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
-        let mut request = request;
-        request.model = self.model.clone();
+        if request.model != self.model {
+            return Err(LlmError::InvalidRequest(
+                "request model does not match provider model",
+            ));
+        }
+
         let payload = to_chat_payload(&request, false)?;
         let response = self
             .client
