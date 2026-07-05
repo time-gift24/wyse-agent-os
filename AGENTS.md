@@ -24,6 +24,8 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - 使用 Cargo workspace，并按能力拆分小而清晰的 crates。
 - 每个 crate 的职责要窄且明确。
 - 模块按功能组织，不按泛泛的类型类别组织。
+- trait 定义和具体实现必须分离：trait 文件只放接口、关联类型和必要的轻量 helper，具体实现放到按能力或后端命名的模块中。
+- error 定义必须和 trait / implementation 分离；优先放在 crate 内的 `error.rs`，复杂领域可以使用独立的领域 error 模块。
 - 保持 `main.rs` 足够薄，可复用逻辑放到 `lib.rs`。
 - 共享依赖版本通过 workspace dependency inheritance 管理。
 - Cargo features 必须是 additive，不要让 feature 之间互相排斥或改变已有行为。
@@ -53,6 +55,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 ## 错误处理
 
 - library crates 使用 `thiserror` 定义类型化错误。
+- 使用 `thiserror::Error` derive；不要手写字符串型错误，也不要把 error enum 混在 trait 或具体实现文件里。
 - application binaries 可以在顶层使用 `anyhow`。
 - 可恢复失败返回 `Result<T, E>`。
 - 生产代码不要使用 `unwrap()`。
