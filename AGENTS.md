@@ -116,6 +116,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - 跨 crate 集成测试放在 `tests/` 目录。
 - 测试命名要描述被验证的行为。
 - 测试结构保持 arrange、act、assert 清晰。
+- 禁止为了测试方便在生产 API 中添加函数；测试辅助逻辑应放在测试模块、`tests/` helper 或 fixture 中。
 - async 测试使用 `#[tokio::test]`。
 - agent、LLM、tool、MCP 相关测试使用 mock provider 和基于 trait 的依赖。
 - parser、validator、graph scheduling、schema conversion 优先考虑 property tests。
