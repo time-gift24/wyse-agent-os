@@ -1,13 +1,14 @@
 //! Distributed runtime event stream bus.
 
-use std::{error::Error, future::Future, pin::Pin};
+use std::{future::Future, pin::Pin};
 
 use async_nats::{HeaderMap, jetstream};
 use bytes::Bytes;
 use futures_core::Stream;
 use futures_util::StreamExt;
-use thiserror::Error;
 use wyse_core::{RunId, StreamEnvelope};
+
+use crate::EventStreamBusError;
 
 /// Stream of runtime event envelopes.
 pub type EventStream =
@@ -133,33 +134,6 @@ impl EventStreamBus for NatsEventStreamBus {
             serde_json::from_slice::<StreamEnvelope>(&message.payload)
                 .map_err(EventStreamBusError::Deserialize)
         })))
-    }
-}
-
-/// Error returned by event stream bus operations.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum EventStreamBusError {
-    /// Event envelope serialization failed.
-    #[error("failed to serialize stream envelope")]
-    Serialize(#[source] serde_json::Error),
-    /// Event envelope deserialization failed.
-    #[error("failed to deserialize stream envelope")]
-    Deserialize(#[source] serde_json::Error),
-    /// NATS operation failed.
-    #[error("nats operation failed")]
-    Nats {
-        /// Underlying NATS error.
-        #[source]
-        source: Box<dyn Error + Send + Sync + 'static>,
-    },
-}
-
-impl EventStreamBusError {
-    fn nats(source: impl Error + Send + Sync + 'static) -> Self {
-        Self::Nats {
-            source: Box::new(source),
-        }
     }
 }
 
