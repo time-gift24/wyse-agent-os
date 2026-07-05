@@ -322,9 +322,6 @@ fn tool_calls_from_message(message: &Value, tools: &[ToolSpec]) -> Result<Vec<To
     let Some(value) = message.get("tool_calls") else {
         return Ok(Vec::new());
     };
-    if value.is_null() {
-        return Ok(Vec::new());
-    }
 
     let calls = value
         .as_array()
@@ -564,24 +561,26 @@ mod tests {
 
     #[test]
     fn response_tool_calls_must_be_an_array() {
-        let payload = json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": {}
-                },
-                "finish_reason": "tool_calls"
-            }]
-        });
+        for tool_calls in [json!({}), Value::Null] {
+            let payload = json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": tool_calls
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            });
 
-        let error = chat_response_from_value(payload, &[weather_tool()])
-            .expect_err("tool calls should fail");
+            let error = chat_response_from_value(payload, &[weather_tool()])
+                .expect_err("tool calls should fail");
 
-        assert!(matches!(
-            error,
-            LlmError::InvalidProviderPayload("invalid tool calls")
-        ));
+            assert!(matches!(
+                error,
+                LlmError::InvalidProviderPayload("invalid tool calls")
+            ));
+        }
     }
 
     #[test]
