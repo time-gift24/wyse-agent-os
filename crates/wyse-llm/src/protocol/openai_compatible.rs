@@ -49,7 +49,10 @@ pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Val
     Ok(payload)
 }
 
-pub(crate) fn chat_response_from_value(value: Value) -> Result<ChatResponse, LlmError> {
+pub(crate) fn chat_response_from_value(
+    value: Value,
+    tools: &[ToolSpec],
+) -> Result<ChatResponse, LlmError> {
     let choice = value["choices"]
         .as_array()
         .and_then(|choices| choices.first())
@@ -59,7 +62,7 @@ pub(crate) fn chat_response_from_value(value: Value) -> Result<ChatResponse, Llm
     let finish_reason = finish_reason(choice["finish_reason"].as_str());
     let usage = usage_from_value(value.get("usage"));
     let mut chat_message = ChatMessage::assistant(content);
-    chat_message.tool_calls = tool_calls_from_message(message);
+    chat_message.tool_calls = tool_calls_from_message(message, tools)?;
 
     Ok(ChatResponse {
         message: chat_message,
@@ -144,6 +147,13 @@ fn provider_tool_name<'a>(tool_id: &ToolId, tools: &'a [ToolSpec]) -> Option<&'a
         .map(|tool| tool.name.as_str())
 }
 
+fn tool_id_for_provider_name(name: &str, tools: &[ToolSpec]) -> Option<ToolId> {
+    tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .map(|tool| tool.tool_id.clone())
+}
+
 fn structured_output_to_value(output: &StructuredOutput) -> Value {
     match output {
         StructuredOutput::JsonObject => json!({"type": "json_object"}),
@@ -181,27 +191,38 @@ fn usage_from_value(value: Option<&Value>) -> Option<TokenUsage> {
     })
 }
 
-fn tool_calls_from_message(message: &Value) -> Vec<ToolCall> {
+fn tool_calls_from_message(message: &Value, tools: &[ToolSpec]) -> Result<Vec<ToolCall>, LlmError> {
     message["tool_calls"]
         .as_array()
         .map(|calls| {
             calls
                 .iter()
                 .map(|call| {
-                    let name = call["function"]["name"].as_str().unwrap_or_default();
-                    ToolCall {
-                        call_id: CallId::from(call["id"].as_str().unwrap_or_default()),
-                        tool_id: ToolId::from(name),
+                    let call_id = required_str(&call["id"], "missing tool call id")?;
+                    let name = required_str(&call["function"]["name"], "missing tool name")?;
+                    let arguments =
+                        required_str(&call["function"]["arguments"], "missing tool arguments")?;
+                    let tool_id = tool_id_for_provider_name(name, tools)
+                        .ok_or(LlmError::InvalidProviderPayload("unknown tool call"))?;
+
+                    Ok(ToolCall {
+                        call_id: CallId::from(call_id),
+                        tool_id,
                         name: name.to_owned(),
-                        arguments: serde_json::from_str(
-                            call["function"]["arguments"].as_str().unwrap_or("{}"),
-                        )
-                        .unwrap_or_else(|_| json!({})),
-                    }
+                        arguments: serde_json::from_str(arguments)
+                            .map_err(LlmError::ResponseDecode)?,
+                    })
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+
+fn required_str<'a>(value: &'a Value, message: &'static str) -> Result<&'a str, LlmError> {
+    value
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or(LlmError::InvalidProviderPayload(message))
 }
 
 #[cfg(test)]
@@ -259,7 +280,7 @@ mod tests {
             }
         });
 
-        let response = chat_response_from_value(payload).expect("response maps");
+        let response = chat_response_from_value(payload, &[]).expect("response maps");
 
         assert_eq!(response.message, ChatMessage::assistant("hello"));
         assert_eq!(response.finish_reason, FinishReason::Stop);
@@ -286,7 +307,7 @@ mod tests {
             }]
         });
 
-        let response = chat_response_from_value(payload).expect("response maps");
+        let response = chat_response_from_value(payload, &[weather_tool()]).expect("response maps");
 
         assert_eq!(response.finish_reason, FinishReason::ToolCalls);
         assert_eq!(response.message.tool_calls.len(), 1);
@@ -296,13 +317,118 @@ mod tests {
         );
         assert_eq!(
             response.message.tool_calls[0].tool_id,
-            ToolId::from("get_weather")
+            ToolId::from("internal-weather")
         );
         assert_eq!(response.message.tool_calls[0].name, "get_weather");
         assert_eq!(
             response.message.tool_calls[0].arguments,
             json!({"city": "Shanghai"})
         );
+    }
+
+    #[test]
+    fn unknown_response_tool_name_returns_mapping_error() {
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "unknown_tool",
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let error =
+            chat_response_from_value(payload, &[weather_tool()]).expect_err("tool should fail");
+
+        assert!(matches!(
+            error,
+            LlmError::InvalidProviderPayload("unknown tool call")
+        ));
+    }
+
+    #[test]
+    fn invalid_response_tool_arguments_return_decode_error() {
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{not json"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let error =
+            chat_response_from_value(payload, &[weather_tool()]).expect_err("tool should fail");
+
+        assert!(matches!(error, LlmError::ResponseDecode(_)));
+    }
+
+    #[test]
+    fn response_tool_call_requires_id_and_name() {
+        let missing_id = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let missing_name = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "arguments": "{}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let missing_id_error = chat_response_from_value(missing_id, &[weather_tool()])
+            .expect_err("missing id should fail");
+        let missing_name_error = chat_response_from_value(missing_name, &[weather_tool()])
+            .expect_err("missing name should fail");
+
+        assert!(matches!(
+            missing_id_error,
+            LlmError::InvalidProviderPayload("missing tool call id")
+        ));
+        assert!(matches!(
+            missing_name_error,
+            LlmError::InvalidProviderPayload("missing tool name")
+        ));
     }
 
     #[test]
