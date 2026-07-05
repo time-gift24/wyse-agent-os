@@ -267,6 +267,45 @@ mod tests {
     }
 
     #[test]
+    fn response_maps_tool_calls_to_message() {
+        let payload = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Shanghai\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let response = chat_response_from_value(payload).expect("response maps");
+
+        assert_eq!(response.finish_reason, FinishReason::ToolCalls);
+        assert_eq!(response.message.tool_calls.len(), 1);
+        assert_eq!(
+            response.message.tool_calls[0].call_id,
+            CallId::from("call-1")
+        );
+        assert_eq!(
+            response.message.tool_calls[0].tool_id,
+            ToolId::from("get_weather")
+        );
+        assert_eq!(response.message.tool_calls[0].name, "get_weather");
+        assert_eq!(
+            response.message.tool_calls[0].arguments,
+            json!({"city": "Shanghai"})
+        );
+    }
+
+    #[test]
     fn assistant_message_maps_tool_calls() {
         let mut message = ChatMessage::assistant("checking");
         message.tool_calls = vec![ToolCall {
