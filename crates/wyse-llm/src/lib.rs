@@ -4,6 +4,7 @@ pub mod definition;
 pub mod error;
 pub mod message;
 pub mod mock;
+pub mod protocol;
 pub mod structured_output;
 pub mod tool_call;
 pub mod usage;
