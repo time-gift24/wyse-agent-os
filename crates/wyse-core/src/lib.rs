@@ -139,6 +139,23 @@ pub struct TokenUsage {
     pub total_tokens: u64,
 }
 
+/// Role of one runtime transcript message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RuntimeMessageRole {
+    /// System instruction.
+    System,
+    /// End-user input.
+    User,
+    /// Assistant-visible answer.
+    Assistant,
+    /// Model reasoning output.
+    Reasoning,
+    /// Tool result output.
+    Tool,
+}
+
 /// Runtime event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -178,25 +195,40 @@ pub enum RuntimeEvent {
     MessageStarted {
         /// Message identity.
         message_id: MessageId,
+        /// Transcript role for this message.
+        role: RuntimeMessageRole,
     },
-    /// Agent emitted visible text.
+    /// Runtime message emitted text.
     TextDelta {
+        /// Message identity.
+        message_id: MessageId,
         /// Visible text delta.
         delta: String,
     },
-    /// Agent emitted reasoning text.
-    ReasoningDelta {
-        /// Reasoning text delta.
-        delta: String,
+    /// Runtime message finished.
+    MessageFinished {
+        /// Message identity.
+        message_id: MessageId,
     },
     /// Tool call started.
     ToolCallStarted {
         /// Tool call identity.
         call_id: CallId,
         /// Tool identity.
-        tool_id: ToolId,
-        /// Tool arguments.
-        arguments: Value,
+        tool_id: Option<ToolId>,
+        /// Provider-visible tool name.
+        name: Option<String>,
+    },
+    /// Tool call arguments changed.
+    ToolCallDelta {
+        /// Tool call identity.
+        call_id: CallId,
+        /// Tool identity when known.
+        tool_id: Option<ToolId>,
+        /// Provider-visible tool name when known.
+        name: Option<String>,
+        /// Tool argument text fragment.
+        arguments_delta: String,
     },
     /// Tool call finished.
     ToolCallFinished {
@@ -236,8 +268,9 @@ impl RuntimeEvent {
             Self::NodeFailed { .. } => "node_failed",
             Self::MessageStarted { .. } => "message_started",
             Self::TextDelta { .. } => "text_delta",
-            Self::ReasoningDelta { .. } => "reasoning_delta",
+            Self::MessageFinished { .. } => "message_finished",
             Self::ToolCallStarted { .. } => "tool_call_started",
+            Self::ToolCallDelta { .. } => "tool_call_delta",
             Self::ToolCallFinished { .. } => "tool_call_finished",
             Self::ToolCallFailed { .. } => "tool_call_failed",
             Self::PlanUpdated { .. } => "plan_updated",
@@ -285,9 +318,41 @@ mod tests {
     #[test]
     fn event_type_matches_protocol_name() {
         let event = RuntimeEvent::TextDelta {
+            message_id: MessageId::from("msg-1"),
             delta: "hello".to_owned(),
         };
 
         assert_eq!(event.event_type(), "text_delta");
+    }
+
+    #[test]
+    fn user_message_events_share_transcript_shape() {
+        let message_id = MessageId::from("msg-user");
+
+        let started = RuntimeEvent::MessageStarted {
+            message_id: message_id.clone(),
+            role: RuntimeMessageRole::User,
+        };
+        let delta = RuntimeEvent::TextDelta {
+            message_id: message_id.clone(),
+            delta: "hello".to_owned(),
+        };
+        let finished = RuntimeEvent::MessageFinished { message_id };
+
+        assert_eq!(started.event_type(), "message_started");
+        assert_eq!(delta.event_type(), "text_delta");
+        assert_eq!(finished.event_type(), "message_finished");
+    }
+
+    #[test]
+    fn tool_call_delta_supports_partial_arguments() {
+        let event = RuntimeEvent::ToolCallDelta {
+            call_id: CallId::from("call-1"),
+            tool_id: Some(ToolId::from("weather")),
+            name: Some("get_weather".to_owned()),
+            arguments_delta: "{\"city".to_owned(),
+        };
+
+        assert_eq!(event.event_type(), "tool_call_delta");
     }
 }
