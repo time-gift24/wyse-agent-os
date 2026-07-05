@@ -139,6 +139,14 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - 重要公共 API 尽量提供可运行示例。
 - 相关类型之间使用 intra-doc links。
 - 示例中避免 `unwrap()`，优先使用 `?`。
+- 不要提交 `docs/superpowers/` 这类 superpower 过程文档；它们只用于临时协作。
+- 最终设计和实现约定要简洁、明确地归档到相关 crate 的 `AGENTS.md` 中。
+- 实现完成后、PR 合入前，必须提醒用户完成 crate `AGENTS.md` 归档。
+
+## Git 工作流
+
+- 禁止直接在 `main` 分支 commit。
+- 需要提交时先创建或切换到非 `main` 分支，默认分支名使用 `codex/` 前缀。
 
 ## 实现风格
 
