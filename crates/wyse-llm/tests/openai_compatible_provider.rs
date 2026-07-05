@@ -366,6 +366,126 @@ async fn chat_stream_maps_invalid_json_event_to_stream_error() {
 }
 
 #[tokio::test]
+async fn chat_stream_keeps_events_before_later_stream_error() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n\
+         data: {not-json}\n\n",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream.next().await.expect("text event").expect("text maps"),
+        ChatStreamEvent::TextDelta {
+            delta: "hello".to_owned()
+        }
+    );
+    let error = stream
+        .next()
+        .await
+        .expect("error event")
+        .expect_err("invalid json should fail after text");
+    assert!(matches!(error, LlmError::Stream(_)));
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn chat_stream_errors_when_eof_arrives_before_finish_event() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream.next().await.expect("text event").expect("text maps"),
+        ChatStreamEvent::TextDelta {
+            delta: "hello".to_owned()
+        }
+    );
+    let error = stream
+        .next()
+        .await
+        .expect("eof error")
+        .expect_err("missing finish should fail");
+    assert!(matches!(error, LlmError::Stream(_)));
+}
+
+#[tokio::test]
+async fn chat_stream_errors_when_eof_leaves_partial_sse_event() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+    let error = stream
+        .next()
+        .await
+        .expect("eof error")
+        .expect_err("partial sse event should fail");
+
+    assert!(matches!(error, LlmError::Stream(_)));
+}
+
+#[tokio::test]
+async fn chat_stream_maps_provider_status_error_payload() {
+    let server = TestServer::spawn(TestResponse::status(
+        429,
+        vec![("request-id", "req-stream")],
+        json!({
+            "error": {
+                "message": "rate limited for sk-test",
+                "code": "rate_limit"
+            }
+        }),
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let result = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await;
+    let Err(error) = result else {
+        panic!("status should fail");
+    };
+
+    let LlmError::ProviderStatus(status) = error else {
+        panic!("expected provider status error");
+    };
+    assert_eq!(status.status(), 429);
+    assert_eq!(status.code(), Some("rate_limit"));
+    assert_eq!(status.message(), "rate limited for [redacted]");
+    assert_eq!(status.request_id(), Some("req-stream"));
+}
+
+#[tokio::test]
 async fn chat_stream_rejects_request_model_that_differs_from_provider_model() {
     let provider = OpenAICompatibleProvider::new(
         "http://127.0.0.1:9/v1",

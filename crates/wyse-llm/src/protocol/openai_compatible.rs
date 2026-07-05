@@ -1,5 +1,5 @@
 //! OpenAI-compatible protocol implementation.
-use std::{collections::VecDeque, pin::Pin};
+use std::{collections::VecDeque, io, pin::Pin};
 
 use futures_core::Stream;
 use futures_util::{StreamExt, stream};
@@ -136,8 +136,9 @@ where
     struct State<S> {
         chunks: Pin<Box<S>>,
         parser: SseParser,
-        pending: VecDeque<ChatStreamEvent>,
+        pending: VecDeque<Result<ChatStreamEvent, LlmError>>,
         finished: bool,
+        terminal_seen: bool,
     }
 
     let state = State {
@@ -145,12 +146,13 @@ where
         parser: SseParser::default(),
         pending: VecDeque::new(),
         finished: false,
+        terminal_seen: false,
     };
 
     Box::pin(stream::unfold(state, |mut state| async move {
         loop {
             if let Some(event) = state.pending.pop_front() {
-                return Some((Ok(event), state));
+                return Some((event, state));
             }
 
             if state.finished {
@@ -158,48 +160,66 @@ where
             }
 
             match state.chunks.as_mut().next().await {
-                Some(Ok(chunk)) => match state.parser.push(&chunk) {
-                    Ok(events) => {
-                        for event in events {
-                            match event {
-                                SseEvent::Data(data) => {
-                                    let mapped = match stream_events_from_sse_data(&data) {
-                                        Ok(mapped) => mapped,
-                                        Err(error) => {
-                                            state.finished = true;
-                                            return Some((Err(error), state));
-                                        }
-                                    };
+                Some(Ok(chunk)) => {
+                    for event in state.parser.push(&chunk) {
+                        if state.finished {
+                            break;
+                        }
+
+                        match event {
+                            Ok(SseEvent::Data(data)) => match stream_events_from_sse_data(&data) {
+                                Ok(mapped) => {
                                     for mapped_event in mapped {
-                                        if matches!(mapped_event, ChatStreamEvent::Finished { .. })
-                                        {
+                                        let is_terminal = matches!(
+                                            mapped_event,
+                                            ChatStreamEvent::Finished { .. }
+                                        );
+                                        state.pending.push_back(Ok(mapped_event));
+                                        if is_terminal {
+                                            state.terminal_seen = true;
                                             state.finished = true;
+                                            break;
                                         }
-                                        state.pending.push_back(mapped_event);
                                     }
                                 }
-                                SseEvent::Done => {
-                                    if !state.finished {
-                                        state.pending.push_back(ChatStreamEvent::Finished {
-                                            finish_reason: FinishReason::Unknown,
-                                            usage: None,
-                                        });
-                                    }
+                                Err(error) => {
+                                    state.pending.push_back(Err(error));
                                     state.finished = true;
                                 }
+                            },
+                            Ok(SseEvent::Done) => {
+                                if !state.terminal_seen {
+                                    state.pending.push_back(Ok(ChatStreamEvent::Finished {
+                                        finish_reason: FinishReason::Unknown,
+                                        usage: None,
+                                    }));
+                                    state.terminal_seen = true;
+                                }
+                                state.finished = true;
+                            }
+                            Err(error) => {
+                                state.pending.push_back(Err(error));
+                                state.finished = true;
                             }
                         }
                     }
-                    Err(error) => {
-                        state.finished = true;
-                        return Some((Err(error), state));
-                    }
-                },
-                Some(Err(source)) => {
-                    state.finished = true;
-                    return Some((Err(LlmError::stream(source)), state));
                 }
-                None => return None,
+                Some(Err(source)) => {
+                    state.pending.push_back(Err(LlmError::stream(source)));
+                    state.finished = true;
+                }
+                None => {
+                    if state.parser.has_pending() {
+                        state.pending.push_back(Err(stream_eof_error(
+                            "stream ended with partial sse event",
+                        )));
+                    } else if !state.terminal_seen {
+                        state
+                            .pending
+                            .push_back(Err(stream_eof_error("stream ended before finish event")));
+                    }
+                    state.finished = true;
+                }
             }
         }
     }))
@@ -211,7 +231,7 @@ struct SseParser {
 }
 
 impl SseParser {
-    fn push(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, LlmError> {
+    fn push(&mut self, chunk: &[u8]) -> Vec<Result<SseEvent, LlmError>> {
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
 
@@ -219,12 +239,21 @@ impl SseParser {
             let event = self.buffer[..event_end].to_vec();
             self.buffer.drain(..event_end + delimiter_len);
 
-            if let Some(event) = parse_sse_event(event)? {
-                events.push(event);
+            match parse_sse_event(event) {
+                Ok(Some(event)) => events.push(Ok(event)),
+                Ok(None) => {}
+                Err(error) => {
+                    events.push(Err(error));
+                    break;
+                }
             }
         }
 
-        Ok(events)
+        events
+    }
+
+    fn has_pending(&self) -> bool {
+        !self.buffer.is_empty()
     }
 }
 
@@ -277,6 +306,10 @@ fn parse_sse_event(event: Vec<u8>) -> Result<Option<SseEvent>, LlmError> {
     }
 
     Ok(Some(SseEvent::Data(data)))
+}
+
+fn stream_eof_error(message: &'static str) -> LlmError {
+    LlmError::stream(io::Error::new(io::ErrorKind::UnexpectedEof, message))
 }
 
 fn stream_events_from_sse_data(data: &str) -> Result<Vec<ChatStreamEvent>, LlmError> {
