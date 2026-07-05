@@ -82,14 +82,10 @@ impl LlmError {
 /// Error payload returned by a provider with a non-success status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderStatusError {
-    /// HTTP status code returned by the provider.
-    pub status: u16,
-    /// Provider-specific error code when available.
-    pub code: Option<String>,
-    /// Safe, bounded provider error message.
-    pub message: String,
-    /// Provider request id when available.
-    pub request_id: Option<String>,
+    status: u16,
+    code: Option<String>,
+    message: String,
+    request_id: Option<String>,
 }
 
 impl ProviderStatusError {
@@ -107,6 +103,30 @@ impl ProviderStatusError {
             message: bound_message(message.into()),
             request_id,
         }
+    }
+
+    /// Returns the HTTP status code returned by the provider.
+    #[must_use]
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    /// Returns the provider-specific error code when available.
+    #[must_use]
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    /// Returns the safe, bounded provider error message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the provider request id when available.
+    #[must_use]
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
     }
 }
 
@@ -140,16 +160,28 @@ mod tests {
     #[test]
     fn api_key_debug_is_redacted() {
         let key = ApiKey::new("sk-secret");
+        let debug = format!("{key:?}");
 
-        assert_eq!(format!("{key:?}"), "ApiKey(\"[redacted]\")");
+        assert_eq!(debug, "ApiKey(\"[redacted]\")");
+        assert!(!debug.contains("sk-secret"));
         assert_eq!(key.as_str(), "sk-secret");
     }
 
     #[test]
     fn provider_message_is_bounded() {
-        let error = ProviderStatusError::new(429, None, "x".repeat(300), Some("req-1".to_owned()));
+        let error = ProviderStatusError::new(
+            429,
+            Some("rate_limit".to_owned()),
+            "x".repeat(300),
+            Some("req-1".to_owned()),
+        );
+        let multibyte = ProviderStatusError::new(500, None, "你".repeat(100), None);
 
-        assert!(error.message.len() <= 160);
-        assert_eq!(error.request_id.as_deref(), Some("req-1"));
+        assert_eq!(error.status(), 429);
+        assert_eq!(error.code(), Some("rate_limit"));
+        assert!(error.message().len() <= 160);
+        assert_eq!(error.request_id(), Some("req-1"));
+        assert!(multibyte.message().len() <= 160);
+        assert!(multibyte.message().chars().all(|ch| ch == '你'));
     }
 }
