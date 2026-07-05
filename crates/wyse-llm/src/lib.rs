@@ -3,8 +3,6 @@
 pub mod definition;
 pub mod error;
 pub mod message;
-mod mock;
-mod protocol;
 pub mod structured_output;
 pub mod tool_call;
 
