@@ -69,10 +69,6 @@ impl LlmError {
         Self::Transport(Box::new(source))
     }
 
-    #[expect(
-        dead_code,
-        reason = "provider backends use this constructor when streaming calls are added"
-    )]
     pub(crate) fn stream(source: impl Error + Send + Sync + 'static) -> Self {
         Self::Stream(Box::new(source))
     }

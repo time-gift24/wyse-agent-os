@@ -6,10 +6,12 @@ use std::{
     time::Duration,
 };
 
+use futures_util::StreamExt;
 use serde_json::{Value, json};
-use wyse_core::ModelId;
+use wyse_core::{CallId, ModelId};
 use wyse_llm::{
-    ApiKey, ChatMessage, ChatRequest, FinishReason, LlmError, LlmProvider, OpenAICompatibleProvider,
+    ApiKey, ChatMessage, ChatRequest, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
+    OpenAICompatibleProvider, ToolCallDelta,
 };
 
 #[tokio::test]
@@ -109,7 +111,262 @@ async fn chat_maps_provider_status_error_payload() {
 }
 
 #[tokio::test]
-async fn chat_stream_reports_unsupported_until_streaming_provider_lands() {
+async fn chat_stream_posts_streaming_chat_completion_request() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(
+            ChatRequest::new(ModelId::from("gpt-configured"))
+                .with_message(ChatMessage::user("say hello")),
+        )
+        .await
+        .expect("stream should open");
+    let event = stream
+        .next()
+        .await
+        .expect("stream should emit finish")
+        .expect("finish should map");
+    let request = server.request();
+    let body: Value = serde_json::from_slice(&request.body).expect("request body should be json");
+
+    assert_eq!(
+        event,
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None
+        }
+    );
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/chat/completions");
+    assert_eq!(
+        request.headers.get("authorization").map(String::as_str),
+        Some("Bearer sk-test")
+    );
+    assert_eq!(body["model"], "gpt-configured");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][0]["content"], "say hello");
+}
+
+#[tokio::test]
+async fn chat_stream_maps_text_delta_and_finished_event() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
+         data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream.next().await.expect("text event").expect("text maps"),
+        ChatStreamEvent::TextDelta {
+            delta: "hel".to_owned()
+        }
+    );
+    assert_eq!(
+        stream.next().await.expect("text event").expect("text maps"),
+        ChatStreamEvent::TextDelta {
+            delta: "lo".to_owned()
+        }
+    );
+    assert_eq!(
+        stream
+            .next()
+            .await
+            .expect("finish event")
+            .expect("finish maps"),
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: Some(wyse_core::TokenUsage {
+                input_tokens: 2,
+                output_tokens: 3,
+                total_tokens: 5,
+            })
+        }
+    );
+}
+
+#[tokio::test]
+async fn chat_stream_maps_tool_call_delta() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\"}}]}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\":\\\"Paris\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream.next().await.expect("tool event").expect("tool maps"),
+        ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+            index: 0,
+            call_id: Some(CallId::from("call-1")),
+            name: Some("get_weather".to_owned()),
+            arguments_delta: "{\"city".to_owned(),
+        })
+    );
+    assert_eq!(
+        stream.next().await.expect("tool event").expect("tool maps"),
+        ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+            index: 0,
+            call_id: None,
+            name: None,
+            arguments_delta: "\":\"Paris\"}".to_owned(),
+        })
+    );
+    assert_eq!(
+        stream
+            .next()
+            .await
+            .expect("finish event")
+            .expect("finish maps"),
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::ToolCalls,
+            usage: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn chat_stream_recovers_sse_events_split_across_tcp_chunks() {
+    let server = TestServer::spawn(TestResponse::stream_parts(vec![
+        ": keepalive\r\n",
+        "\r\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"he",
+        "llo\"}}]}\r\n\r\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\r",
+        "\n\r\n",
+    ]));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream.next().await.expect("text event").expect("text maps"),
+        ChatStreamEvent::TextDelta {
+            delta: "hello".to_owned()
+        }
+    );
+    assert_eq!(
+        stream
+            .next()
+            .await
+            .expect("finish event")
+            .expect("finish maps"),
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn chat_stream_done_emits_unknown_finish_when_no_finish_reason_arrived() {
+    let server = TestServer::spawn(TestResponse::stream("data: [DONE]\n\n"));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream
+            .next()
+            .await
+            .expect("finish event")
+            .expect("done should map"),
+        ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Unknown,
+            usage: None
+        }
+    );
+}
+
+#[tokio::test]
+async fn chat_stream_joins_multiple_data_lines_in_one_sse_event() {
+    let server = TestServer::spawn(TestResponse::stream(
+        "data: {\"choices\":[\n\
+         data: {\"delta\":{\"content\":\"hello\"}}]}\n\n\
+         data: [DONE]\n\n",
+    ));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+
+    assert_eq!(
+        stream.next().await.expect("text event").expect("text maps"),
+        ChatStreamEvent::TextDelta {
+            delta: "hello".to_owned()
+        }
+    );
+}
+
+#[tokio::test]
+async fn chat_stream_maps_invalid_json_event_to_stream_error() {
+    let server = TestServer::spawn(TestResponse::stream("data: {not-json}\n\n"));
+    let provider = OpenAICompatibleProvider::new(
+        server.base_url("v1"),
+        ApiKey::new("sk-test"),
+        ModelId::from("gpt-configured"),
+    );
+
+    let mut stream = provider
+        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("stream should open");
+    let error = stream
+        .next()
+        .await
+        .expect("error event")
+        .expect_err("invalid json should fail");
+
+    assert!(matches!(error, LlmError::Stream(_)));
+}
+
+#[tokio::test]
+async fn chat_stream_rejects_request_model_that_differs_from_provider_model() {
     let provider = OpenAICompatibleProvider::new(
         "http://127.0.0.1:9/v1",
         ApiKey::new("sk-test"),
@@ -117,12 +374,15 @@ async fn chat_stream_reports_unsupported_until_streaming_provider_lands() {
     );
 
     let result = provider
-        .chat_stream(ChatRequest::new(ModelId::from("ignored")))
+        .chat_stream(ChatRequest::new(ModelId::from("other-model")))
         .await;
+    let Err(error) = result else {
+        panic!("model mismatch should fail before transport");
+    };
 
     assert!(matches!(
-        result,
-        Err(LlmError::UnsupportedCapability("streaming"))
+        error,
+        LlmError::InvalidRequest("request model does not match provider model")
     ));
 }
 
@@ -203,7 +463,7 @@ impl TestServer {
 struct TestResponse {
     status: u16,
     headers: Vec<(&'static str, &'static str)>,
-    body: String,
+    body_parts: Vec<String>,
 }
 
 impl TestResponse {
@@ -215,7 +475,7 @@ impl TestResponse {
         Self {
             status,
             headers: Vec::new(),
-            body: body.into(),
+            body_parts: vec![body.into()],
         }
     }
 
@@ -223,7 +483,23 @@ impl TestResponse {
         Self {
             status,
             headers,
-            body: body.to_string(),
+            body_parts: vec![body.to_string()],
+        }
+    }
+
+    fn stream(body: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            headers: vec![("content-type", "text/event-stream")],
+            body_parts: vec![body.into()],
+        }
+    }
+
+    fn stream_parts(parts: Vec<&'static str>) -> Self {
+        Self {
+            status: 200,
+            headers: vec![("content-type", "text/event-stream")],
+            body_parts: parts.into_iter().map(str::to_owned).collect(),
         }
     }
 }
@@ -289,16 +565,20 @@ fn write_response(stream: &mut impl Write, response: TestResponse) {
         429 => "Too Many Requests",
         _ => "Error",
     };
+    let content_length = response.body_parts.iter().map(String::len).sum::<usize>();
     write!(
         stream,
         "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n",
-        response.status,
-        reason,
-        response.body.len()
+        response.status, reason, content_length
     )
     .expect("response headers should write");
     for (name, value) in response.headers {
         write!(stream, "{name}: {value}\r\n").expect("response header should write");
     }
-    write!(stream, "\r\n{}", response.body).expect("response body should write");
+    write!(stream, "\r\n").expect("response header terminator should write");
+    for part in response.body_parts {
+        write!(stream, "{part}").expect("response body should write");
+        stream.flush().expect("response body should flush");
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }

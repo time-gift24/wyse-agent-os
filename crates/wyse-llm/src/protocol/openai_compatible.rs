@@ -1,4 +1,8 @@
 //! OpenAI-compatible protocol implementation.
+use std::{collections::VecDeque, pin::Pin};
+
+use futures_core::Stream;
+use futures_util::{StreamExt, stream};
 use reqwest::{
     Url,
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
@@ -8,8 +12,8 @@ use wyse_core::{CallId, ModelId, TokenUsage, ToolId};
 
 use crate::{
     ApiKey, ChatContent, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream,
-    FinishReason, LlmError, LlmProvider, ProviderStatusError, StructuredOutput, ToolCall,
-    ToolChoice, ToolSpec,
+    ChatStreamEvent, FinishReason, LlmError, LlmProvider, ProviderStatusError, StructuredOutput,
+    ToolCall, ToolCallDelta, ToolChoice, ToolSpec,
 };
 
 /// OpenAI-compatible chat completions provider.
@@ -91,9 +95,242 @@ impl LlmProvider for OpenAICompatibleProvider {
         chat_response_from_value(value, &request.tools)
     }
 
-    async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
-        Err(LlmError::UnsupportedCapability("streaming"))
+    async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError> {
+        if request.model != self.model {
+            return Err(LlmError::InvalidRequest(
+                "request model does not match provider model",
+            ));
+        }
+
+        let payload = to_chat_payload(&request, true)?;
+        let response = self
+            .client
+            .post(self.chat_completions_url()?)
+            .headers(self.headers()?)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(LlmError::transport)?;
+        let status = response.status();
+        let request_id = request_id(response.headers());
+
+        if !status.is_success() {
+            let body = response.bytes().await.map_err(LlmError::transport)?;
+            let value = serde_json::from_slice(&body).map_err(LlmError::ProviderPayloadDecode)?;
+            return Err(LlmError::ProviderStatus(provider_status_error(
+                status.as_u16(),
+                value,
+                request_id,
+                &self.api_key,
+            )));
+        }
+
+        Ok(openai_chat_stream(response.bytes_stream()))
     }
+}
+
+fn openai_chat_stream<S>(chunks: S) -> ChatStream
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    struct State<S> {
+        chunks: Pin<Box<S>>,
+        parser: SseParser,
+        pending: VecDeque<ChatStreamEvent>,
+        finished: bool,
+    }
+
+    let state = State {
+        chunks: Box::pin(chunks),
+        parser: SseParser::default(),
+        pending: VecDeque::new(),
+        finished: false,
+    };
+
+    Box::pin(stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(event) = state.pending.pop_front() {
+                return Some((Ok(event), state));
+            }
+
+            if state.finished {
+                return None;
+            }
+
+            match state.chunks.as_mut().next().await {
+                Some(Ok(chunk)) => match state.parser.push(&chunk) {
+                    Ok(events) => {
+                        for event in events {
+                            match event {
+                                SseEvent::Data(data) => {
+                                    let mapped = match stream_events_from_sse_data(&data) {
+                                        Ok(mapped) => mapped,
+                                        Err(error) => {
+                                            state.finished = true;
+                                            return Some((Err(error), state));
+                                        }
+                                    };
+                                    for mapped_event in mapped {
+                                        if matches!(mapped_event, ChatStreamEvent::Finished { .. })
+                                        {
+                                            state.finished = true;
+                                        }
+                                        state.pending.push_back(mapped_event);
+                                    }
+                                }
+                                SseEvent::Done => {
+                                    if !state.finished {
+                                        state.pending.push_back(ChatStreamEvent::Finished {
+                                            finish_reason: FinishReason::Unknown,
+                                            usage: None,
+                                        });
+                                    }
+                                    state.finished = true;
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        state.finished = true;
+                        return Some((Err(error), state));
+                    }
+                },
+                Some(Err(source)) => {
+                    state.finished = true;
+                    return Some((Err(LlmError::stream(source)), state));
+                }
+                None => return None,
+            }
+        }
+    }))
+}
+
+#[derive(Debug, Default)]
+struct SseParser {
+    buffer: Vec<u8>,
+}
+
+impl SseParser {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, LlmError> {
+        self.buffer.extend_from_slice(chunk);
+        let mut events = Vec::new();
+
+        while let Some((event_end, delimiter_len)) = event_delimiter(&self.buffer) {
+            let event = self.buffer[..event_end].to_vec();
+            self.buffer.drain(..event_end + delimiter_len);
+
+            if let Some(event) = parse_sse_event(event)? {
+                events.push(event);
+            }
+        }
+
+        Ok(events)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SseEvent {
+    Data(String),
+    Done,
+}
+
+fn event_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|position| (position, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| (position, 4));
+
+    match (lf, crlf) {
+        (Some(lf), Some(crlf)) => Some(lf.min(crlf)),
+        (Some(lf), None) => Some(lf),
+        (None, Some(crlf)) => Some(crlf),
+        (None, None) => None,
+    }
+}
+
+fn parse_sse_event(event: Vec<u8>) -> Result<Option<SseEvent>, LlmError> {
+    let text = String::from_utf8(event).map_err(LlmError::stream)?;
+    let mut data_lines = Vec::new();
+
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+
+        if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.strip_prefix(' ').unwrap_or(data).to_owned());
+        }
+    }
+
+    if data_lines.is_empty() {
+        return Ok(None);
+    }
+
+    let data = data_lines.join("\n");
+    if data == "[DONE]" {
+        return Ok(Some(SseEvent::Done));
+    }
+
+    Ok(Some(SseEvent::Data(data)))
+}
+
+fn stream_events_from_sse_data(data: &str) -> Result<Vec<ChatStreamEvent>, LlmError> {
+    let value = serde_json::from_str::<Value>(data).map_err(LlmError::stream)?;
+    let choice = value["choices"]
+        .as_array()
+        .and_then(|choices| choices.first())
+        .ok_or(LlmError::InvalidProviderPayload("missing choice"))?;
+    let mut events = Vec::new();
+
+    if let Some(delta) = choice["delta"]["content"].as_str()
+        && !delta.is_empty()
+    {
+        events.push(ChatStreamEvent::TextDelta {
+            delta: delta.to_owned(),
+        });
+    }
+
+    if let Some(tool_calls) = choice["delta"]["tool_calls"].as_array() {
+        for call in tool_calls {
+            events.push(ChatStreamEvent::ToolCallDelta(tool_call_delta_from_value(
+                call,
+            )?));
+        }
+    }
+
+    if let Some(reason) = choice["finish_reason"].as_str() {
+        events.push(ChatStreamEvent::Finished {
+            finish_reason: finish_reason(Some(reason)),
+            usage: usage_from_value(value.get("usage")),
+        });
+    }
+
+    Ok(events)
+}
+
+fn tool_call_delta_from_value(value: &Value) -> Result<ToolCallDelta, LlmError> {
+    let index = value["index"]
+        .as_u64()
+        .and_then(|index| usize::try_from(index).ok())
+        .ok_or(LlmError::InvalidProviderPayload("invalid tool call index"))?;
+    let call_id = value["id"].as_str().map(CallId::from);
+    let name = value["function"]["name"].as_str().map(str::to_owned);
+    let arguments_delta = value["function"]["arguments"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    Ok(ToolCallDelta {
+        index,
+        call_id,
+        name,
+        arguments_delta,
+    })
 }
 
 pub(crate) fn to_chat_payload(request: &ChatRequest, stream: bool) -> Result<Value, LlmError> {
