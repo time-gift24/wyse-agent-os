@@ -1,0 +1,116 @@
+name: Rust
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Rust workspace
+        id: workspace
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No root Cargo.toml found; skipping Rust checks."
+          fi
+
+      - name: Install Rust
+        if: steps.workspace.outputs.present == 'true'
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Check formatting
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run unit tests
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo test --workspace --all-targets
+
+  image:
+    name: image (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: check
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: wyse-api
+            bin: wyse-api
+            image: wyse-api
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Rust workspace
+        id: workspace
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No root Cargo.toml found; skipping image build."
+          fi
+
+      - name: Install Rust
+        if: steps.workspace.outputs.present == 'true'
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Detect image target
+        id: target
+        if: steps.workspace.outputs.present == 'true'
+        run: |
+          if cargo metadata --no-deps --format-version 1 \
+            | jq -e --arg package "${{ matrix.package }}" --arg bin "${{ matrix.bin }}" \
+              '.packages[]
+                | select(.name == $package)
+                | .targets[]
+                | select(.name == $bin)
+                | select(.kind | index("bin"))' >/dev/null
+          then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No ${{ matrix.package }}/${{ matrix.bin }} binary found; skipping image build."
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.target.outputs.present == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        if: steps.target.outputs.present == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.rust
+          push: false
+          tags: ${{ matrix.image }}:ci
+          build-args: |
+            PACKAGE=${{ matrix.package }}
+            BIN=${{ matrix.bin }}
+          cache-from: type=gha,scope=rust-${{ matrix.package }}-${{ matrix.bin }}
+          cache-to: type=gha,mode=max,scope=rust-${{ matrix.package }}-${{ matrix.bin }}

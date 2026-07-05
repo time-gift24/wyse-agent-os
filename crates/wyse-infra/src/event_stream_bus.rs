@@ -1,0 +1,228 @@
+//! Distributed runtime event stream bus.
+
+use std::{error::Error, future::Future, pin::Pin};
+
+use async_nats::{HeaderMap, jetstream};
+use bytes::Bytes;
+use futures_core::Stream;
+use futures_util::StreamExt;
+use thiserror::Error;
+use wyse_core::{RunId, StreamEnvelope};
+
+/// Stream of runtime event envelopes.
+pub type EventStream =
+    Pin<Box<dyn Stream<Item = Result<StreamEnvelope, EventStreamBusError>> + Send + 'static>>;
+
+/// Publishes and subscribes to runtime event streams.
+pub trait EventStreamBus: Send + Sync {
+    /// Publishes one complete stream envelope.
+    fn publish(
+        &self,
+        envelope: StreamEnvelope,
+    ) -> impl Future<Output = Result<(), EventStreamBusError>> + Send;
+
+    /// Subscribes to live events for one run.
+    fn subscribe_run(
+        &self,
+        run_id: RunId,
+    ) -> impl Future<Output = Result<EventStream, EventStreamBusError>> + Send;
+}
+
+/// Configuration for [`NatsEventStreamBus`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NatsEventStreamBusConfig {
+    /// NATS server URL.
+    pub url: String,
+    /// JetStream stream name.
+    pub stream_name: String,
+    /// Subject prefix before `<run_id>.<event_type>`.
+    pub subject_prefix: String,
+    /// Number of stream replicas.
+    pub replicas: usize,
+}
+
+impl Default for NatsEventStreamBusConfig {
+    fn default() -> Self {
+        Self {
+            url: "nats://localhost:4222".to_owned(),
+            stream_name: "WYSE_EVENTS".to_owned(),
+            subject_prefix: "wyse.events".to_owned(),
+            replicas: 1,
+        }
+    }
+}
+
+/// NATS JetStream implementation of [`EventStreamBus`].
+#[derive(Clone)]
+pub struct NatsEventStreamBus {
+    client: async_nats::Client,
+    jetstream: jetstream::Context,
+    config: NatsEventStreamBusConfig,
+}
+
+impl NatsEventStreamBus {
+    /// Connects to NATS and ensures the JetStream stream exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if NATS connection or stream creation fails.
+    pub async fn new(config: NatsEventStreamBusConfig) -> Result<Self, EventStreamBusError> {
+        let client = async_nats::connect(&config.url)
+            .await
+            .map_err(EventStreamBusError::nats)?;
+        let jetstream = jetstream::new(client.clone());
+
+        jetstream
+            .get_or_create_stream(jetstream::stream::Config {
+                name: config.stream_name.clone(),
+                subjects: vec![format!("{}.>", config.subject_prefix)],
+                storage: jetstream::stream::StorageType::File,
+                num_replicas: config.replicas,
+                ..Default::default()
+            })
+            .await
+            .map_err(EventStreamBusError::nats)?;
+
+        Ok(Self {
+            client,
+            jetstream,
+            config,
+        })
+    }
+
+    /// Returns the NATS subject for a published envelope.
+    #[must_use]
+    pub fn subject_for(&self, envelope: &StreamEnvelope) -> String {
+        subject_for(&self.config.subject_prefix, envelope)
+    }
+
+    /// Returns the NATS subject used to subscribe to a run.
+    #[must_use]
+    pub fn subscribe_subject(&self, run_id: RunId) -> String {
+        subscribe_subject(&self.config.subject_prefix, run_id)
+    }
+}
+
+impl EventStreamBus for NatsEventStreamBus {
+    async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        let subject = self.subject_for(&envelope);
+        let message_id = message_id(&envelope);
+        let payload = serde_json::to_vec(&envelope).map_err(EventStreamBusError::Serialize)?;
+        let mut headers = HeaderMap::new();
+        headers.append("Nats-Msg-Id", message_id);
+
+        self.jetstream
+            .publish_with_headers(subject, headers, Bytes::from(payload))
+            .await
+            .map_err(EventStreamBusError::nats)?
+            .await
+            .map_err(EventStreamBusError::nats)?;
+
+        Ok(())
+    }
+
+    async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError> {
+        let subject = self.subscribe_subject(run_id);
+        let subscription = self
+            .client
+            .subscribe(subject)
+            .await
+            .map_err(EventStreamBusError::nats)?;
+
+        Ok(Box::pin(subscription.map(|message| {
+            serde_json::from_slice::<StreamEnvelope>(&message.payload)
+                .map_err(EventStreamBusError::Deserialize)
+        })))
+    }
+}
+
+/// Error returned by event stream bus operations.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum EventStreamBusError {
+    /// Event envelope serialization failed.
+    #[error("failed to serialize stream envelope")]
+    Serialize(#[source] serde_json::Error),
+    /// Event envelope deserialization failed.
+    #[error("failed to deserialize stream envelope")]
+    Deserialize(#[source] serde_json::Error),
+    /// NATS operation failed.
+    #[error("nats operation failed")]
+    Nats {
+        /// Underlying NATS error.
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+}
+
+impl EventStreamBusError {
+    fn nats(source: impl Error + Send + Sync + 'static) -> Self {
+        Self::Nats {
+            source: Box::new(source),
+        }
+    }
+}
+
+fn subject_for(prefix: &str, envelope: &StreamEnvelope) -> String {
+    format!(
+        "{}.{}.{}",
+        prefix,
+        envelope.run_id,
+        envelope.event.event_type()
+    )
+}
+
+fn subscribe_subject(prefix: &str, run_id: RunId) -> String {
+    format!("{prefix}.{run_id}.>")
+}
+
+fn message_id(envelope: &StreamEnvelope) -> String {
+    format!("{}:{}", envelope.run_id, envelope.seq)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use chrono::Utc;
+    use wyse_core::{EventSource, RuntimeEvent};
+
+    use super::*;
+
+    fn envelope() -> StreamEnvelope {
+        StreamEnvelope {
+            run_id: RunId::new(),
+            seq: 42,
+            timestamp: Utc::now(),
+            source: EventSource::Run,
+            event: RuntimeEvent::RunStarted,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn subject_for_uses_run_id_and_event_type() {
+        let envelope = envelope();
+        let subject = subject_for("wyse.events", &envelope);
+
+        assert_eq!(
+            subject,
+            format!("wyse.events.{}.run_started", envelope.run_id)
+        );
+    }
+
+    #[test]
+    fn subscribe_subject_uses_run_wildcard() {
+        let run_id = RunId::new();
+        let subject = subscribe_subject("wyse.events", run_id);
+
+        assert_eq!(subject, format!("wyse.events.{run_id}.>"));
+    }
+
+    #[test]
+    fn message_id_uses_run_id_and_seq() {
+        let envelope = envelope();
+
+        assert_eq!(message_id(&envelope), format!("{}:42", envelope.run_id));
+    }
+}

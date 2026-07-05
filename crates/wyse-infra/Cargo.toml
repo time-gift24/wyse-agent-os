@@ -1,0 +1,22 @@
+[package]
+name = "wyse-infra"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-nats.workspace = true
+bytes.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+wyse-core.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

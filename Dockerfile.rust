@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+
+ARG RUST_VERSION=1
+
+FROM lukemathwalker/cargo-chef:latest-rust-${RUST_VERSION} AS chef
+WORKDIR /app
+
+FROM chef AS planner
+ARG PACKAGE
+ARG BIN
+COPY . .
+RUN test -n "$PACKAGE" \
+  && test -n "$BIN" \
+  && cargo chef prepare --recipe-path recipe.json --package "$PACKAGE" --bin "$BIN"
+
+FROM chef AS builder
+ARG PACKAGE
+ARG BIN
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json --package "$PACKAGE" --bin "$BIN"
+COPY . .
+RUN cargo build --release --package "$PACKAGE" --bin "$BIN"
+
+FROM debian:trixie-slim AS runtime
+ARG BIN
+WORKDIR /app
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/${BIN} /usr/local/bin/app
+ENTRYPOINT ["/usr/local/bin/app"]
