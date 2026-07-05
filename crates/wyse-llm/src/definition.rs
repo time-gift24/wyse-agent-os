@@ -1,28 +1,5 @@
 //! Public LLM provider definitions.
 
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-    use wyse_core::ModelId;
-
-    use crate::{ChatMessage, ChatRequest, StructuredOutput};
-
-    #[test]
-    fn chat_request_uses_model_id_and_messages() {
-        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini"))
-            .with_message(ChatMessage::user("hello"))
-            .with_structured_output(StructuredOutput::JsonSchema {
-                name: "answer".to_owned(),
-                schema: json!({"type": "object"}),
-                strict: true,
-            });
-
-        assert_eq!(request.model.as_str(), "gpt-4.1-mini");
-        assert_eq!(request.messages.len(), 1);
-        assert!(request.structured_output.is_some());
-    }
-}
-
 use std::{future::Future, pin::Pin};
 
 use futures_core::Stream;
@@ -143,4 +120,27 @@ pub enum FinishReason {
     ContentFilter,
     /// Provider returned an unmapped reason.
     Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use wyse_core::ModelId;
+
+    use crate::{ChatMessage, ChatRequest, StructuredOutput};
+
+    #[test]
+    fn chat_request_uses_model_id_and_messages() {
+        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini"))
+            .with_message(ChatMessage::user("hello"))
+            .with_structured_output(StructuredOutput::JsonSchema {
+                name: "answer".to_owned(),
+                schema: json!({"type": "object"}),
+                strict: true,
+            });
+
+        assert_eq!(request.model.as_str(), "gpt-4.1-mini");
+        assert_eq!(request.messages.len(), 1);
+        assert!(request.structured_output.is_some());
+    }
 }
