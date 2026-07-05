@@ -57,9 +57,11 @@
 | `node_output` | `node` | 普通 node 产生输出。 |
 | `node_finished` | `node` | node 执行完成。 |
 | `node_failed` | `node` | node 执行失败。 |
-| `message_started` | `agent` | runtime transcript message 开始；`role` 表达 `system`、`user`、`assistant`、`reasoning` 或 `tool`。 |
-| `text_delta` | `agent` | message 文本增量；通过 `message_id` 归属到对应 transcript message。 |
-| `message_finished` | `agent` | message 结束。 |
+| `llm_call_started` | `agent` | 一次 LLM 请求开始。 |
+| `llm_call_finished` | `agent` | 一次 LLM 请求完成。 |
+| `llm_call_failed` | `agent` | 一次 LLM 请求失败。 |
+| `text_delta` | `agent` | LLM call 普通文本增量；`role` 表达 `system`、`user`、`assistant` 或 `tool`。 |
+| `reasoning_delta` | `agent` | LLM call reasoning 增量。 |
 | `tool_call_started` | `node` / `agent` | tool call 开始。 |
 | `tool_call_delta` | `node` / `agent` | tool call 参数增量。 |
 | `tool_call_finished` | `node` / `agent` | tool call 完成。 |
@@ -89,8 +91,9 @@
 | --- | --- |
 | `source` 只表达归属 | 用来定位事件属于 run、node 还是 agent。 |
 | `event` 表达发生了什么 | 不用 `metadata`、`source` 或字符串状态重复表达事件类型。 |
-| user、assistant、reasoning、tool 输出共用 message 事件 | `message_started.role` 表达 transcript 角色，`text_delta.message_id` 归属文本增量。 |
-| tool 没有独立 source | `tool_call_*` 使用 `node` 或 `agent` source；`call_id`、`tool_id` 放在事件 data 中。 |
+| 一次 LLM 请求只用 `llm_call_id` 关联 | 不记录 `model_id`，不引入 `message_id`，文本顺序由 `seq` 决定。 |
+| user、assistant、tool 普通文本共用 `text_delta` | `text_delta.role` 表达文本归属；reasoning 使用独立 `reasoning_delta`。 |
+| tool 没有独立 source | `tool_call_*` 使用 `node` 或 `agent` source；`llm_call_id`、`call_id`、`tool_id` 放在事件 data 中。 |
 | agent 是特殊 node | 生命周期仍用 `node_started` / `node_finished` / `node_failed`；内部输出用 `agent` source。 |
 | 普通 node 输出用 `node_output` | 不新增 `task` 事件；需要用户可见计划时才用 `plan_updated`。 |
 
@@ -100,7 +103,7 @@
 | --- | --- |
 | 禁止放业务 payload | 业务数据必须进入类型化 event data。 |
 | 禁止放事件状态 | 状态必须由 event type 或类型化字段表达。 |
-| 禁止放 ID 主字段 | `run_id`、`node_id`、`agent_id`、`tool_id`、`call_id` 必须放在明确字段中。 |
+| 禁止放 ID 主字段 | `run_id`、`node_id`、`agent_id`、`llm_call_id`、`tool_id`、`call_id` 必须放在明确字段中。 |
 | 禁止放 secret | 不记录 token、凭据、密钥或原始敏感数据。 |
 | 禁止让前端依赖 metadata 渲染核心 UI | 前端核心渲染只能依赖 envelope、source 和 event data。 |
 
