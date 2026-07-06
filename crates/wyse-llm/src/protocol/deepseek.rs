@@ -144,6 +144,7 @@ where
         pending: VecDeque<Result<ChatStreamEvent, LlmError>>,
         finished: bool,
         terminal_seen: bool,
+        pending_finish_reason: Option<FinishReason>,
     }
 
     let state = State {
@@ -152,6 +153,7 @@ where
         pending: VecDeque::new(),
         finished: false,
         terminal_seen: false,
+        pending_finish_reason: None,
     };
 
     Box::pin(stream::unfold(state, |mut state| async move {
@@ -179,6 +181,30 @@ where
                                             mapped_event,
                                             ChatStreamEvent::Finished { .. }
                                         );
+                                        if let ChatStreamEvent::Finished {
+                                            finish_reason,
+                                            usage: None,
+                                        } = mapped_event
+                                        {
+                                            state.pending_finish_reason = Some(finish_reason);
+                                            continue;
+                                        }
+
+                                        let mapped_event = if let ChatStreamEvent::Finished {
+                                            finish_reason,
+                                            usage,
+                                        } = mapped_event
+                                        {
+                                            ChatStreamEvent::Finished {
+                                                finish_reason: state
+                                                    .pending_finish_reason
+                                                    .take()
+                                                    .unwrap_or(finish_reason),
+                                                usage,
+                                            }
+                                        } else {
+                                            mapped_event
+                                        };
                                         state.pending.push_back(Ok(mapped_event));
                                         if is_terminal {
                                             state.terminal_seen = true;
@@ -195,7 +221,10 @@ where
                             Ok(SseEvent::Done) => {
                                 if !state.terminal_seen {
                                     state.pending.push_back(Ok(ChatStreamEvent::Finished {
-                                        finish_reason: FinishReason::Unknown,
+                                        finish_reason: state
+                                            .pending_finish_reason
+                                            .take()
+                                            .unwrap_or(FinishReason::Unknown),
                                         usage: None,
                                     }));
                                     state.terminal_seen = true;
@@ -296,6 +325,9 @@ fn to_deepseek_chat_payload(
 
     let mut payload = to_chat_payload(request, stream)?;
     add_reasoning_content(&mut payload, request);
+    if stream {
+        payload["stream_options"] = json!({"include_usage": true});
+    }
 
     match thinking {
         DeepSeekThinking::Enabled { effort } => {
@@ -314,11 +346,24 @@ fn to_deepseek_chat_payload(
 
 fn stream_events_from_sse_data(data: &str) -> Result<Vec<ChatStreamEvent>, LlmError> {
     let value = serde_json::from_str::<Value>(data).map_err(LlmError::stream)?;
-    let choice = value["choices"]
+    let choices = value["choices"]
         .as_array()
-        .and_then(|choices| choices.first())
         .ok_or(LlmError::InvalidProviderPayload("missing choice"))?;
     let mut events = Vec::new();
+
+    if choices.is_empty() {
+        if let Some(usage) = usage_from_value(value.get("usage")) {
+            events.push(ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Unknown,
+                usage: Some(usage),
+            });
+        }
+        return Ok(events);
+    }
+
+    let choice = choices
+        .first()
+        .ok_or(LlmError::InvalidProviderPayload("missing choice"))?;
 
     if let Some(delta) = choice["delta"]["reasoning_content"].as_str()
         && !delta.is_empty()

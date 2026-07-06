@@ -80,7 +80,8 @@ async fn chat_stream_maps_reasoning_and_text_delta() {
     let server = TestServer::spawn(TestResponse::stream(
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n\
          data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n\
-         data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+         data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n\
+         data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
     ));
     let provider = DeepSeekProvider::new(
         server.base_url("v1"),
@@ -95,6 +96,8 @@ async fn chat_stream_maps_reasoning_and_text_delta() {
         .chat_stream(ChatRequest::new(DeepSeekModel::V4Pro.model_id()))
         .await
         .expect("stream should open");
+    let request = server.request();
+    let body: Value = serde_json::from_slice(&request.body).expect("request body should be json");
 
     assert_eq!(
         stream.next().await.expect("event").expect("reasoning maps"),
@@ -119,6 +122,8 @@ async fn chat_stream_maps_reasoning_and_text_delta() {
             })
         }
     );
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["stream_options"], json!({"include_usage": true}));
 }
 
 #[tokio::test]
