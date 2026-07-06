@@ -17,3 +17,7 @@
 - Do not add DeepSeek, zhipu, or other provider-specific forks until a real compatibility difference needs code.
 - Do not log prompts, completions, tool arguments, API keys, or raw provider payloads.
 - Tool schema validation belongs in `wyse-tools`, not here.
+- DeepSeek provider owns DeepSeek-specific request/response mapping, including `thinking`, `reasoning_effort`, and assistant `reasoning_content`.
+- Do not add a default DeepSeek base URL; callers must pass the endpoint explicitly.
+- Keep SSE framing in `protocol::sse`; provider modules should only map provider JSON into Wyse events.
+- Do not add DeepSeek pricing, concurrency, cache-hit usage, or old-model rejection code until a caller needs it.
