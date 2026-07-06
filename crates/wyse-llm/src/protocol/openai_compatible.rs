@@ -253,7 +253,7 @@ fn stream_events_from_sse_data(data: &str) -> Result<Vec<ChatStreamEvent>, LlmEr
     Ok(events)
 }
 
-fn tool_call_delta_from_value(value: &Value) -> Result<ToolCallDelta, LlmError> {
+pub(crate) fn tool_call_delta_from_value(value: &Value) -> Result<ToolCallDelta, LlmError> {
     let index = value["index"]
         .as_u64()
         .and_then(|index| usize::try_from(index).ok())

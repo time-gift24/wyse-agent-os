@@ -1,5 +1,9 @@
 //! DeepSeek protocol implementation.
 
+use std::{collections::VecDeque, pin::Pin};
+
+use futures_core::Stream;
+use futures_util::{StreamExt, stream};
 use reqwest::{
     Url,
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
@@ -8,12 +12,13 @@ use serde_json::{Value, json};
 use wyse_core::ModelId;
 
 use crate::{
-    ApiKey, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream, LlmError, LlmProvider,
-    StructuredOutput,
+    ApiKey, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamEvent,
+    FinishReason, LlmError, LlmProvider, StructuredOutput,
     protocol::openai_compatible::{
-        finish_reason, provider_status_error, request_id, to_chat_payload, tool_calls_from_message,
-        usage_from_value,
+        finish_reason, provider_status_error, request_id, to_chat_payload,
+        tool_call_delta_from_value, tool_calls_from_message, usage_from_value,
     },
+    protocol::sse::{SseEvent, SseParser, stream_eof_error},
 };
 
 /// DeepSeek chat completions provider.
@@ -68,7 +73,7 @@ impl LlmProvider for DeepSeekProvider {
             ));
         }
 
-        let payload = to_deepseek_chat_payload(&request, self.thinking)?;
+        let payload = to_deepseek_chat_payload(&request, self.thinking, false)?;
         let response = self
             .client
             .post(self.chat_completions_url()?)
@@ -102,8 +107,127 @@ impl LlmProvider for DeepSeekProvider {
             ));
         }
 
-        Err(LlmError::UnsupportedCapability("deepseek streaming chat"))
+        let payload = to_deepseek_chat_payload(&request, self.thinking, true)?;
+        let response = self
+            .client
+            .post(self.chat_completions_url()?)
+            .headers(self.headers()?)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(LlmError::transport)?;
+        let status = response.status();
+        let request_id = request_id(response.headers());
+
+        if !status.is_success() {
+            let body = response.bytes().await.map_err(LlmError::transport)?;
+            let value = serde_json::from_slice(&body).map_err(LlmError::ProviderPayloadDecode)?;
+            return Err(LlmError::ProviderStatus(provider_status_error(
+                status.as_u16(),
+                value,
+                request_id,
+                &self.api_key,
+            )));
+        }
+
+        Ok(deepseek_chat_stream(response.bytes_stream()))
     }
+}
+
+fn deepseek_chat_stream<S>(chunks: S) -> ChatStream
+where
+    S: Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+{
+    struct State<S> {
+        chunks: Pin<Box<S>>,
+        parser: SseParser,
+        pending: VecDeque<Result<ChatStreamEvent, LlmError>>,
+        finished: bool,
+        terminal_seen: bool,
+    }
+
+    let state = State {
+        chunks: Box::pin(chunks),
+        parser: SseParser::default(),
+        pending: VecDeque::new(),
+        finished: false,
+        terminal_seen: false,
+    };
+
+    Box::pin(stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(event) = state.pending.pop_front() {
+                return Some((event, state));
+            }
+
+            if state.finished {
+                return None;
+            }
+
+            match state.chunks.as_mut().next().await {
+                Some(Ok(chunk)) => {
+                    for event in state.parser.push(&chunk) {
+                        if state.finished {
+                            break;
+                        }
+
+                        match event {
+                            Ok(SseEvent::Data(data)) => match stream_events_from_sse_data(&data) {
+                                Ok(mapped) => {
+                                    for mapped_event in mapped {
+                                        let is_terminal = matches!(
+                                            mapped_event,
+                                            ChatStreamEvent::Finished { .. }
+                                        );
+                                        state.pending.push_back(Ok(mapped_event));
+                                        if is_terminal {
+                                            state.terminal_seen = true;
+                                            state.finished = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    state.pending.push_back(Err(error));
+                                    state.finished = true;
+                                }
+                            },
+                            Ok(SseEvent::Done) => {
+                                if !state.terminal_seen {
+                                    state.pending.push_back(Ok(ChatStreamEvent::Finished {
+                                        finish_reason: FinishReason::Unknown,
+                                        usage: None,
+                                    }));
+                                    state.terminal_seen = true;
+                                }
+                                state.finished = true;
+                            }
+                            Err(error) => {
+                                state.pending.push_back(Err(error));
+                                state.finished = true;
+                            }
+                        }
+                    }
+                }
+                Some(Err(source)) => {
+                    state.pending.push_back(Err(LlmError::stream(source)));
+                    state.finished = true;
+                }
+                None => {
+                    if state.parser.has_pending() {
+                        state.pending.push_back(Err(stream_eof_error(
+                            "stream ended with partial sse event",
+                        )));
+                    } else if !state.terminal_seen {
+                        state
+                            .pending
+                            .push_back(Err(stream_eof_error("stream ended before finish event")));
+                    }
+                    state.finished = true;
+                }
+            }
+        }
+    }))
 }
 
 /// DeepSeek chat model.
@@ -159,6 +283,7 @@ pub enum DeepSeekReasoningEffort {
 fn to_deepseek_chat_payload(
     request: &ChatRequest,
     thinking: DeepSeekThinking,
+    stream: bool,
 ) -> Result<Value, LlmError> {
     if matches!(
         &request.structured_output,
@@ -169,7 +294,7 @@ fn to_deepseek_chat_payload(
         ));
     }
 
-    let mut payload = to_chat_payload(request, false)?;
+    let mut payload = to_chat_payload(request, stream)?;
     add_reasoning_content(&mut payload, request);
 
     match thinking {
@@ -185,6 +310,48 @@ fn to_deepseek_chat_payload(
     }
 
     Ok(payload)
+}
+
+fn stream_events_from_sse_data(data: &str) -> Result<Vec<ChatStreamEvent>, LlmError> {
+    let value = serde_json::from_str::<Value>(data).map_err(LlmError::stream)?;
+    let choice = value["choices"]
+        .as_array()
+        .and_then(|choices| choices.first())
+        .ok_or(LlmError::InvalidProviderPayload("missing choice"))?;
+    let mut events = Vec::new();
+
+    if let Some(delta) = choice["delta"]["reasoning_content"].as_str()
+        && !delta.is_empty()
+    {
+        events.push(ChatStreamEvent::ReasoningDelta {
+            delta: delta.to_owned(),
+        });
+    }
+
+    if let Some(delta) = choice["delta"]["content"].as_str()
+        && !delta.is_empty()
+    {
+        events.push(ChatStreamEvent::TextDelta {
+            delta: delta.to_owned(),
+        });
+    }
+
+    if let Some(tool_calls) = choice["delta"]["tool_calls"].as_array() {
+        for call in tool_calls {
+            events.push(ChatStreamEvent::ToolCallDelta(tool_call_delta_from_value(
+                call,
+            )?));
+        }
+    }
+
+    if let Some(reason) = choice["finish_reason"].as_str() {
+        events.push(ChatStreamEvent::Finished {
+            finish_reason: finish_reason(Some(reason)),
+            usage: usage_from_value(value.get("usage")),
+        });
+    }
+
+    Ok(events)
 }
 
 fn deepseek_chat_response_from_value(value: Value) -> Result<ChatResponse, LlmError> {
