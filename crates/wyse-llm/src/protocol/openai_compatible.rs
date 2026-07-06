@@ -330,7 +330,7 @@ pub(crate) fn chat_response_from_value(value: Value) -> Result<ChatResponse, Llm
     })
 }
 
-fn request_id(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn request_id(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-request-id")
         .or_else(|| headers.get("request-id"))
@@ -338,7 +338,7 @@ fn request_id(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn provider_status_error(
+pub(crate) fn provider_status_error(
     status: u16,
     value: Value,
     request_id: Option<String>,
