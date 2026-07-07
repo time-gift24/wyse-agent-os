@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use wyse_llm::{
     ApiKey, ChatMessage, ChatRequest, ChatStreamEvent, DeepSeekModel, DeepSeekProvider,
@@ -46,6 +47,43 @@ async fn chat_posts_thinking_and_reasoning_content() {
     assert_eq!(body["thinking"], json!({"type": "enabled"}));
     assert_eq!(body["reasoning_effort"], "max");
     assert_eq!(body["messages"][1]["reasoning_content"], "why");
+}
+
+#[tokio::test]
+async fn builder_uses_injected_client() {
+    let server = TestServer::spawn(TestResponse::ok(json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "done"},
+            "finish_reason": "stop"
+        }]
+    })));
+    let mut headers = HeaderMap::new();
+    headers.insert("x-wyse-test-client", HeaderValue::from_static("injected"));
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("test client should build");
+    let provider = DeepSeekProvider::builder()
+        .base_url(server.base_url("v1"))
+        .api_key(ApiKey::new("sk-test"))
+        .model(DeepSeekModel::V4Pro)
+        .thinking(DeepSeekThinking::Disabled)
+        .client(client)
+        .build();
+
+    provider
+        .chat(ChatRequest::new(DeepSeekModel::V4Pro.model_id()))
+        .await
+        .expect("chat should succeed");
+    let request = server.request();
+
+    assert_eq!(
+        request
+            .headers
+            .get("x-wyse-test-client")
+            .map(String::as_str),
+        Some("injected")
+    );
 }
 
 #[tokio::test]

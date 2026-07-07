@@ -13,6 +13,7 @@ license = "MIT"
 
 [workspace.dependencies]
 async-nats = "0.49.1"
+bon = "3.9"
 bytes = "1.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 futures-core = "0.3.32"

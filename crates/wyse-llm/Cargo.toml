@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bon.workspace = true
 bytes.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true

@@ -1,6 +1,7 @@
 //! OpenAI-compatible protocol implementation.
 use std::{collections::VecDeque, pin::Pin};
 
+use bon::Builder;
 use futures_core::Stream;
 use futures_util::{StreamExt, stream};
 use reqwest::{
@@ -18,9 +19,11 @@ use crate::{
 };
 
 /// OpenAI-compatible chat completions provider.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Builder)]
 pub struct OpenAICompatibleProvider {
+    #[builder(default = reqwest::Client::new())]
     client: reqwest::Client,
+    #[builder(into)]
     base_url: String,
     api_key: ApiKey,
     model: ModelId,

@@ -1,4 +1,5 @@
 use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 use wyse_core::{CallId, ModelId};
 use wyse_llm::{
@@ -48,6 +49,42 @@ async fn chat_posts_chat_completion_and_maps_response() {
     assert_eq!(body["stream"], false);
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][0]["content"], "say hello");
+}
+
+#[tokio::test]
+async fn builder_uses_injected_client() {
+    let server = TestServer::spawn(TestResponse::ok(json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "hello"},
+            "finish_reason": "stop"
+        }]
+    })));
+    let mut headers = HeaderMap::new();
+    headers.insert("x-wyse-test-client", HeaderValue::from_static("injected"));
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("test client should build");
+    let provider = OpenAICompatibleProvider::builder()
+        .base_url(server.base_url("v1"))
+        .api_key(ApiKey::new("sk-test"))
+        .model(ModelId::from("gpt-configured"))
+        .client(client)
+        .build();
+
+    provider
+        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
+        .await
+        .expect("chat should succeed");
+    let request = server.request();
+
+    assert_eq!(
+        request
+            .headers
+            .get("x-wyse-test-client")
+            .map(String::as_str),
+        Some("injected")
+    );
 }
 
 #[tokio::test]
