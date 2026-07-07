@@ -1,6 +1,6 @@
 //! Event stream bus public definitions.
 
-use std::{future::Future, pin::Pin};
+use std::pin::Pin;
 
 use futures_core::Stream;
 use wyse_core::{RunId, StreamEnvelope};
@@ -12,18 +12,14 @@ pub type EventStream =
     Pin<Box<dyn Stream<Item = Result<StreamEnvelope, EventStreamBusError>> + Send + 'static>>;
 
 /// Publishes and subscribes to runtime event streams.
+// Native async trait methods are intentional for this crate's bus API.
+#[allow(async_fn_in_trait)]
 pub trait EventStreamBus: Send + Sync {
     /// Publishes one complete stream envelope.
-    fn publish(
-        &self,
-        envelope: StreamEnvelope,
-    ) -> impl Future<Output = Result<(), EventStreamBusError>> + Send;
+    async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError>;
 
     /// Subscribes to live events for one run.
-    fn subscribe_run(
-        &self,
-        run_id: RunId,
-    ) -> impl Future<Output = Result<EventStream, EventStreamBusError>> + Send;
+    async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError>;
 }
 
 /// Configuration for the NATS event stream bus.

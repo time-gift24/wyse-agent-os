@@ -1,6 +1,6 @@
 //! Public LLM provider definitions.
 
-use std::{future::Future, pin::Pin};
+use std::pin::Pin;
 
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
@@ -13,18 +13,14 @@ pub type ChatStream =
     Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, LlmError>> + Send + 'static>>;
 
 /// Provider capable of chat completion requests.
+// Native async trait methods are intentional for this crate's provider API.
+#[allow(async_fn_in_trait)]
 pub trait LlmProvider: Send + Sync {
     /// Sends a non-streaming chat request.
-    fn chat(
-        &self,
-        request: ChatRequest,
-    ) -> impl Future<Output = Result<ChatResponse, LlmError>> + Send;
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
 
     /// Sends a streaming chat request.
-    fn chat_stream(
-        &self,
-        request: ChatRequest,
-    ) -> impl Future<Output = Result<ChatStream, LlmError>> + Send;
+    async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError>;
 }
 
 /// Request for a chat completion.
