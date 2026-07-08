@@ -56,11 +56,11 @@ impl EchoTool {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            spec: ToolSpec::new(
-                ToolName::from("echo"),
-                "returns input arguments",
-                json!({"type": "object"}),
-            ),
+            spec: ToolSpec::builder()
+                .name("echo")
+                .description("returns input arguments")
+                .input_schema(json!({"type": "object"}))
+                .build(),
         }
     }
 }

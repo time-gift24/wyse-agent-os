@@ -494,7 +494,7 @@ fn required_str<'a>(value: &'a Value, message: &'static str) -> Result<&'a str, 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wyse_core::{CallId, ModelId, ToolName};
+    use wyse_core::{CallId, ModelId};
 
     use super::*;
     use crate::{
@@ -508,11 +508,13 @@ mod tests {
             .with_message(ChatMessage::system("be brief"))
             .with_message(ChatMessage::user("answer"));
         let request = ChatRequest {
-            tools: vec![ToolSpec::new(
-                ToolName::from("weather"),
-                "get weather",
-                json!({"type": "object"}),
-            )],
+            tools: vec![
+                ToolSpec::builder()
+                    .name("weather")
+                    .description("get weather")
+                    .input_schema(json!({"type": "object"}))
+                    .build(),
+            ],
             structured_output: Some(StructuredOutput::JsonSchema {
                 name: "answer".to_owned(),
                 schema: json!({"type": "object"}),

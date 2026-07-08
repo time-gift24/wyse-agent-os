@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
+use bon::Builder;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -140,27 +141,17 @@ pub struct TokenUsage {
 }
 
 /// Tool definition exposed to an LLM provider.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
 #[non_exhaustive]
 pub struct ToolSpec {
     /// Provider-visible tool name.
+    #[builder(into)]
     pub name: ToolName,
     /// Provider-visible tool description.
+    #[builder(into)]
     pub description: String,
     /// JSON schema for tool input.
     pub input_schema: Value,
-}
-
-impl ToolSpec {
-    /// Creates a provider-visible tool specification.
-    #[must_use]
-    pub fn new(name: ToolName, description: impl Into<String>, input_schema: Value) -> Self {
-        Self {
-            name,
-            description: description.into(),
-            input_schema,
-        }
-    }
 }
 
 /// Role of one normal text delta in an LLM call.
@@ -358,11 +349,11 @@ mod tests {
 
     #[test]
     fn tool_spec_serializes_provider_visible_shape() {
-        let spec = ToolSpec {
-            name: ToolName::from("echo"),
-            description: "returns input arguments".to_owned(),
-            input_schema: serde_json::json!({"type": "object"}),
-        };
+        let spec = ToolSpec::builder()
+            .name("echo")
+            .description("returns input arguments")
+            .input_schema(serde_json::json!({"type": "object"}))
+            .build();
 
         assert_eq!(
             serde_json::to_value(spec).expect("tool spec should serialize"),

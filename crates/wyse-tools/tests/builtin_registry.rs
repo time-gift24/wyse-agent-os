@@ -22,11 +22,13 @@ async fn registered_echo_tool_can_be_called_through_registry() {
     assert_eq!(output.result, json!({"message": "hello"}));
     assert_eq!(
         registry.specs(),
-        vec![ToolSpec::new(
-            ToolName::from("echo"),
-            "returns input arguments",
-            json!({"type": "object"})
-        )]
+        vec![
+            ToolSpec::builder()
+                .name("echo")
+                .description("returns input arguments")
+                .input_schema(json!({"type": "object"}))
+                .build()
+        ]
     );
 }
 
