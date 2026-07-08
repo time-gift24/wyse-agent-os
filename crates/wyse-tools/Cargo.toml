@@ -11,6 +11,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 wyse-core.workspace = true
+wyse-filesystem = { path = "../wyse-filesystem" }
 
 [dev-dependencies]
 tokio.workspace = true
