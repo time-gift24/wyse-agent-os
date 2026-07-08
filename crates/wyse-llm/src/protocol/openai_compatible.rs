@@ -387,12 +387,20 @@ fn message_to_value(message: &ChatMessage) -> Result<Value, LlmError> {
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
         ChatRole::Tool => "tool",
-        _ => unreachable!("unsupported chat role"),
+        _ => {
+            return Err(LlmError::UnsupportedCapability(
+                "unsupported chat role for openai-compatible provider",
+            ));
+        }
     };
     let content = match &message.content {
         ChatContent::Text(text) => Value::String(text.clone()),
         ChatContent::Json(value) => value.clone(),
-        _ => unreachable!("unsupported chat content"),
+        _ => {
+            return Err(LlmError::UnsupportedCapability(
+                "unsupported chat content for openai-compatible provider",
+            ));
+        }
     };
 
     let mut value = json!({"role": role, "content": content});
