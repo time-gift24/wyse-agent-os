@@ -4,17 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wyse_core::CallId;
 
-/// Tool definition exposed to an LLM provider.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolSpec {
-    /// Provider-visible tool name.
-    pub name: String,
-    /// Provider-visible tool description.
-    pub description: String,
-    /// JSON schema for tool input.
-    pub input_schema: Value,
-}
-
 /// Complete tool call emitted by a model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {

@@ -19,4 +19,5 @@ pub use protocol::deepseek::{
 };
 pub use protocol::openai_compatible::OpenAICompatibleProvider;
 pub use structured_output::StructuredOutput;
-pub use tool_call::{ToolCall, ToolCallDelta, ToolSpec};
+pub use tool_call::{ToolCall, ToolCallDelta};
+pub use wyse_core::ToolSpec;

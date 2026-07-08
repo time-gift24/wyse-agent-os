@@ -3,6 +3,7 @@ members = [
     "crates/wyse-core",
     "crates/wyse-infra",
     "crates/wyse-llm",
+    "crates/wyse-tools",
 ]
 resolver = "3"
 
@@ -13,6 +14,7 @@ license = "MIT"
 
 [workspace.dependencies]
 async-nats = "0.49.1"
+async-trait = "0.1.89"
 bon = "3.9"
 bytes = "1.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }

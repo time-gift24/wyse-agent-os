@@ -147,6 +147,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 
 ## Git 工作流
 
+- 开始实现前务必使用 `using-git-worktrees` 创建新的独立工作目录；不要在当前 checkout 里直接切分支或改动。
 - 禁止直接在 `main` 分支 commit。
 - 需要提交时先创建或切换到非 `main` 分支，默认分支名使用 `codex/` 前缀。
 
