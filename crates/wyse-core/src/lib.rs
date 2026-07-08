@@ -59,6 +59,57 @@ impl FromStr for RunId {
     }
 }
 
+/// Identity of an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentId(Uuid);
+
+impl AgentId {
+    /// Creates a new UUIDv7 agent id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Returns the inner UUID.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for AgentId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AgentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Uuid> for AgentId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl From<AgentId> for Uuid {
+    fn from(value: AgentId) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for AgentId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse::<Uuid>().map(Self)
+    }
+}
+
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -101,7 +152,6 @@ macro_rules! string_id {
 }
 
 string_id!(NodeId, "Identity of a workflow node.");
-string_id!(AgentId, "Identity of an agent.");
 string_id!(ModelId, "Identity of a model.");
 string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
@@ -138,6 +188,125 @@ pub struct TokenUsage {
     pub output_tokens: u64,
     /// Total tokens reported by the provider.
     pub total_tokens: u64,
+}
+
+/// Complete tool call emitted by a model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Provider call identity.
+    pub call_id: CallId,
+    /// Provider-visible tool name.
+    pub name: String,
+    /// Parsed tool arguments.
+    pub arguments: Value,
+}
+
+/// Incremental tool call update from a stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallDelta {
+    /// Position of the tool call in the response.
+    pub index: usize,
+    /// Provider call identity when known.
+    pub call_id: Option<CallId>,
+    /// Provider-visible tool name when known.
+    pub name: Option<String>,
+    /// Raw argument text fragment.
+    pub arguments_delta: String,
+}
+
+/// Role of a chat message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ChatRole {
+    /// System instruction message.
+    System,
+    /// End-user message.
+    User,
+    /// Assistant response message.
+    Assistant,
+    /// Tool result message.
+    Tool,
+}
+
+/// Content carried by a chat message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ChatContent {
+    /// Plain text content.
+    Text(String),
+    /// JSON content.
+    Json(Value),
+}
+
+/// Message exchanged with an LLM provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// Message role.
+    pub role: ChatRole,
+    /// Message content.
+    pub content: ChatContent,
+    /// Tool calls requested by an assistant message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Reasoning content produced by an assistant message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    /// Tool call this tool message answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<CallId>,
+}
+
+impl ChatMessage {
+    /// Creates a system text message.
+    #[must_use]
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::text(ChatRole::System, content)
+    }
+
+    /// Creates a user text message.
+    #[must_use]
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::text(ChatRole::User, content)
+    }
+
+    /// Creates an assistant text message.
+    #[must_use]
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::text(ChatRole::Assistant, content)
+    }
+
+    /// Creates a tool result message.
+    #[must_use]
+    pub fn tool(call_id: impl Into<CallId>, result: Value) -> Self {
+        Self {
+            role: ChatRole::Tool,
+            content: ChatContent::Json(result),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            tool_call_id: Some(call_id.into()),
+        }
+    }
+
+    /// Creates a text message for a role.
+    #[must_use]
+    pub fn text(role: ChatRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: ChatContent::Text(content.into()),
+            tool_calls: Vec::new(),
+            reasoning_content: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Sets assistant reasoning content.
+    #[must_use]
+    pub fn with_reasoning_content(mut self, content: impl Into<String>) -> Self {
+        self.reasoning_content = Some(content.into());
+        self
+    }
 }
 
 /// Tool definition exposed to an LLM provider.
@@ -232,6 +401,36 @@ pub enum LlmEvent {
     },
 }
 
+/// Event emitted by an agent runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AgentEvent {
+    /// Agent run started.
+    Started,
+    /// Agent run finished.
+    Finished {
+        /// Why the run finished.
+        finish_reason: String,
+        /// Token usage accumulated by the run.
+        usage: TokenUsage,
+    },
+    /// Agent run failed.
+    Failed {
+        /// Error text safe to expose to callers.
+        error_text: String,
+    },
+    /// Agent run was cancelled.
+    Cancelled,
+    /// Event emitted by one LLM call inside the agent run.
+    Llm {
+        /// LLM call identity.
+        llm_call_id: LlmCallId,
+        /// LLM event payload.
+        event: LlmEvent,
+    },
+}
+
 /// Runtime event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
@@ -274,6 +473,13 @@ pub enum RuntimeEvent {
         /// LLM event payload.
         event: LlmEvent,
     },
+    /// Event emitted by one agent.
+    Agent {
+        /// Agent identity.
+        agent_id: AgentId,
+        /// Agent event payload.
+        event: AgentEvent,
+    },
     /// Agent-visible plan changed.
     PlanUpdated {
         /// Plan identity.
@@ -297,6 +503,7 @@ impl RuntimeEvent {
             Self::NodeFinished => "node_finished",
             Self::NodeFailed { .. } => "node_failed",
             Self::Llm { .. } => "llm",
+            Self::Agent { .. } => "agent",
             Self::PlanUpdated { .. } => "plan_updated",
         }
     }
@@ -332,6 +539,13 @@ mod tests {
     }
 
     #[test]
+    fn agent_id_new_uses_uuid_v7() {
+        let id = AgentId::new();
+
+        assert_eq!(id.as_uuid().get_version_num(), 7);
+    }
+
+    #[test]
     fn model_id_round_trips_string() {
         let model_id = ModelId::from("gpt-4.1-mini");
 
@@ -345,6 +559,28 @@ mod tests {
 
         assert_eq!(tool_name.as_str(), "echo");
         assert_eq!(tool_name.to_string(), "echo");
+    }
+
+    #[test]
+    fn chat_message_user_constructor_sets_role_and_text() {
+        let message = ChatMessage::user("hello");
+
+        assert_eq!(message.role, ChatRole::User);
+        assert_eq!(message.content, ChatContent::Text("hello".to_owned()));
+        assert!(message.tool_calls.is_empty());
+        assert!(message.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn tool_message_records_answered_call_id() {
+        let message = ChatMessage::tool(CallId::from("call-1"), serde_json::json!({"ok": true}));
+
+        assert_eq!(message.role, ChatRole::Tool);
+        assert_eq!(message.tool_call_id, Some(CallId::from("call-1")));
+        assert_eq!(
+            message.content,
+            ChatContent::Json(serde_json::json!({"ok": true}))
+        );
     }
 
     #[test]
@@ -384,6 +620,16 @@ mod tests {
         };
 
         assert_eq!(event.event_type(), "llm");
+    }
+
+    #[test]
+    fn runtime_agent_event_type_is_agent() {
+        let event = RuntimeEvent::Agent {
+            agent_id: AgentId::new(),
+            event: AgentEvent::Started,
+        };
+
+        assert_eq!(event.event_type(), "agent");
     }
 
     #[test]
