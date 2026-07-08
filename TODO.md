@@ -4,12 +4,16 @@
 
 - [ ] `wyse-core`
   - 核心 ID：`RunId`、`AgentId`、`ToolId`、`ModelId`
+  - 将 `AgentId` 收敛为 UUID-backed newtype
+  - 上提 chat message 类型：`ChatMessage`、`ChatRole`、`ChatContent`
+  - 增加 agent event payload，内部复用 LLM event
   - 共享 error/result 类型
   - 通用 value model 和 JSON schema helpers
 
 - [ ] `wyse-infra`
   - 内部 event bus
   - runtime event 和 trace primitives
+  - in-memory `EventStreamBus`，供 agent 测试和本地嵌入使用
   - clock/time provider
   - ID generator
   - cancellation token helpers
@@ -20,6 +24,7 @@
 
 - [ ] `wyse-llm`
   - 统一 chat、completion、streaming、embedding、rerank 抽象
+  - `LlmProvider::provider_name()`，供 agent event metadata 组合 `provider:model`
   - 优先实现 OpenAI-compatible provider
   - 测试用 mock provider
   - tool-call normalization
@@ -45,7 +50,12 @@
 
 - [ ] `wyse-agent`
   - agent runtime loop
-  - 优先实现 function-calling agent strategy
+  - 优先实现 streaming function-calling agent loop
+  - 提供有状态 `Agent` 和内部无状态 loop
+  - 通过 `wyse-infra::EventStreamBus` 发布 agent/LLM/tool 事件
+  - 第一版 tool calls 只顺序执行
+  - 后续再实现 parallel tool execution
+  - 后续再实现 compression
   - 后续实现 ReAct strategy
   - 通过 `wyse-tools` 编排 tool-use
   - 通过 `wyse-llm` 访问模型
@@ -101,7 +111,7 @@
 4. [ ] 实现 `wyse-llm`，包含 mock provider 和 OpenAI-compatible provider
 5. [ ] 实现 `wyse-tools`，包含 local tools
 6. [ ] 实现 `wyse-mcp` client，包含 stdio tool adapter
-7. [ ] 实现 `wyse-agent` function-calling loop
+7. [ ] 实现 `wyse-agent` streaming function-calling loop
 8. [ ] 实现 `wyse-workflow` in-memory DAG runtime
 9. [ ] 实现 `wyse-store` SQLite persistence
 10. [ ] 实现 `wyse-api` REST + SSE
