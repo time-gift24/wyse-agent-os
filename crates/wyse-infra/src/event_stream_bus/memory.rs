@@ -39,7 +39,7 @@ impl InMemoryEventStreamBus {
 
         runs.entry(run_id)
             .or_insert_with(|| {
-                let (sender, _) = broadcast::channel(self.capacity.max(1));
+                let (sender, _) = broadcast::channel(self.capacity);
                 sender
             })
             .clone()
@@ -63,9 +63,7 @@ impl EventStreamBus for InMemoryEventStreamBus {
 
     /// Subscribes to live events for one run.
     ///
-    /// # Errors
-    ///
-    /// Returns an error only if the underlying stream construction fails.
+    /// This in-memory implementation is infallible and currently always returns `Ok`.
     async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError> {
         let receiver = self.sender(run_id).subscribe();
 
