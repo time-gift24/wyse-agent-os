@@ -2,6 +2,7 @@
 
 use std::pin::Pin;
 
+use async_trait::async_trait;
 use futures_core::Stream;
 use wyse_core::{RunId, StreamEnvelope};
 
@@ -12,8 +13,7 @@ pub type EventStream =
     Pin<Box<dyn Stream<Item = Result<StreamEnvelope, EventStreamBusError>> + Send + 'static>>;
 
 /// Publishes and subscribes to runtime event streams.
-// Native async trait methods are intentional for this crate's bus API.
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait EventStreamBus: Send + Sync {
     /// Publishes one complete stream envelope.
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError>;

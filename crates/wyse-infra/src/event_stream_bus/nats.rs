@@ -1,6 +1,7 @@
 //! NATS JetStream event stream bus implementation.
 
 use async_nats::{HeaderMap, jetstream};
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use wyse_core::{RunId, StreamEnvelope};
@@ -48,6 +49,7 @@ impl NatsEventStreamBus {
     }
 }
 
+#[async_trait]
 impl EventStreamBus for NatsEventStreamBus {
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
         let subject = self.subject_for(&envelope);

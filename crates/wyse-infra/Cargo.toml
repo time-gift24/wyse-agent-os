@@ -7,16 +7,17 @@ license.workspace = true
 
 [dependencies]
 async-nats.workspace = true
+async-trait.workspace = true
 bytes.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 wyse-core.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

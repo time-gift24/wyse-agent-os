@@ -2049,6 +2049,7 @@ name = "wyse-infra"
 version = "0.1.0"
 dependencies = [
  "async-nats",
+ "async-trait",
  "bytes",
  "chrono",
  "futures-core",
