@@ -39,23 +39,6 @@ pub struct AgentStream {
     pub events: EventStream,
     /// Cancellation handle for this run.
     pub cancel: CancellationToken,
-    _active_guard: ActiveRunGuard,
-}
-
-struct ActiveRunGuard {
-    active: Arc<AtomicBool>,
-}
-
-impl ActiveRunGuard {
-    fn new(active: Arc<AtomicBool>) -> Self {
-        Self { active }
-    }
-}
-
-impl Drop for ActiveRunGuard {
-    fn drop(&mut self) {
-        self.active.store(false, Ordering::SeqCst);
-    }
 }
 
 /// Stateful agent that owns conversation history.
@@ -103,13 +86,42 @@ impl Agent {
             }
         };
         let cancel = CancellationToken::new();
-        let active_guard = ActiveRunGuard::new(self.active.clone());
+        let mut history = self
+            .history
+            .lock()
+            .expect("agent history mutex should not be poisoned")
+            .clone();
+        history.push(message);
+
+        let loop_input = crate::r#loop::AgentLoopInput {
+            run_id,
+            agent_id: self.id,
+            agent_name: self.name.clone(),
+            system_prompt: self.system_prompt.clone(),
+            history,
+            llm_provider: Arc::clone(&self.llm_provider),
+            model: self.model.clone(),
+            tool_registry: Arc::clone(&self.tool_registry),
+            event_bus: Arc::clone(&self.event_bus),
+            config: self.config.clone(),
+            cancel: cancel.clone(),
+        };
+        let history = Arc::clone(&self.history);
+        let active = Arc::clone(&self.active);
+
+        tokio::spawn(async move {
+            if let Ok(new_history) = crate::r#loop::run_agent_loop(loop_input).await {
+                *history
+                    .lock()
+                    .expect("agent history mutex should not be poisoned") = new_history;
+            }
+            active.store(false, Ordering::SeqCst);
+        });
 
         Ok(AgentStream {
             run_id,
             events,
             cancel,
-            _active_guard: active_guard,
         })
     }
 }
@@ -221,14 +233,22 @@ impl AgentBuilder {
 mod tests {
     use std::sync::{Arc, atomic::Ordering};
 
+    use async_trait::async_trait;
+    use futures_util::{StreamExt, stream};
+    use tokio::{
+        sync::watch,
+        time::{Duration, timeout},
+    };
     use wyse_core::{ChatMessage, ModelId, RunId};
     use wyse_infra::event_stream_bus::{
         EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
     };
-    use wyse_llm::MockLlmProvider;
+    use wyse_llm::{
+        ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError,
+        LlmProvider, MockLlmProvider,
+    };
     use wyse_tools::BuiltinToolRegistry;
 
-    use async_trait::async_trait;
     use serde_json;
 
     use super::*;
@@ -297,17 +317,94 @@ mod tests {
         assert!(!agent.active.load(Ordering::SeqCst));
     }
 
+    struct BlockingStreamProvider {
+        release: watch::Receiver<bool>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingStreamProvider {
+        fn provider_name(&self) -> &str {
+            "blocking"
+        }
+
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+            Err(LlmError::UnsupportedCapability("chat"))
+        }
+
+        async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            let release = self.release.clone();
+
+            Ok(Box::pin(stream::unfold(
+                Some(release),
+                |release| async move {
+                    let mut release = release?;
+                    while !*release.borrow() {
+                        if release.changed().await.is_err() {
+                            return None;
+                        }
+                    }
+                    Some((
+                        Ok(ChatStreamEvent::Finished {
+                            finish_reason: FinishReason::Stop,
+                            usage: None,
+                        }),
+                        None,
+                    ))
+                },
+            )))
+        }
+    }
+
     #[tokio::test]
-    async fn stream_keeps_active_until_drop() {
-        let agent = test_agent();
-        let stream = agent
+    async fn stream_rejects_second_run_while_background_loop_is_active() {
+        let (release, release_rx) = watch::channel(false);
+        let agent = Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(Arc::new(BlockingStreamProvider {
+                release: release_rx,
+            }))
+            .model(ModelId::from("mock-model"))
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .build()
+            .expect("agent should build");
+
+        let mut stream = agent
             .stream(ChatMessage::user("hello"))
             .await
             .expect("stream should start");
 
         assert!(agent.active.load(Ordering::SeqCst));
+        let error = match agent.stream(ChatMessage::user("again")).await {
+            Ok(_) => panic!("second run should be rejected while loop is active"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, AgentError::RunAlreadyActive));
 
-        drop(stream);
-        assert!(!agent.active.load(Ordering::SeqCst));
+        release.send(true).expect("release signal should send");
+        timeout(Duration::from_secs(1), async {
+            while let Some(envelope) = stream.events.next().await {
+                let envelope = envelope.expect("event should be delivered");
+                if matches!(
+                    envelope.event,
+                    wyse_core::RuntimeEvent::Agent {
+                        event: wyse_core::AgentEvent::Finished { .. },
+                        ..
+                    }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("background loop should finish");
+        timeout(Duration::from_secs(1), async {
+            while agent.active.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active flag should clear after loop completion");
     }
 }
