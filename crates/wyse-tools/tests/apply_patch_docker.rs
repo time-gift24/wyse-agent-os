@@ -8,12 +8,14 @@ use wyse_tools::{ApplyPatchTool, Tool, ToolInput};
 #[ignore = "crate integration test"]
 #[tokio::test]
 async fn apply_patch_tool_edits_local_sandbox_with_test_stack_running() {
-    let root = std::env::temp_dir().join(format!(
-        "wyse-tools-docker-apply-patch-{}",
-        std::process::id()
-    ));
-    let _ = tokio::fs::remove_dir_all(&root).await;
-    tokio::fs::create_dir_all(&root).await.expect("create root");
+    let root = std::env::var_os("WYSE_TOOLS_DOCKER_SANDBOX")
+        .map(std::path::PathBuf::from)
+        .expect("WYSE_TOOLS_DOCKER_SANDBOX must point at the compose-mounted sandbox");
+    assert!(
+        root.join(".container-ready").is_file(),
+        "compose service must write the readiness marker"
+    );
+    let _ = tokio::fs::remove_file(root.join("docker.txt")).await;
     let filesystem = Arc::new(
         LocalFilesystem::new(LocalFilesystemConfig {
             root: root.clone(),
@@ -74,5 +76,5 @@ async fn apply_patch_tool_edits_local_sandbox_with_test_stack_running() {
         .expect_err("invalid path should be a tool error");
     assert!(failed.to_string().contains("invalid path"));
 
-    let _ = tokio::fs::remove_dir_all(root).await;
+    let _ = tokio::fs::remove_file(root.join("docker.txt")).await;
 }
