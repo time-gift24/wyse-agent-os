@@ -217,6 +217,9 @@ impl Filesystem for LocalFilesystem {
     }
 
     async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if path.as_str() == "/" {
+            return Err(FilesystemError::DirectoryNotEmpty { path: path.clone() });
+        }
         let host = self.ensure_existing_inside_root(path).await?;
         fs::remove_dir(&host)
             .await
@@ -376,6 +379,35 @@ mod tests {
             error,
             crate::FilesystemError::AlreadyExists { .. }
         ));
+
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn remove_dir_rejects_root_path() {
+        let temp = std::env::temp_dir().join(format!("wyse-fs-root-remove-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(&temp)
+            .await
+            .expect("create temp root");
+
+        let fs = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let root = VirtualPath::try_from("/").expect("root path is valid");
+
+        let error = fs.remove_dir(&root).await.expect_err("root is protected");
+        assert!(matches!(
+            error,
+            crate::FilesystemError::DirectoryNotEmpty { .. }
+        ));
+        assert!(
+            tokio::fs::try_exists(&temp)
+                .await
+                .expect("check root still exists")
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
