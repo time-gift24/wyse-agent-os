@@ -149,3 +149,15 @@ jobs:
       - name: Stop wyse-infra test stack
         if: always() && steps.workspace.outputs.present == 'true'
         run: docker compose -f crates/wyse-infra/docker-compose.test.yml down -v
+
+      - name: Start wyse-tools test stack
+        if: steps.workspace.outputs.present == 'true'
+        run: docker compose -f crates/wyse-tools/docker-compose.test.yml up -d
+
+      - name: Run wyse-tools integration tests
+        if: steps.workspace.outputs.present == 'true'
+        run: cargo test -p wyse-tools --test apply_patch_docker -- --ignored --nocapture
+
+      - name: Stop wyse-tools test stack
+        if: always() && steps.workspace.outputs.present == 'true'
+        run: docker compose -f crates/wyse-tools/docker-compose.test.yml down -v

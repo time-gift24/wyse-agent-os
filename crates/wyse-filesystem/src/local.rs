@@ -2,6 +2,7 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
+use async_trait::async_trait;
 use tokio::fs;
 
 use crate::{
@@ -125,6 +126,7 @@ impl LocalFilesystem {
     }
 }
 
+#[async_trait]
 impl Filesystem for LocalFilesystem {
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let host = self.ensure_existing_inside_root(path).await?;

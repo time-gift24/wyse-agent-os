@@ -1,10 +1,14 @@
 //! Public filesystem trait and metadata types.
 
+use async_trait::async_trait;
+
 use crate::{FilesystemError, VirtualPath};
 
 /// Agent-visible filesystem operations.
-/// Native async trait methods are intentional for this crate's IO boundary.
-#[allow(async_fn_in_trait)]
+///
+/// This trait is object-safe so runtime tools can receive explicit filesystem
+/// dependencies without knowing the backend type.
+#[async_trait]
 pub trait Filesystem: Send + Sync {
     /// Reads a complete file into memory.
     ///

@@ -1,0 +1,11 @@
+name: wyse-tools-test
+
+services:
+  filesystem-sandbox:
+    image: alpine:3.20
+    command: ["sh", "-c", "mkdir -p /workspace && tail -f /dev/null"]
+    volumes:
+      - wyse-tools-sandbox:/workspace
+
+volumes:
+  wyse-tools-sandbox:

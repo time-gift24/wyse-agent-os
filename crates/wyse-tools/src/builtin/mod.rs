@@ -1,5 +1,7 @@
 //! Builtin tool implementations.
 
+mod apply_patch;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -7,6 +9,8 @@ use serde_json::json;
 use wyse_core::{ToolName, ToolSpec};
 
 use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolRegistry};
+
+pub use apply_patch::ApplyPatchTool;
 
 /// Registry backed by builtin in-memory tools.
 #[derive(Default)]
