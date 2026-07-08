@@ -50,12 +50,7 @@ impl fmt::Display for VirtualPath {
 pub struct VirtualPathError;
 
 fn validate(value: &str) -> Result<(), VirtualPathError> {
-    if value.is_empty()
-        || !value.starts_with('/')
-        || value.contains('\\')
-        || value.contains('\0')
-        || looks_like_windows_drive(value)
-    {
+    if value.is_empty() || !value.starts_with('/') || value.contains('\\') || value.contains('\0') {
         return Err(VirtualPathError);
     }
 
@@ -70,11 +65,6 @@ fn validate(value: &str) -> Result<(), VirtualPathError> {
     }
 
     Ok(())
-}
-
-fn looks_like_windows_drive(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
 }
 
 #[cfg(test)]

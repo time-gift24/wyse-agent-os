@@ -2,7 +2,6 @@
 
 use std::{ffi::OsString, path::PathBuf};
 
-use bytes::Bytes;
 use tokio::fs;
 
 use crate::{
@@ -127,7 +126,7 @@ impl LocalFilesystem {
 }
 
 impl Filesystem for LocalFilesystem {
-    async fn read_file(&self, path: &VirtualPath) -> Result<Bytes, FilesystemError> {
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let host = self.ensure_existing_inside_root(path).await?;
         let metadata = fs::metadata(&host)
             .await
@@ -139,10 +138,14 @@ impl Filesystem for LocalFilesystem {
         let content = fs::read(&host)
             .await
             .map_err(|source| FilesystemError::local_io("read", path.clone(), source))?;
-        Ok(Bytes::from(content))
+        Ok(content)
     }
 
-    async fn write_file(&self, path: &VirtualPath, contents: Bytes) -> Result<(), FilesystemError> {
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
         let len = u64::try_from(contents.len())
             .map_err(|_| FilesystemError::ContentTooLarge { path: path.clone() })?;
         self.check_len(path, len)?;
@@ -176,21 +179,10 @@ impl Filesystem for LocalFilesystem {
                 FilesystemError::local_io("entry_file_type", child_path.clone(), source)
             })?;
             let file_type = file_type_from_file_type(&entry_file_type);
-            let entry_metadata = if file_type.is_file() {
-                Some(entry.metadata().await.map_err(|source| {
-                    FilesystemError::local_io("entry_metadata", child_path.clone(), source)
-                })?)
-            } else {
-                None
-            };
             entries.push(DirEntry {
                 path: child_path,
                 file_name,
                 file_type,
-                metadata: Some(FileMetadata {
-                    file_type,
-                    len: entry_metadata.map(|metadata| metadata.len()),
-                }),
             });
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
@@ -202,7 +194,7 @@ impl Filesystem for LocalFilesystem {
         let metadata = fs::symlink_metadata(&host)
             .await
             .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
-        let file_type = file_type_from_metadata(&metadata);
+        let file_type = file_type_from_file_type(&metadata.file_type());
         Ok(FileMetadata {
             file_type,
             len: metadata.is_file().then_some(metadata.len()),
@@ -277,14 +269,8 @@ fn file_type_from_file_type(file_type: &std::fs::FileType) -> FileType {
     }
 }
 
-fn file_type_from_metadata(metadata: &std::fs::Metadata) -> FileType {
-    file_type_from_file_type(&metadata.file_type())
-}
-
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
     use crate::{Filesystem, VirtualPath};
 
@@ -306,12 +292,12 @@ mod tests {
         let file = VirtualPath::try_from("/src/lib.rs").expect("path is valid");
 
         fs.create_dir(&dir).await.expect("create dir");
-        fs.write_file(&file, Bytes::from_static(b"pub fn ok() {}\n"))
+        fs.write_file(&file, b"pub fn ok() {}\n".to_vec())
             .await
             .expect("write file");
 
         let content = fs.read_file(&file).await.expect("read file");
-        assert_eq!(content, Bytes::from_static(b"pub fn ok() {}\n"));
+        assert_eq!(content, b"pub fn ok() {}\n");
 
         let entries = fs.list_dir(&dir).await.expect("list dir");
         assert_eq!(entries.len(), 1);
@@ -609,13 +595,6 @@ mod tests {
             .find(|entry| entry.path == link)
             .expect("symlink entry exists");
         assert_eq!(link_entry.file_type, FileType::Symlink);
-        assert_eq!(
-            link_entry
-                .metadata
-                .expect("symlink metadata is present")
-                .file_type,
-            FileType::Symlink
-        );
 
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
@@ -646,7 +625,7 @@ mod tests {
         let link = VirtualPath::try_from("/link.txt").expect("path is valid");
 
         let error = fs
-            .write_file(&link, Bytes::from_static(b"owned"))
+            .write_file(&link, b"owned".to_vec())
             .await
             .expect_err("symlink escape is rejected");
         assert!(matches!(
@@ -686,7 +665,7 @@ mod tests {
         let link = VirtualPath::try_from("/link.txt").expect("path is valid");
 
         let error = fs
-            .write_file(&link, Bytes::from_static(b"owned"))
+            .write_file(&link, b"owned".to_vec())
             .await
             .expect_err("dangling symlink escape is rejected");
         assert!(matches!(

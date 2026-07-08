@@ -1,7 +1,5 @@
 //! Public filesystem trait and metadata types.
 
-use bytes::Bytes;
-
 use crate::{FilesystemError, VirtualPath};
 
 /// Agent-visible filesystem operations.
@@ -13,14 +11,18 @@ pub trait Filesystem: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the path is missing, not a file, too large, or the backend fails.
-    async fn read_file(&self, path: &VirtualPath) -> Result<Bytes, FilesystemError>;
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError>;
 
     /// Writes complete file contents.
     ///
     /// # Errors
     ///
     /// Returns an error when the path escapes the backend, cannot be written, or exceeds limits.
-    async fn write_file(&self, path: &VirtualPath, contents: Bytes) -> Result<(), FilesystemError>;
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError>;
 
     /// Lists one directory.
     ///
@@ -78,8 +80,6 @@ pub struct DirEntry {
     pub file_name: String,
     /// Entry type.
     pub file_type: FileType,
-    /// Entry metadata when available.
-    pub metadata: Option<FileMetadata>,
 }
 
 /// Type of one filesystem path.
@@ -94,30 +94,4 @@ pub enum FileType {
     Symlink,
     /// Other platform-specific file type.
     Other,
-}
-
-impl FileType {
-    /// Returns whether this type is a regular file.
-    #[must_use]
-    pub const fn is_file(self) -> bool {
-        matches!(self, Self::File)
-    }
-
-    /// Returns whether this type is a directory.
-    #[must_use]
-    pub const fn is_dir(self) -> bool {
-        matches!(self, Self::Directory)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_type_helpers_match_variants() {
-        assert!(FileType::File.is_file());
-        assert!(FileType::Directory.is_dir());
-        assert!(!FileType::Symlink.is_file());
-    }
 }
