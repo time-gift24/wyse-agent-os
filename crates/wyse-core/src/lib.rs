@@ -59,6 +59,57 @@ impl FromStr for RunId {
     }
 }
 
+/// Identity of one resumable turn inside a workflow run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TurnId(Uuid);
+
+impl TurnId {
+    /// Creates a new UUIDv7 turn id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Returns the inner UUID.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for TurnId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for TurnId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Uuid> for TurnId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl From<TurnId> for Uuid {
+    fn from(value: TurnId) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for TurnId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse::<Uuid>().map(Self)
+    }
+}
+
 /// Identity of an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -543,6 +594,21 @@ mod tests {
         let version = RunId::new().as_uuid().get_version_num();
 
         assert_eq!(version, 7);
+    }
+
+    #[test]
+    fn turn_id_new_uses_uuid_v7() {
+        let id = TurnId::new();
+
+        assert_eq!(id.as_uuid().get_version_num(), 7);
+    }
+
+    #[test]
+    fn turn_id_round_trips_string() {
+        let id = TurnId::new();
+        let parsed = id.to_string().parse::<TurnId>().expect("turn id parses");
+
+        assert_eq!(parsed, id);
     }
 
     #[test]
