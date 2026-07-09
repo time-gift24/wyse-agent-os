@@ -501,7 +501,7 @@ async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit(
 }
 
 #[tokio::test]
-async fn resume_retries_llm_from_stable_checkpoint_history() {
+async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
     let agent_id = AgentId::new();
     let provider = Arc::new(RecordingProvider::new(vec![
         ProviderResponse::StreamResults(vec![
@@ -520,6 +520,7 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
             },
         ]),
     ]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
     let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let agent = Agent::builder()
         .id(agent_id)
@@ -527,13 +528,20 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
         .system_prompt("be helpful")
         .llm_provider(provider.clone())
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
-        .checkpoint_store(checkpoints)
+        .event_bus(bus.clone())
+        .checkpoint_store(checkpoints.clone())
         .build()
         .expect("agent should build");
 
-    let (failed_run_id, mut failed_events) =
-        run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+    let failed_run_id = agent
+        .run_turn(ChatMessage::user("hello"))
+        .await
+        .expect("run should start");
+    let failed_turn_id = agent.current_turn().expect("turn id should be set");
+    let mut failed_events = bus
+        .subscribe_run(failed_run_id)
+        .await
+        .expect("subscribe should succeed");
 
     let mut last_failed_seq = 0;
     timeout(Duration::from_secs(1), async {
@@ -554,17 +562,35 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
     .await
     .expect("timed out waiting for failed event");
 
-    let mut resumed = agent
-        .resume(
-            failed_run_id,
-            agent.current_turn().expect("turn id should be set"),
-        )
+    let resumed_agent = Agent::builder()
+        .id(agent_id)
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(bus.clone())
+        .checkpoint_store(checkpoints)
+        .resume(failed_run_id, failed_turn_id)
         .await
-        .expect("resume should start");
+        .expect("agent should resume");
+    let resumed_run_id = resumed_agent
+        .resume_turn()
+        .await
+        .expect("resume turn should start");
+    assert_eq!(resumed_run_id, failed_run_id);
+    let mut resumed_events = bus
+        .subscribe_run(resumed_run_id)
+        .await
+        .expect("subscribe should succeed");
 
+    let mut saw_resumed_event = false;
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = resumed.events.next().await {
+        while let Some(envelope) = resumed_events.next().await {
             let envelope = envelope.expect("event should be delivered");
+            if envelope.seq <= last_failed_seq {
+                continue;
+            }
+            saw_resumed_event = true;
             assert!(
                 envelope.seq > last_failed_seq,
                 "resumed stream seq should continue after failed attempt"
@@ -582,11 +608,18 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
     })
     .await
     .expect("timed out waiting for resumed finish");
+    assert!(
+        saw_resumed_event,
+        "resumed stream should publish new events"
+    );
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests[1].messages.iter().any(|message| {
         message.role == ChatRole::User && message.content == ChatContent::Text("hello".to_owned())
+    }));
+    assert!(!requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::User && message.content == ChatContent::Text("retry".to_owned())
     }));
     assert!(!requests[1].messages.iter().any(|message| {
         message.role == ChatRole::Assistant
@@ -617,17 +650,6 @@ async fn resume_rejects_checkpoint_from_different_agent() {
         .checkpoint_store(checkpoints.clone())
         .build()
         .expect("agent should build");
-    let second_agent = Agent::builder()
-        .id(resuming_agent)
-        .name("other-agent")
-        .system_prompt("be helpful")
-        .llm_provider(Arc::new(RecordingProvider::new(Vec::new())))
-        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
-        .checkpoint_store(checkpoints)
-        .build()
-        .expect("agent should build");
-
     let (failed_run_id, mut failed_events) =
         run_turn_and_subscribe(&first_agent, ChatMessage::user("hello")).await;
 
@@ -648,7 +670,14 @@ async fn resume_rejects_checkpoint_from_different_agent() {
     .await
     .expect("timed out waiting for failed event");
 
-    let error = match second_agent
+    let error = match Agent::builder()
+        .id(resuming_agent)
+        .name("other-agent")
+        .system_prompt("be helpful")
+        .llm_provider(Arc::new(RecordingProvider::new(Vec::new())))
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints)
         .resume(
             failed_run_id,
             first_agent.current_turn().expect("turn id should be set"),

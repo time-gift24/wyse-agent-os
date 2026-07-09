@@ -6,13 +6,13 @@ use std::sync::{
 };
 
 use tokio_util::sync::CancellationToken;
-use wyse_checkpoint::CheckpointStore;
-use wyse_core::{AgentId, ChatMessage, ChatRole, RunId, TurnId};
+use wyse_checkpoint::{CheckpointKind, CheckpointStatus, CheckpointStore};
+use wyse_core::{AgentId, ChatMessage, ChatRole, RunId, TokenUsage, TurnId};
 use wyse_infra::event_stream_bus::EventStreamBus;
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
 
-use crate::AgentError;
+use crate::{AgentError, checkpoint::AgentCheckpointState};
 
 /// Runtime tuning for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,8 @@ pub struct Agent {
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     config: AgentConfig,
     history: Arc<Mutex<Vec<ChatMessage>>>,
+    next_seq: Arc<Mutex<u64>>,
+    usage: Arc<Mutex<TokenUsage>>,
     active: Arc<AtomicBool>,
     current_run_id: Arc<Mutex<Option<RunId>>>,
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
@@ -156,6 +158,82 @@ impl Agent {
     pub fn event_bus(&self) -> Arc<dyn EventStreamBus> {
         Arc::clone(&self.event_bus)
     }
+
+    /// Resumes the current checkpointed turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another run is active or the agent was not restored
+    /// from a retryable checkpoint.
+    pub async fn resume_turn(&self) -> Result<RunId, AgentError> {
+        if self.active.swap(true, Ordering::SeqCst) {
+            return Err(AgentError::RunAlreadyActive);
+        }
+
+        let run_id = self
+            .current_run()
+            .ok_or(AgentError::CheckpointNotRetryable)?;
+        let turn_id = self
+            .current_turn()
+            .ok_or(AgentError::CheckpointNotRetryable)?;
+        let cancel = CancellationToken::new();
+        *self
+            .cancel
+            .lock()
+            .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
+        let history = self
+            .history
+            .lock()
+            .expect("agent history mutex should not be poisoned")
+            .clone();
+        let start_seq = *self
+            .next_seq
+            .lock()
+            .expect("next seq mutex should not be poisoned");
+
+        let loop_input = crate::r#loop::AgentLoopInput {
+            run_id,
+            agent_id: self.id,
+            agent_name: self.name.clone(),
+            system_prompt: self.system_prompt.clone(),
+            turn_id,
+            history,
+            llm_provider: Arc::clone(&self.llm_provider),
+            tool_registry: Arc::clone(&self.tool_registry),
+            event_bus: Arc::clone(&self.event_bus),
+            checkpoint_store: self.checkpoint_store.clone(),
+            config: self.config.clone(),
+            cancel,
+            start_seq,
+        };
+        let history = Arc::clone(&self.history);
+        let active = Arc::clone(&self.active);
+
+        tokio::spawn(async move {
+            if let Ok(new_history) = crate::r#loop::run_agent_loop(loop_input).await {
+                *history
+                    .lock()
+                    .expect("agent history mutex should not be poisoned") = new_history;
+            }
+            active.store(false, Ordering::SeqCst);
+        });
+
+        Ok(run_id)
+    }
+
+    fn set_next_seq(&mut self, seq: u64) {
+        *self
+            .next_seq
+            .lock()
+            .expect("next seq mutex should not be poisoned") = seq;
+    }
+
+    fn set_usage(&mut self, usage: TokenUsage) {
+        *self
+            .usage
+            .lock()
+            .expect("usage mutex should not be poisoned") = usage;
+    }
 }
 
 /// Builder for [`Agent`].
@@ -228,6 +306,68 @@ impl AgentBuilder {
         self
     }
 
+    /// Restores an [`Agent`] from a retryable checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required builder field is missing, checkpoint
+    /// loading fails, or the checkpoint cannot be resumed by this agent.
+    pub async fn resume(self, run_id: RunId, turn_id: TurnId) -> Result<Agent, AgentError> {
+        let checkpoint_store =
+            self.checkpoint_store
+                .clone()
+                .ok_or(AgentError::MissingBuilderField {
+                    field: "checkpoint_store",
+                })?;
+        let record = match checkpoint_store
+            .latest_turn(run_id, turn_id, CheckpointKind::Agent)
+            .await?
+        {
+            Some(record) if record.status == CheckpointStatus::WaitingRetry => record,
+            Some(_) | None => return Err(AgentError::CheckpointNotRetryable),
+        };
+        let checkpoint = AgentCheckpointState::decode(&record.state, record.state_version)?;
+        if let Some(expected) = self.id
+            && checkpoint.agent_id != expected
+        {
+            return Err(AgentError::CheckpointAgentMismatch {
+                expected,
+                actual: checkpoint.agent_id,
+            });
+        }
+
+        let mut agent = Agent {
+            id: checkpoint.agent_id,
+            name: self
+                .name
+                .ok_or(AgentError::MissingBuilderField { field: "name" })?,
+            system_prompt: self.system_prompt.ok_or(AgentError::MissingBuilderField {
+                field: "system_prompt",
+            })?,
+            llm_provider: self.llm_provider.ok_or(AgentError::MissingBuilderField {
+                field: "llm_provider",
+            })?,
+            tool_registry: self.tool_registry.ok_or(AgentError::MissingBuilderField {
+                field: "tool_registry",
+            })?,
+            event_bus: self
+                .event_bus
+                .ok_or(AgentError::MissingBuilderField { field: "event_bus" })?,
+            checkpoint_store: Some(checkpoint_store),
+            config: self.config.unwrap_or_default(),
+            history: Arc::new(Mutex::new(checkpoint.history)),
+            next_seq: Arc::new(Mutex::new(1)),
+            usage: Arc::new(Mutex::new(TokenUsage::default())),
+            active: Arc::new(AtomicBool::new(false)),
+            current_run_id: Arc::new(Mutex::new(Some(run_id))),
+            current_turn_id: Arc::new(Mutex::new(Some(turn_id))),
+            cancel: Arc::new(Mutex::new(None)),
+        };
+        agent.set_next_seq(record.last_seq.saturating_add(1));
+        agent.set_usage(checkpoint.usage);
+        Ok(agent)
+    }
+
     /// Builds an [`Agent`].
     ///
     /// # Errors
@@ -254,6 +394,8 @@ impl AgentBuilder {
             checkpoint_store: self.checkpoint_store,
             config: self.config.unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
+            next_seq: Arc::new(Mutex::new(1)),
+            usage: Arc::new(Mutex::new(TokenUsage::default())),
             active: Arc::new(AtomicBool::new(false)),
             current_run_id: Arc::new(Mutex::new(None)),
             current_turn_id: Arc::new(Mutex::new(None)),
