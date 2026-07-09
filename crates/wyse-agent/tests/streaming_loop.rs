@@ -225,6 +225,16 @@ async fn wait_for_request_count(provider: &RecordingProvider, count: usize) -> V
     .expect("timed out waiting for provider requests")
 }
 
+async fn run_turn_and_subscribe(agent: &Agent, message: ChatMessage) -> (RunId, EventStream) {
+    let run_id = agent.run_turn(message).await.expect("run should start");
+    let events = agent
+        .event_bus()
+        .subscribe_run(run_id)
+        .await
+        .expect("subscribe should succeed");
+    (run_id, events)
+}
+
 #[tokio::test]
 async fn stream_runs_tool_and_continues_with_tool_result() {
     let provider = Arc::new(RecordingProvider::new(vec![
@@ -264,15 +274,12 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     let mut saw_text_delta = false;
     let mut saw_tool_finished = false;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;
@@ -336,13 +343,10 @@ async fn stream_saves_finished_checkpoint_with_stable_history() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             if matches!(
                 envelope.event,
@@ -361,8 +365,11 @@ async fn stream_saves_finished_checkpoint_with_stable_history() {
     let records = checkpoints.records();
     let latest = records.last().expect("finished checkpoint exists");
 
-    assert_eq!(latest.run_id, agent_stream.run_id);
-    assert_eq!(latest.turn_id, agent_stream.turn_id);
+    assert_eq!(latest.run_id, run_id);
+    assert_eq!(
+        latest.turn_id,
+        agent.current_turn().expect("turn id should be set")
+    );
     assert_eq!(latest.kind, CheckpointKind::Agent);
     assert_eq!(latest.status, CheckpointStatus::Finished);
     assert_eq!(latest.last_seq, 5);
@@ -395,13 +402,10 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             if matches!(
                 envelope.event,
@@ -463,10 +467,10 @@ async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit(
         .build()
         .expect("agent should build");
 
-    let first_stream = agent
-        .stream(ChatMessage::user("hello"))
+    let _first_run_id = agent
+        .run_turn(ChatMessage::user("hello"))
         .await
-        .expect("stream should start");
+        .expect("run should start");
     wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Finished).await;
     let finished_records: Vec<_> = checkpoints
         .records()
@@ -476,25 +480,24 @@ async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit(
     assert_eq!(finished_records.len(), 1);
     assert_eq!(finished_records[0].last_seq, 5);
 
-    let second_stream = timeout(Duration::from_secs(1), async {
+    let _second_run_id = timeout(Duration::from_secs(1), async {
         loop {
-            match agent.stream(ChatMessage::user("again")).await {
-                Ok(stream) => return stream,
+            match agent.run_turn(ChatMessage::user("again")).await {
+                Ok(run_id) => return run_id,
                 Err(AgentError::RunAlreadyActive) => sleep(Duration::from_millis(10)).await,
-                Err(error) => panic!("unexpected stream error: {error}"),
+                Err(error) => panic!("unexpected run error: {error}"),
             }
         }
     })
     .await
-    .expect("timed out waiting for second stream");
+    .expect("timed out waiting for second run");
 
     let requests = wait_for_request_count(&provider, 2).await;
     assert!(requests[1].messages.iter().any(|message| {
         message.role == ChatRole::Assistant
             && message.content == ChatContent::Text("done".to_owned())
     }));
-    first_stream.cancel.cancel();
-    second_stream.cancel.cancel();
+    agent.stop();
 }
 
 #[tokio::test]
@@ -529,14 +532,12 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
         .build()
         .expect("agent should build");
 
-    let mut failed_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (failed_run_id, mut failed_events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
 
     let mut last_failed_seq = 0;
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = failed_stream.events.next().await {
+        while let Some(envelope) = failed_events.next().await {
             let envelope = envelope.expect("event should be delivered");
             last_failed_seq = envelope.seq;
             if matches!(
@@ -554,7 +555,10 @@ async fn resume_retries_llm_from_stable_checkpoint_history() {
     .expect("timed out waiting for failed event");
 
     let mut resumed = agent
-        .resume(failed_stream.run_id, failed_stream.turn_id)
+        .resume(
+            failed_run_id,
+            agent.current_turn().expect("turn id should be set"),
+        )
         .await
         .expect("resume should start");
 
@@ -624,13 +628,11 @@ async fn resume_rejects_checkpoint_from_different_agent() {
         .build()
         .expect("agent should build");
 
-    let mut failed_stream = first_agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (failed_run_id, mut failed_events) =
+        run_turn_and_subscribe(&first_agent, ChatMessage::user("hello")).await;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = failed_stream.events.next().await {
+        while let Some(envelope) = failed_events.next().await {
             let envelope = envelope.expect("event should be delivered");
             if matches!(
                 envelope.event,
@@ -647,7 +649,10 @@ async fn resume_rejects_checkpoint_from_different_agent() {
     .expect("timed out waiting for failed event");
 
     let error = match second_agent
-        .resume(failed_stream.run_id, failed_stream.turn_id)
+        .resume(
+            failed_run_id,
+            first_agent.current_turn().expect("turn id should be set"),
+        )
         .await
     {
         Ok(_) => panic!("resume should reject checkpoint from different agent"),
@@ -687,13 +692,10 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             if let RuntimeEvent::Agent {
                 event: AgentEvent::Failed { error_text },
@@ -734,17 +736,14 @@ async fn stream_publishes_cancelled_when_provider_stream_creation_hangs() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     entered.notified().await;
-    agent_stream.cancel.cancel();
+    agent.stop();
 
     let mut saw_cancelled = false;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;
@@ -803,17 +802,14 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     entered.notified().await;
-    agent_stream.cancel.cancel();
+    agent.stop();
 
     let mut saw_cancelled = false;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;
@@ -878,14 +874,11 @@ async fn stream_publishes_tool_failure_and_retries_with_tool_error_message() {
         .build()
         .expect("agent should build");
 
-    let mut agent_stream = agent
-        .stream(ChatMessage::user("hello"))
-        .await
-        .expect("stream should start");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
     let mut failure_text = None;
 
     timeout(Duration::from_secs(1), async {
-        while let Some(envelope) = agent_stream.events.next().await {
+        while let Some(envelope) = events.next().await {
             let envelope = envelope.expect("event should be delivered");
             let RuntimeEvent::Agent { event, .. } = envelope.event else {
                 continue;
