@@ -1,6 +1,12 @@
 //! NATS JetStream event stream bus implementation.
 
-use async_nats::{HeaderMap, jetstream};
+use async_nats::{
+    HeaderMap,
+    jetstream::{
+        self,
+        consumer::{DeliverPolicy, push::OrderedConfig},
+    },
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -10,7 +16,6 @@ use super::{EventStream, EventStreamBus, EventStreamBusError, NatsEventStreamBus
 
 #[derive(Clone)]
 pub(crate) struct NatsEventStreamBus {
-    client: async_nats::Client,
     jetstream: jetstream::Context,
     config: NatsEventStreamBusConfig,
 }
@@ -33,11 +38,7 @@ impl NatsEventStreamBus {
             .await
             .map_err(EventStreamBusError::nats)?;
 
-        Ok(Self {
-            client,
-            jetstream,
-            config,
-        })
+        Ok(Self { jetstream, config })
     }
 
     fn subject_for(&self, envelope: &StreamEnvelope) -> String {
@@ -69,15 +70,28 @@ impl EventStreamBus for NatsEventStreamBus {
     }
 
     async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError> {
-        let subject = self.subscribe_subject(run_id);
-        let subscription = self
-            .client
-            .subscribe(subject)
+        let deliver_subject = format!("{}.deliver.{}", self.config.subject_prefix, run_id);
+        let consumer = self
+            .jetstream
+            .create_consumer_on_stream(
+                OrderedConfig {
+                    deliver_subject,
+                    filter_subject: self.subscribe_subject(run_id),
+                    deliver_policy: DeliverPolicy::All,
+                    ..Default::default()
+                },
+                &self.config.stream_name,
+            )
+            .await
+            .map_err(EventStreamBusError::nats)?;
+        let messages = consumer
+            .messages()
             .await
             .map_err(EventStreamBusError::nats)?;
 
-        Ok(Box::pin(subscription.map(|message| {
-            serde_json::from_slice::<StreamEnvelope>(&message.payload)
+        Ok(Box::pin(messages.map(|message| {
+            let message = message.map_err(EventStreamBusError::nats)?;
+            serde_json::from_slice::<StreamEnvelope>(&message.message.payload)
                 .map_err(EventStreamBusError::Deserialize)
         })))
     }

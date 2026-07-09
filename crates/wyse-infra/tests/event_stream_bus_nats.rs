@@ -46,6 +46,32 @@ async fn nats_event_stream_bus_publishes_and_subscribes_run_events() -> Result<(
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires wyse-infra-test NATS container"]
+async fn nats_event_stream_bus_replays_events_published_before_subscription()
+-> Result<(), Box<dyn Error>> {
+    let nats_url =
+        std::env::var("WYSE_INFRA_TEST_NATS_URL").unwrap_or_else(|_| DEFAULT_NATS_URL.to_owned());
+    let bus = wait_for_bus(&nats_url).await?;
+    let run_id = RunId::new();
+    let envelopes = envelopes(run_id);
+
+    try_join_all(
+        envelopes
+            .iter()
+            .cloned()
+            .map(|envelope| bus.publish(envelope)),
+    )
+    .await?;
+
+    let mut stream = bus.subscribe_run(run_id).await?;
+    let received = receive_envelopes("replay-sub", &mut stream, envelopes.len()).await?;
+
+    assert_eq!(received, envelopes);
+
+    Ok(())
+}
+
 async fn wait_for_bus(nats_url: &str) -> Result<impl EventStreamBus, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
 
