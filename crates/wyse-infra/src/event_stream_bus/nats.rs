@@ -70,7 +70,8 @@ impl EventStreamBus for NatsEventStreamBus {
     }
 
     async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError> {
-        let deliver_subject = format!("{}.deliver.{}", self.config.subject_prefix, run_id);
+        let subscription_id = RunId::new();
+        let deliver_subject = format!("_INBOX.wyse.events.{run_id}.{subscription_id}");
         let consumer = self
             .jetstream
             .create_consumer_on_stream(

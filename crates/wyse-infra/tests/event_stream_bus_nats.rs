@@ -64,10 +64,15 @@ async fn nats_event_stream_bus_replays_events_published_before_subscription()
     )
     .await?;
 
-    let mut stream = bus.subscribe_run(run_id).await?;
-    let received = receive_envelopes("replay-sub", &mut stream, envelopes.len()).await?;
+    let mut first_stream = bus.subscribe_run(run_id).await?;
+    let mut second_stream = bus.subscribe_run(run_id).await?;
+    let first_received =
+        receive_envelopes("replay-sub-1", &mut first_stream, envelopes.len()).await?;
+    let second_received =
+        receive_envelopes("replay-sub-2", &mut second_stream, envelopes.len()).await?;
 
-    assert_eq!(received, envelopes);
+    assert_eq!(first_received, envelopes);
+    assert_eq!(second_received, envelopes);
 
     Ok(())
 }

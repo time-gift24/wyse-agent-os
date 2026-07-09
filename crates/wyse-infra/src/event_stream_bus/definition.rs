@@ -18,7 +18,7 @@ pub trait EventStreamBus: Send + Sync {
     /// Publishes one complete stream envelope.
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError>;
 
-    /// Subscribes to live events for one run.
+    /// Subscribes to one run's event stream from the first retained event, then live events.
     async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError>;
 }
 
