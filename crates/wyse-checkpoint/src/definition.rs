@@ -110,6 +110,7 @@ impl CheckpointStatus {
 
 /// Latest checkpoint for one `(run_id, turn_id, kind)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CheckpointRecord {
     /// Workflow run identity.
     pub run_id: RunId,
