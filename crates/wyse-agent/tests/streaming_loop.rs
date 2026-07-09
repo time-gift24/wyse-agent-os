@@ -440,6 +440,62 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
 }
 
 #[tokio::test]
+async fn failed_turn_does_not_commit_history_for_next_run() {
+    let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::StreamResults(vec![
+            Ok(ChatStreamEvent::TextDelta {
+                delta: "partial".to_owned(),
+            }),
+            Err(LlmError::UnsupportedCapability("stream failed")),
+        ]),
+        ProviderResponse::Events(vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }]),
+    ]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let (_run_id, _events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("failed input")).await;
+    wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::WaitingRetry).await;
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            match agent.run_turn(ChatMessage::user("fresh input")).await {
+                Ok(run_id) => return run_id,
+                Err(AgentError::RunAlreadyActive) => sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("unexpected run error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for second run");
+
+    let requests = wait_for_request_count(&provider, 2).await;
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == ChatRole::User
+            && message.content == ChatContent::Text("failed input".to_owned())
+    }));
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::User
+            && message.content == ChatContent::Text("fresh input".to_owned())
+    }));
+    assert!(!requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::User
+            && message.content == ChatContent::Text("failed input".to_owned())
+    }));
+}
+
+#[tokio::test]
 async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit() {
     let provider = Arc::new(RecordingProvider::new(vec![
         ProviderResponse::Events(vec![

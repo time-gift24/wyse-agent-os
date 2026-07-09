@@ -21,8 +21,14 @@ use crate::{
 };
 
 impl Agent {
-    pub(crate) async fn run_turn_loop(self) -> Result<(), AgentError> {
-        self.save_checkpoint(CheckpointStatus::Running).await?;
+    pub(crate) async fn run_turn_loop(self, input: Option<ChatMessage>) -> Result<(), AgentError> {
+        let mut history = self.history_snapshot();
+        if let Some(message) = input {
+            history.push(message);
+        }
+
+        self.save_checkpoint(CheckpointStatus::Running, &history)
+            .await?;
         self.publish_agent_event(AgentEvent::Started, None).await?;
 
         for turn_index in 0..self.config.max_turns {
@@ -31,11 +37,12 @@ impl Agent {
                 .expect("cancel token should be set")
                 .is_cancelled()
             {
-                self.publish_cancelled().await?;
+                self.publish_cancelled(&history).await?;
                 return Err(AgentError::Cancelled);
             }
 
-            self.save_checkpoint(CheckpointStatus::Running).await?;
+            self.save_checkpoint(CheckpointStatus::Running, &history)
+                .await?;
 
             let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
             self.publish_llm_event(
@@ -49,21 +56,22 @@ impl Agent {
 
             let request = ChatRequest {
                 model: self.llm_provider.model_id(),
-                messages: request_messages(&self.system_prompt, &self.history_snapshot()),
+                messages: request_messages(&self.system_prompt, &history),
                 tools: self.tool_registry.specs(),
                 structured_output: None,
             };
             let cancel = self.cancel_token().expect("cancel token should be set");
             let stream = match tokio::select! {
                 () = cancel.cancelled() => {
-                    self.publish_cancelled().await?;
+                    self.publish_cancelled(&history).await?;
                     return Err(AgentError::Cancelled);
                 }
                 result = self.llm_provider.chat_stream(request) => result,
             } {
                 Ok(stream) => stream,
                 Err(source) => {
-                    self.save_checkpoint(CheckpointStatus::WaitingRetry).await?;
+                    self.save_checkpoint(CheckpointStatus::WaitingRetry, &history)
+                        .await?;
                     self.publish_llm_event(
                         turn_index,
                         llm_call_id,
@@ -80,13 +88,14 @@ impl Agent {
                         AgentEvent::Failed {
                             error_text: error.to_string(),
                         },
+                        &history,
                     )
                     .await?;
                     return Err(error);
                 }
             };
             let assistant = match self
-                .consume_assistant_stream(turn_index, llm_call_id, stream)
+                .consume_assistant_stream(turn_index, llm_call_id, stream, &history)
                 .await
             {
                 Ok(assistant) => assistant,
@@ -98,10 +107,11 @@ impl Agent {
                             AgentEvent::Failed {
                                 error_text: error.to_string(),
                             },
+                            &history,
                         )
                         .await?;
                     } else {
-                        self.save_failed_checkpoint(&error).await?;
+                        self.save_failed_checkpoint(&error, &history).await?;
                     }
                     return Err(error);
                 }
@@ -109,16 +119,17 @@ impl Agent {
             let finish_reason = assistant.finish_reason;
             let message = assistant.message;
             let tool_calls = message.tool_calls.clone();
-            self.push_history(message);
+            history.push(message);
 
             if finish_reason == FinishReason::ToolCalls && !tool_calls.is_empty() {
-                self.save_checkpoint(CheckpointStatus::Running).await?;
+                self.save_checkpoint(CheckpointStatus::Running, &history)
+                    .await?;
 
                 if tool_calls.len() > self.config.max_tool_calls_per_turn {
                     let error = AgentError::ToolCallLimitExceeded {
                         limit: self.config.max_tool_calls_per_turn,
                     };
-                    self.save_failed_checkpoint(&error).await?;
+                    self.save_failed_checkpoint(&error, &history).await?;
                     return Err(error);
                 }
 
@@ -128,12 +139,15 @@ impl Agent {
                         .expect("cancel token should be set")
                         .is_cancelled()
                     {
-                        self.publish_cancelled().await?;
+                        self.publish_cancelled(&history).await?;
                         return Err(AgentError::Cancelled);
                     }
-                    let tool_message = self.execute_tool_call(turn_index, tool_call).await?;
-                    self.push_history(tool_message);
-                    self.save_checkpoint(CheckpointStatus::Running).await?;
+                    let tool_message = self
+                        .execute_tool_call(turn_index, tool_call, &history)
+                        .await?;
+                    history.push(tool_message);
+                    self.save_checkpoint(CheckpointStatus::Running, &history)
+                        .await?;
                 }
                 continue;
             }
@@ -145,15 +159,17 @@ impl Agent {
                     finish_reason: finish_reason_name(finish_reason).to_owned(),
                     usage,
                 },
+                &history,
             )
             .await?;
+            self.commit_history(history);
             return Ok(());
         }
 
         let error = AgentError::TurnLimitExceeded {
             limit: self.config.max_turns,
         };
-        self.save_failed_checkpoint(&error).await?;
+        self.save_failed_checkpoint(&error, &history).await?;
         Err(error)
     }
 
@@ -192,45 +208,58 @@ impl Agent {
             .clone()
     }
 
-    fn push_history(&self, message: ChatMessage) {
-        self.history
+    fn commit_history(&self, history: Vec<ChatMessage>) {
+        *self
+            .history
             .lock()
-            .expect("agent history mutex should not be poisoned")
-            .push(message);
+            .expect("agent history mutex should not be poisoned") = history;
     }
 
     async fn publish_checkpointed_agent_event(
         &self,
         status: CheckpointStatus,
         event: AgentEvent,
+        history: &[ChatMessage],
     ) -> Result<(), AgentError> {
         let seq = self.reserve_event_seq();
-        self.save_checkpoint(status).await?;
+        self.save_checkpoint(status, history).await?;
         self.publish_agent_event_at(seq, event, None).await
     }
 
-    async fn publish_cancelled(&self) -> Result<(), AgentError> {
-        self.publish_checkpointed_agent_event(CheckpointStatus::Cancelled, AgentEvent::Cancelled)
-            .await
+    async fn publish_cancelled(&self, history: &[ChatMessage]) -> Result<(), AgentError> {
+        self.publish_checkpointed_agent_event(
+            CheckpointStatus::Cancelled,
+            AgentEvent::Cancelled,
+            history,
+        )
+        .await
     }
 
-    async fn save_failed_checkpoint(&self, error: &AgentError) -> Result<(), AgentError> {
+    async fn save_failed_checkpoint(
+        &self,
+        error: &AgentError,
+        history: &[ChatMessage],
+    ) -> Result<(), AgentError> {
         self.publish_checkpointed_agent_event(
             CheckpointStatus::Failed,
             AgentEvent::Failed {
                 error_text: error.to_string(),
             },
+            history,
         )
         .await
     }
 
-    async fn save_checkpoint(&self, status: CheckpointStatus) -> Result<(), AgentError> {
+    async fn save_checkpoint(
+        &self,
+        status: CheckpointStatus,
+        history: &[ChatMessage],
+    ) -> Result<(), AgentError> {
         let Some(store) = &self.checkpoint_store else {
             return Ok(());
         };
 
-        let history = self.history_snapshot();
-        let state = encode_checkpoint_payload(self.id, self.current_usage(), &history)?;
+        let state = encode_checkpoint_payload(self.id, self.current_usage(), history)?;
         let record = CheckpointRecord::new(
             self.current_run().expect("run id should be set"),
             self.current_turn().expect("turn id should be set"),
@@ -303,6 +332,7 @@ impl Agent {
         turn_index: usize,
         llm_call_id: LlmCallId,
         mut stream: ChatStream,
+        history: &[ChatMessage],
     ) -> Result<AssistantStreamResult, AgentError> {
         let mut text = String::new();
         let mut reasoning = String::new();
@@ -313,7 +343,7 @@ impl Agent {
             let cancel = self.cancel_token().expect("cancel token should be set");
             tokio::select! {
                 () = cancel.cancelled() => {
-                    self.publish_cancelled().await?;
+                    self.publish_cancelled(history).await?;
                     return Err(AgentError::Cancelled);
                 }
                 event = stream.next() => {
@@ -473,6 +503,7 @@ impl Agent {
         &self,
         turn_index: usize,
         tool_call: &ToolCall,
+        history: &[ChatMessage],
     ) -> Result<ChatMessage, AgentError> {
         let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
         self.publish_llm_event(
@@ -491,7 +522,7 @@ impl Agent {
         let cancel = self.cancel_token().expect("cancel token should be set");
         let tool_result = tokio::select! {
             () = cancel.cancelled() => {
-                self.publish_cancelled().await?;
+                self.publish_cancelled(history).await?;
                 return Err(AgentError::Cancelled);
             }
             result = self.tool_registry.call(

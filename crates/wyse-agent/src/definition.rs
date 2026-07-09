@@ -94,15 +94,11 @@ impl Agent {
             .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
         self.set_next_seq(1);
         self.set_usage(TokenUsage::default());
-        self.history
-            .lock()
-            .expect("agent history mutex should not be poisoned")
-            .push(message);
         let agent = self.clone();
         let active = Arc::clone(&self.active);
 
         tokio::spawn(async move {
-            let _ = agent.run_turn_loop().await;
+            let _ = agent.run_turn_loop(Some(message)).await;
             active.store(false, Ordering::SeqCst);
         });
 
@@ -175,7 +171,7 @@ impl Agent {
         let active = Arc::clone(&self.active);
 
         tokio::spawn(async move {
-            let _ = agent.run_turn_loop().await;
+            let _ = agent.run_turn_loop(None).await;
             active.store(false, Ordering::SeqCst);
         });
 
