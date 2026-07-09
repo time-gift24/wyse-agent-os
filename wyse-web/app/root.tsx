@@ -10,12 +10,24 @@ import {
 import type { Route } from "./+types/root"
 import "./app.css"
 
+const themeInitScript = `
+(() => {
+  const key = "wyse-theme";
+  const stored = localStorage.getItem(key);
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const theme = stored === "light" || stored === "dark" ? stored : prefersDark ? "dark" : "light";
+  document.documentElement.classList.toggle("light", theme === "light");
+  document.documentElement.classList.toggle("dark", theme === "dark");
+})();
+`
+
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <Meta />
         <Links />
       </head>
