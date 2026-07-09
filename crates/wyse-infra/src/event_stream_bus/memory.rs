@@ -6,35 +6,61 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::{StreamExt, stream};
-use tokio::sync::broadcast;
+use futures_util::stream;
+use tokio::sync::Notify;
 use wyse_core::{RunId, StreamEnvelope};
 
 use super::{EventStream, EventStreamBus, EventStreamBusError};
 
 const DEFAULT_CAPACITY: usize = 1024;
 
-/// In-memory event stream bus backed by Tokio broadcast channels.
+/// In-memory event stream bus backed by retained per-run event history.
 #[derive(Debug, Clone)]
 pub struct InMemoryEventStreamBus {
-    capacity: usize,
-    runs: Arc<Mutex<BTreeMap<RunId, RunEvents>>>,
+    runs: Arc<Mutex<BTreeMap<RunId, Arc<RunEvents>>>>,
 }
 
 #[derive(Debug)]
 struct RunEvents {
-    sender: broadcast::Sender<StreamEnvelope>,
-    history: Vec<StreamEnvelope>,
+    history: Mutex<Vec<StreamEnvelope>>,
+    notify: Notify,
+}
+
+impl RunEvents {
+    fn new() -> Self {
+        Self {
+            history: Mutex::new(Vec::new()),
+            notify: Notify::new(),
+        }
+    }
+
+    fn event_at(&self, index: usize) -> Option<StreamEnvelope> {
+        self.history
+            .lock()
+            .expect("in-memory event history mutex should not be poisoned")
+            .get(index)
+            .cloned()
+    }
 }
 
 impl InMemoryEventStreamBus {
-    /// Creates an in-memory bus with a bounded per-run channel capacity.
+    /// Creates an in-memory bus.
     #[must_use]
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(_capacity: usize) -> Self {
         Self {
-            capacity,
             runs: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    fn run_events(&self, run_id: RunId) -> Arc<RunEvents> {
+        let mut runs = self
+            .runs
+            .lock()
+            .expect("in-memory event bus mutex should not be poisoned");
+        Arc::clone(
+            runs.entry(run_id)
+                .or_insert_with(|| Arc::new(RunEvents::new())),
+        )
     }
 }
 
@@ -48,22 +74,13 @@ impl Default for InMemoryEventStreamBus {
 impl EventStreamBus for InMemoryEventStreamBus {
     /// Publishes one complete stream envelope.
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
-        let sender = {
-            let mut runs = self
-                .runs
-                .lock()
-                .expect("in-memory event bus mutex should not be poisoned");
-            let run_events = runs.entry(envelope.run_id).or_insert_with(|| {
-                let (sender, _) = broadcast::channel(self.capacity);
-                RunEvents {
-                    sender,
-                    history: Vec::new(),
-                }
-            });
-            run_events.history.push(envelope.clone());
-            run_events.sender.clone()
-        };
-        let _ = sender.send(envelope);
+        let run_events = self.run_events(envelope.run_id);
+        run_events
+            .history
+            .lock()
+            .expect("in-memory event history mutex should not be poisoned")
+            .push(envelope);
+        run_events.notify.notify_waiters();
         Ok(())
     }
 
@@ -71,34 +88,25 @@ impl EventStreamBus for InMemoryEventStreamBus {
     ///
     /// This in-memory implementation is infallible and currently always returns `Ok`.
     async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError> {
-        let (history, receiver) = {
-            let mut runs = self
-                .runs
-                .lock()
-                .expect("in-memory event bus mutex should not be poisoned");
-            let run_events = runs.entry(run_id).or_insert_with(|| {
-                let (sender, _) = broadcast::channel(self.capacity);
-                RunEvents {
-                    sender,
-                    history: Vec::new(),
+        let run_events = self.run_events(run_id);
+        Ok(Box::pin(stream::unfold(
+            (run_events, 0usize),
+            |(run_events, mut next_index)| async move {
+                loop {
+                    if let Some(envelope) = run_events.event_at(next_index) {
+                        next_index += 1;
+                        return Some((Ok(envelope), (run_events, next_index)));
+                    }
+                    let notified = run_events.notify.notified();
+                    if let Some(envelope) = run_events.event_at(next_index) {
+                        drop(notified);
+                        next_index += 1;
+                        return Some((Ok(envelope), (run_events, next_index)));
+                    }
+                    notified.await;
                 }
-            });
-            (run_events.history.clone(), run_events.sender.subscribe())
-        };
-
-        let live = stream::unfold(receiver, |mut receiver| async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(envelope) => return Some((Ok(envelope), receiver)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        });
-
-        Ok(Box::pin(
-            stream::iter(history.into_iter().map(Ok)).chain(live),
-        ))
+            },
+        )))
     }
 }
 
@@ -158,6 +166,50 @@ mod tests {
 
         assert_eq!(received.run_id, run_id);
         assert_eq!(received.seq, 1);
+    }
+
+    #[tokio::test]
+    async fn subscriber_receives_each_retained_and_live_event_once() {
+        let bus = InMemoryEventStreamBus::default();
+        let run_id = RunId::new();
+
+        bus.publish(envelope(run_id, 1)).await.expect("publish");
+        let mut stream = bus.subscribe_run(run_id).await.expect("subscribe");
+        bus.publish(envelope(run_id, 2)).await.expect("publish");
+
+        let first = stream
+            .next()
+            .await
+            .expect("first event")
+            .expect("event should deserialize");
+        let second = stream
+            .next()
+            .await
+            .expect("second event")
+            .expect("event should deserialize");
+
+        assert_eq!(first.seq, 1);
+        assert_eq!(second.seq, 2);
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_receives_more_events_than_channel_capacity() {
+        let bus = InMemoryEventStreamBus::new(1);
+        let run_id = RunId::new();
+        let mut stream = bus.subscribe_run(run_id).await.expect("subscribe");
+
+        bus.publish(envelope(run_id, 1)).await.expect("publish 1");
+        bus.publish(envelope(run_id, 2)).await.expect("publish 2");
+        bus.publish(envelope(run_id, 3)).await.expect("publish 3");
+
+        for expected_seq in 1..=3 {
+            let received = stream
+                .next()
+                .await
+                .expect("event")
+                .expect("event should deserialize");
+            assert_eq!(received.seq, expected_seq);
+        }
     }
 
     #[tokio::test]
