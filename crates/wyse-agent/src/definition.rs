@@ -2,7 +2,7 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use tokio_util::sync::CancellationToken;
@@ -35,22 +35,22 @@ impl Default for AgentConfig {
 /// Stateful agent that owns conversation history.
 #[derive(Clone)]
 pub struct Agent {
-    id: AgentId,
-    name: String,
-    system_prompt: String,
-    llm_provider: Arc<dyn LlmProvider>,
-    tool_registry: Arc<dyn ToolRegistry>,
-    event_bus: Arc<dyn EventStreamBus>,
-    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
-    config: AgentConfig,
-    history: Arc<Mutex<Vec<ChatMessage>>>,
-    next_seq: Arc<Mutex<u64>>,
-    usage: Arc<Mutex<TokenUsage>>,
-    active: Arc<AtomicBool>,
+    pub(crate) id: AgentId,
+    pub(crate) name: String,
+    pub(crate) system_prompt: String,
+    pub(crate) llm_provider: Arc<dyn LlmProvider>,
+    pub(crate) tool_registry: Arc<dyn ToolRegistry>,
+    pub(crate) event_bus: Arc<dyn EventStreamBus>,
+    pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    pub(crate) config: AgentConfig,
+    pub(crate) history: Arc<Mutex<Vec<ChatMessage>>>,
+    pub(crate) seq: Arc<AtomicU64>,
+    pub(crate) usage: Arc<Mutex<TokenUsage>>,
+    pub(crate) active: Arc<AtomicBool>,
     resumable: Arc<AtomicBool>,
     current_run_id: Arc<Mutex<Option<RunId>>>,
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
-    cancel: Arc<Mutex<Option<CancellationToken>>>,
+    pub(crate) cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl Agent {
@@ -92,38 +92,17 @@ impl Agent {
             .cancel
             .lock()
             .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
-        let mut history = self
-            .history
+        self.set_next_seq(1);
+        self.set_usage(TokenUsage::default());
+        self.history
             .lock()
             .expect("agent history mutex should not be poisoned")
-            .clone();
-        history.push(message);
-
-        let loop_input = crate::r#loop::AgentLoopInput {
-            run_id,
-            agent_id: self.id,
-            agent_name: self.name.clone(),
-            system_prompt: self.system_prompt.clone(),
-            turn_id,
-            history,
-            llm_provider: Arc::clone(&self.llm_provider),
-            tool_registry: Arc::clone(&self.tool_registry),
-            event_bus: Arc::clone(&self.event_bus),
-            checkpoint_store: self.checkpoint_store.clone(),
-            config: self.config.clone(),
-            cancel: cancel.clone(),
-            start_seq: 1,
-            start_usage: TokenUsage::default(),
-        };
-        let history = Arc::clone(&self.history);
+            .push(message);
+        let agent = self.clone();
         let active = Arc::clone(&self.active);
 
         tokio::spawn(async move {
-            if let Ok(new_history) = crate::r#loop::run_agent_loop(loop_input).await {
-                *history
-                    .lock()
-                    .expect("agent history mutex should not be poisoned") = new_history;
-            }
+            let _ = agent.run_turn_loop().await;
             active.store(false, Ordering::SeqCst);
         });
 
@@ -183,7 +162,7 @@ impl Agent {
             self.active.store(false, Ordering::SeqCst);
             return Err(AgentError::CheckpointNotRetryable);
         };
-        let Some(turn_id) = self.current_turn() else {
+        let Some(_) = self.current_turn() else {
             self.active.store(false, Ordering::SeqCst);
             return Err(AgentError::CheckpointNotRetryable);
         };
@@ -192,59 +171,22 @@ impl Agent {
             .cancel
             .lock()
             .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
-        let history = self
-            .history
-            .lock()
-            .expect("agent history mutex should not be poisoned")
-            .clone();
-        let start_seq = *self
-            .next_seq
-            .lock()
-            .expect("next seq mutex should not be poisoned");
-        let start_usage = *self
-            .usage
-            .lock()
-            .expect("usage mutex should not be poisoned");
-
-        let loop_input = crate::r#loop::AgentLoopInput {
-            run_id,
-            agent_id: self.id,
-            agent_name: self.name.clone(),
-            system_prompt: self.system_prompt.clone(),
-            turn_id,
-            history,
-            llm_provider: Arc::clone(&self.llm_provider),
-            tool_registry: Arc::clone(&self.tool_registry),
-            event_bus: Arc::clone(&self.event_bus),
-            checkpoint_store: self.checkpoint_store.clone(),
-            config: self.config.clone(),
-            cancel,
-            start_seq,
-            start_usage,
-        };
-        let history = Arc::clone(&self.history);
+        let agent = self.clone();
         let active = Arc::clone(&self.active);
 
         tokio::spawn(async move {
-            if let Ok(new_history) = crate::r#loop::run_agent_loop(loop_input).await {
-                *history
-                    .lock()
-                    .expect("agent history mutex should not be poisoned") = new_history;
-            }
+            let _ = agent.run_turn_loop().await;
             active.store(false, Ordering::SeqCst);
         });
 
         Ok(run_id)
     }
 
-    fn set_next_seq(&mut self, seq: u64) {
-        *self
-            .next_seq
-            .lock()
-            .expect("next seq mutex should not be poisoned") = seq;
+    fn set_next_seq(&self, seq: u64) {
+        self.seq.store(seq, Ordering::SeqCst);
     }
 
-    fn set_usage(&mut self, usage: TokenUsage) {
+    fn set_usage(&self, usage: TokenUsage) {
         *self
             .usage
             .lock()
@@ -352,7 +294,7 @@ impl AgentBuilder {
             });
         }
 
-        let mut agent = Agent {
+        let agent = Agent {
             id: checkpoint.agent_id,
             name: self
                 .name
@@ -372,7 +314,7 @@ impl AgentBuilder {
             checkpoint_store: Some(checkpoint_store),
             config: self.config.unwrap_or_default(),
             history: Arc::new(Mutex::new(checkpoint.history)),
-            next_seq: Arc::new(Mutex::new(1)),
+            seq: Arc::new(AtomicU64::new(1)),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             active: Arc::new(AtomicBool::new(false)),
             resumable: Arc::new(AtomicBool::new(true)),
@@ -411,7 +353,7 @@ impl AgentBuilder {
             checkpoint_store: self.checkpoint_store,
             config: self.config.unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
-            next_seq: Arc::new(Mutex::new(1)),
+            seq: Arc::new(AtomicU64::new(1)),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             active: Arc::new(AtomicBool::new(false)),
             resumable: Arc::new(AtomicBool::new(false)),
