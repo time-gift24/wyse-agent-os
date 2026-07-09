@@ -71,6 +71,8 @@ impl Agent {
             return Err(AgentError::InvalidInputMessageRole { role: message.role });
         }
 
+        self.resumable.store(false, Ordering::SeqCst);
+
         if self.active.swap(true, Ordering::SeqCst) {
             return Err(AgentError::RunAlreadyActive);
         }
@@ -690,6 +692,77 @@ mod tests {
 
         let next_run_id = agent
             .run_turn(ChatMessage::user("hello"))
+            .await
+            .expect("run_turn should still start");
+        assert_eq!(agent.current_run(), Some(next_run_id));
+
+        agent.stop();
+        timeout(Duration::from_secs(1), async {
+            while agent.active.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active flag should clear after cancellation");
+    }
+
+    #[tokio::test]
+    async fn run_turn_consumes_resume_eligibility_before_starting_new_run() {
+        let provider = Arc::new(BlockingStartProvider::new());
+        let bus = Arc::new(InMemoryEventStreamBus::default());
+        let agent = Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(provider)
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(bus)
+            .build()
+            .expect("agent should build");
+        agent.resumable.store(true, Ordering::SeqCst);
+
+        let run_id = agent
+            .run_turn(ChatMessage::user("hello"))
+            .await
+            .expect("run_turn should start");
+        agent.stop();
+        timeout(Duration::from_secs(1), async {
+            let mut events = agent
+                .event_bus()
+                .subscribe_run(run_id)
+                .await
+                .expect("event subscription should succeed");
+            while let Some(envelope) = events.next().await {
+                let StreamEnvelope { event, .. } = envelope.expect("event should be delivered");
+                if matches!(
+                    event,
+                    wyse_core::RuntimeEvent::Agent {
+                        event: wyse_core::AgentEvent::Cancelled { .. },
+                        ..
+                    }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("run should cancel");
+        timeout(Duration::from_secs(1), async {
+            while agent.active.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active flag should clear after cancellation");
+
+        let error = agent
+            .resume_turn()
+            .await
+            .expect_err("resume should reject a non-restored run");
+        assert!(matches!(error, AgentError::CheckpointNotRetryable));
+        assert!(!agent.active.load(Ordering::SeqCst));
+
+        let next_run_id = agent
+            .run_turn(ChatMessage::user("again"))
             .await
             .expect("run_turn should still start");
         assert_eq!(agent.current_run(), Some(next_run_id));
