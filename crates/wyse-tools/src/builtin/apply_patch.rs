@@ -8,10 +8,13 @@ use serde_json::json;
 use wyse_core::ToolSpec;
 use wyse_filesystem::{
     ApplyPatchError, ApplyPatchOperation, ApplyPatchOperationKind, Filesystem, FilesystemError,
-    VirtualPath, apply_patch,
+    apply_patch,
 };
 
-use crate::{Tool, ToolError, ToolInput, ToolOutput};
+use crate::{
+    Tool, ToolError, ToolInput, ToolOutput,
+    builtin::filesystem::{display_path, normalize_path},
+};
 
 /// Builtin tool that applies file patches through a virtual filesystem.
 pub struct ApplyPatchTool {
@@ -102,29 +105,6 @@ fn operation_from_raw(raw: RawOperation) -> Result<ApplyPatchOperation, ToolErro
     };
     let path = normalize_path(&raw.path)?;
     Ok(ApplyPatchOperation::new(kind, path, raw.diff))
-}
-
-fn normalize_path(path: &str) -> Result<VirtualPath, ToolError> {
-    if path.is_empty() {
-        return Err(ToolError::InvalidPath {
-            path: path.to_owned(),
-            source: wyse_filesystem::VirtualPathError,
-        });
-    }
-
-    let normalized = if path.starts_with('/') {
-        path.to_owned()
-    } else {
-        format!("/{path}")
-    };
-    VirtualPath::try_from(normalized.as_str()).map_err(|source| ToolError::InvalidPath {
-        path: path.to_owned(),
-        source,
-    })
-}
-
-fn display_path(path: &VirtualPath) -> String {
-    path.as_str().trim_start_matches('/').to_owned()
 }
 
 fn success_output(kind: ApplyPatchOperationKind, path: &str) -> String {

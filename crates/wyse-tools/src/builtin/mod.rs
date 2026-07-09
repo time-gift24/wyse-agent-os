@@ -1,6 +1,11 @@
 //! Builtin tool implementations.
 
 mod apply_patch;
+mod file_metadata;
+mod filesystem;
+mod list_dir;
+mod read_file_lines;
+mod search_text;
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -11,6 +16,10 @@ use wyse_core::{ToolName, ToolSpec};
 use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolRegistry};
 
 pub use apply_patch::ApplyPatchTool;
+pub use file_metadata::FileMetadataTool;
+pub use list_dir::ListDirTool;
+pub use read_file_lines::ReadFileLinesTool;
+pub use search_text::SearchTextTool;
 
 /// Registry backed by builtin in-memory tools.
 #[derive(Default)]

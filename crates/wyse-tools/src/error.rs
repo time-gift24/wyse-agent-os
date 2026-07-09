@@ -1,8 +1,10 @@
 //! Error types for tool operations.
 
+use std::string::FromUtf8Error;
+
 use thiserror::Error;
 use wyse_core::ToolName;
-use wyse_filesystem::VirtualPathError;
+use wyse_filesystem::{FilesystemError, VirtualPathError};
 
 /// Error returned by tool registry or execution operations.
 #[derive(Debug, Error)]
@@ -42,4 +44,34 @@ pub enum ToolError {
         #[source]
         source: VirtualPathError,
     },
+    /// Tool argument is semantically invalid.
+    #[error("invalid argument {name}: {reason}")]
+    InvalidArgument {
+        /// Argument name.
+        name: &'static str,
+        /// Rejection reason.
+        reason: &'static str,
+    },
+    /// File content is not valid UTF-8.
+    #[error("file is not valid utf-8: {path}")]
+    InvalidUtf8 {
+        /// File path.
+        path: String,
+        /// UTF-8 conversion source.
+        #[source]
+        source: FromUtf8Error,
+    },
+    /// Filesystem operation failed.
+    #[error("filesystem operation failed")]
+    Filesystem {
+        /// Filesystem failure source.
+        #[source]
+        source: FilesystemError,
+    },
+}
+
+impl From<FilesystemError> for ToolError {
+    fn from(source: FilesystemError) -> Self {
+        Self::Filesystem { source }
+    }
 }

@@ -4,7 +4,8 @@ use serde_json::json;
 use wyse_core::{CallId, ToolName, ToolSpec};
 use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig, VirtualPath};
 use wyse_tools::{
-    ApplyPatchTool, BuiltinToolRegistry, EchoTool, ToolError, ToolInput, ToolRegistry,
+    ApplyPatchTool, BuiltinToolRegistry, EchoTool, FileMetadataTool, ListDirTool,
+    ReadFileLinesTool, SearchTextTool, ToolError, ToolInput, ToolRegistry,
 };
 
 async fn apply_patch_test_filesystem(name: &str) -> (Arc<LocalFilesystem>, std::path::PathBuf) {
@@ -22,6 +23,319 @@ async fn apply_patch_test_filesystem(name: &str) -> (Arc<LocalFilesystem>, std::
         .expect("filesystem is valid"),
     );
     (filesystem, root)
+}
+
+#[tokio::test]
+async fn read_file_lines_tool_returns_requested_line_range_through_registry() {
+    let (filesystem, root) = apply_patch_test_filesystem("read-lines").await;
+    let path = VirtualPath::try_from("/notes.txt").expect("path is valid");
+    filesystem
+        .write_file(&path, b"alpha\nbeta\ngamma\ndelta\n".to_vec())
+        .await
+        .expect("seed file");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .expect("read file lines tool should register");
+
+    let output = registry
+        .call(
+            &ToolName::from("read_file_lines"),
+            ToolInput::new(
+                CallId::from("call-read-lines"),
+                json!({
+                    "path": "notes.txt",
+                    "start_line": 2,
+                    "line_count": 2
+                }),
+            ),
+        )
+        .await
+        .expect("tool should run");
+
+    assert_eq!(
+        output.result,
+        json!({
+            "path": "notes.txt",
+            "start_line": 2,
+            "end_line": 3,
+            "total_lines": 4,
+            "lines": [
+                {"line_number": 2, "text": "beta"},
+                {"line_number": 3, "text": "gamma"}
+            ]
+        })
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn read_file_lines_tool_returns_empty_lines_when_range_starts_after_end() {
+    let (filesystem, root) = apply_patch_test_filesystem("read-lines-empty").await;
+    let path = VirtualPath::try_from("/notes.txt").expect("path is valid");
+    filesystem
+        .write_file(&path, b"alpha\nbeta\n".to_vec())
+        .await
+        .expect("seed file");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .expect("read file lines tool should register");
+
+    let output = registry
+        .call(
+            &ToolName::from("read_file_lines"),
+            ToolInput::new(
+                CallId::from("call-read-lines-empty"),
+                json!({
+                    "path": "notes.txt",
+                    "start_line": 5,
+                    "line_count": 2
+                }),
+            ),
+        )
+        .await
+        .expect("tool should run");
+
+    assert_eq!(
+        output.result,
+        json!({
+            "path": "notes.txt",
+            "start_line": 5,
+            "end_line": null,
+            "total_lines": 2,
+            "lines": []
+        })
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn read_file_lines_tool_rejects_invalid_relative_path() {
+    let (filesystem, root) = apply_patch_test_filesystem("read-lines-invalid-path").await;
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .expect("read file lines tool should register");
+
+    let error = registry
+        .call(
+            &ToolName::from("read_file_lines"),
+            ToolInput::new(
+                CallId::from("call-read-lines-invalid-path"),
+                json!({
+                    "path": "../secret.txt",
+                    "start_line": 1,
+                    "line_count": 1
+                }),
+            ),
+        )
+        .await
+        .expect_err("invalid path should fail before reading");
+
+    assert!(matches!(error, ToolError::InvalidPath { .. }));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn read_file_lines_tool_returns_typed_error_for_non_utf8_file() {
+    let (filesystem, root) = apply_patch_test_filesystem("read-lines-non-utf8").await;
+    let path = VirtualPath::try_from("/binary.dat").expect("path is valid");
+    filesystem
+        .write_file(&path, vec![0xff, 0xfe, 0xfd])
+        .await
+        .expect("seed file");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .expect("read file lines tool should register");
+
+    let error = registry
+        .call(
+            &ToolName::from("read_file_lines"),
+            ToolInput::new(
+                CallId::from("call-read-lines-non-utf8"),
+                json!({
+                    "path": "binary.dat",
+                    "start_line": 1,
+                    "line_count": 1
+                }),
+            ),
+        )
+        .await
+        .expect_err("non-utf8 file should fail");
+
+    assert!(matches!(error, ToolError::InvalidUtf8 { ref path, .. } if path == "binary.dat"));
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn list_dir_tool_returns_sorted_directory_entries_through_registry() {
+    let (filesystem, root) = apply_patch_test_filesystem("list-dir").await;
+    let dir = VirtualPath::try_from("/src").expect("path is valid");
+    let nested = VirtualPath::try_from("/src/nested").expect("path is valid");
+    let lib = VirtualPath::try_from("/src/lib.rs").expect("path is valid");
+    filesystem.create_dir(&dir).await.expect("create src dir");
+    filesystem
+        .create_dir(&nested)
+        .await
+        .expect("create nested dir");
+    filesystem
+        .write_file(&lib, b"pub fn ok() {}\n".to_vec())
+        .await
+        .expect("seed file");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(ListDirTool::new(filesystem)))
+        .expect("list dir tool should register");
+
+    let output = registry
+        .call(
+            &ToolName::from("list_dir"),
+            ToolInput::new(
+                CallId::from("call-list-dir"),
+                json!({
+                    "path": "src"
+                }),
+            ),
+        )
+        .await
+        .expect("tool should run");
+
+    assert_eq!(
+        output.result,
+        json!({
+            "path": "src",
+            "entries": [
+                {
+                    "path": "src/lib.rs",
+                    "file_name": "lib.rs",
+                    "file_type": "file"
+                },
+                {
+                    "path": "src/nested",
+                    "file_name": "nested",
+                    "file_type": "directory"
+                }
+            ]
+        })
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn file_metadata_tool_returns_file_type_and_length_through_registry() {
+    let (filesystem, root) = apply_patch_test_filesystem("metadata").await;
+    let path = VirtualPath::try_from("/notes.txt").expect("path is valid");
+    filesystem
+        .write_file(&path, b"hello\n".to_vec())
+        .await
+        .expect("seed file");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(FileMetadataTool::new(filesystem)))
+        .expect("file metadata tool should register");
+
+    let output = registry
+        .call(
+            &ToolName::from("file_metadata"),
+            ToolInput::new(
+                CallId::from("call-metadata"),
+                json!({
+                    "path": "notes.txt"
+                }),
+            ),
+        )
+        .await
+        .expect("tool should run");
+
+    assert_eq!(
+        output.result,
+        json!({
+            "path": "notes.txt",
+            "file_type": "file",
+            "len": 6
+        })
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn search_text_tool_returns_matches_under_directory_through_registry() {
+    let (filesystem, root) = apply_patch_test_filesystem("search-text").await;
+    let src = VirtualPath::try_from("/src").expect("path is valid");
+    let nested = VirtualPath::try_from("/src/nested").expect("path is valid");
+    let lib = VirtualPath::try_from("/src/lib.rs").expect("path is valid");
+    let mod_file = VirtualPath::try_from("/src/nested/mod.rs").expect("path is valid");
+    let binary = VirtualPath::try_from("/src/blob.bin").expect("path is valid");
+    filesystem.create_dir(&src).await.expect("create src dir");
+    filesystem
+        .create_dir(&nested)
+        .await
+        .expect("create nested dir");
+    filesystem
+        .write_file(&lib, b"fn alpha() {}\nfn beta() {}\n".to_vec())
+        .await
+        .expect("seed lib file");
+    filesystem
+        .write_file(&mod_file, b"pub fn alpha_nested() {}\n".to_vec())
+        .await
+        .expect("seed nested file");
+    filesystem
+        .write_file(&binary, vec![0xff, 0xfe])
+        .await
+        .expect("seed binary file");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(SearchTextTool::new(filesystem)))
+        .expect("search text tool should register");
+
+    let output = registry
+        .call(
+            &ToolName::from("search_text"),
+            ToolInput::new(
+                CallId::from("call-search-text"),
+                json!({
+                    "path": "src",
+                    "query": "alpha",
+                    "max_results": 10
+                }),
+            ),
+        )
+        .await
+        .expect("tool should run");
+
+    assert_eq!(
+        output.result,
+        json!({
+            "path": "src",
+            "query": "alpha",
+            "matches": [
+                {
+                    "path": "src/lib.rs",
+                    "line_number": 1,
+                    "line_text": "fn alpha() {}",
+                    "match_start": 3,
+                    "match_end": 8
+                },
+                {
+                    "path": "src/nested/mod.rs",
+                    "line_number": 1,
+                    "line_text": "pub fn alpha_nested() {}",
+                    "match_start": 7,
+                    "match_end": 12
+                }
+            ]
+        })
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test]

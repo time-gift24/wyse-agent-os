@@ -5,7 +5,10 @@ use wyse_core::CallId;
 use wyse_filesystem::{
     Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
 };
-use wyse_tools::{ApplyPatchTool, Tool, ToolInput};
+use wyse_tools::{
+    ApplyPatchTool, FileMetadataTool, ListDirTool, ReadFileLinesTool, SearchTextTool, Tool,
+    ToolInput,
+};
 
 const LINE_COUNT: usize = 1_050;
 const HEAD_COUNT: usize = 10;
@@ -89,6 +92,123 @@ async fn apply_patch_tool_updates_and_deletes_large_file_in_docker_sandbox() {
     assert!(
         matches!(&missing, FilesystemError::NotFound { .. }),
         "expected not found error, got {missing}"
+    );
+}
+
+#[ignore = "crate integration test"]
+#[tokio::test]
+async fn readonly_filesystem_tools_read_docker_sandbox() {
+    let root = std::env::var_os("WYSE_TOOLS_DOCKER_SANDBOX")
+        .map(std::path::PathBuf::from)
+        .expect("WYSE_TOOLS_DOCKER_SANDBOX must point at the compose-mounted sandbox");
+    assert!(
+        root.join(".container-ready").is_file(),
+        "compose service must write the readiness marker"
+    );
+    let _ = tokio::fs::remove_dir_all(root.join("src")).await;
+    let filesystem = Arc::new(
+        LocalFilesystem::new(LocalFilesystemConfig {
+            root: root.clone(),
+            max_file_bytes: Some(128 * 1024),
+        })
+        .expect("filesystem is valid"),
+    );
+    let src = VirtualPath::try_from("/src").expect("path is valid");
+    let nested = VirtualPath::try_from("/src/nested").expect("path is valid");
+    let lib = VirtualPath::try_from("/src/lib.rs").expect("path is valid");
+    let nested_file = VirtualPath::try_from("/src/nested/mod.rs").expect("path is valid");
+    filesystem.create_dir(&src).await.expect("create src dir");
+    filesystem
+        .create_dir(&nested)
+        .await
+        .expect("create nested dir");
+    filesystem
+        .write_file(&lib, b"fn alpha() {}\nfn beta() {}\n".to_vec())
+        .await
+        .expect("seed lib file");
+    filesystem
+        .write_file(&nested_file, b"pub fn alpha_nested() {}\n".to_vec())
+        .await
+        .expect("seed nested file");
+
+    let read_lines = ReadFileLinesTool::new(filesystem.clone())
+        .call(ToolInput::new(
+            CallId::from("call-read-lines"),
+            json!({
+                "path": "src/lib.rs",
+                "start_line": 2,
+                "line_count": 1
+            }),
+        ))
+        .await
+        .expect("read lines tool should run");
+    assert_eq!(
+        read_lines.result["lines"],
+        json!([
+            {
+                "line_number": 2,
+                "text": "fn beta() {}"
+            }
+        ])
+    );
+
+    let list_dir = ListDirTool::new(filesystem.clone())
+        .call(ToolInput::new(
+            CallId::from("call-list-dir"),
+            json!({
+                "path": "src"
+            }),
+        ))
+        .await
+        .expect("list dir tool should run");
+    assert_eq!(
+        list_dir.result["entries"],
+        json!([
+            {
+                "path": "src/lib.rs",
+                "file_name": "lib.rs",
+                "file_type": "file"
+            },
+            {
+                "path": "src/nested",
+                "file_name": "nested",
+                "file_type": "directory"
+            }
+        ])
+    );
+
+    let metadata = FileMetadataTool::new(filesystem.clone())
+        .call(ToolInput::new(
+            CallId::from("call-file-metadata"),
+            json!({
+                "path": "src/lib.rs"
+            }),
+        ))
+        .await
+        .expect("file metadata tool should run");
+    assert_eq!(
+        metadata.result,
+        json!({
+            "path": "src/lib.rs",
+            "file_type": "file",
+            "len": 27
+        })
+    );
+
+    let search = SearchTextTool::new(filesystem)
+        .call(ToolInput::new(
+            CallId::from("call-search-text"),
+            json!({
+                "path": "src",
+                "query": "alpha",
+                "max_results": 10
+            }),
+        ))
+        .await
+        .expect("search text tool should run");
+    assert_eq!(
+        search.result["matches"].as_array().expect("matches").len(),
+        2
     );
 }
 
