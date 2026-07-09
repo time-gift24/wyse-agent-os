@@ -10,9 +10,12 @@ use futures_util::{StreamExt, stream};
 use serde_json::json;
 use tokio::time::timeout;
 use wyse_agent::{Agent, AgentConfig};
+use wyse_checkpoint::{
+    CheckpointError, CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore,
+};
 use wyse_core::{
     AgentEvent, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent, ModelId,
-    RuntimeEvent, ToolCallDelta, ToolName, ToolSpec,
+    RuntimeEvent, ToolCallDelta, ToolName, ToolSpec, TurnId,
 };
 use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
 use wyse_llm::{
@@ -127,6 +130,45 @@ impl ToolRegistry for BlockingToolRegistry {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingCheckpointStore {
+    records: Mutex<Vec<CheckpointRecord>>,
+}
+
+impl RecordingCheckpointStore {
+    fn records(&self) -> Vec<CheckpointRecord> {
+        self.records
+            .lock()
+            .expect("checkpoint records mutex should not be poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for RecordingCheckpointStore {
+    async fn put_latest(&self, record: CheckpointRecord) -> Result<(), CheckpointError> {
+        self.records
+            .lock()
+            .expect("checkpoint records mutex should not be poisoned")
+            .push(record);
+        Ok(())
+    }
+
+    async fn latest_turn(
+        &self,
+        _run_id: wyse_core::RunId,
+        _turn_id: TurnId,
+        _kind: CheckpointKind,
+    ) -> Result<Option<CheckpointRecord>, CheckpointError> {
+        Ok(self
+            .records
+            .lock()
+            .expect("checkpoint records mutex should not be poisoned")
+            .last()
+            .cloned())
+    }
+}
+
 #[tokio::test]
 async fn stream_runs_tool_and_continues_with_tool_result() {
     let provider = Arc::new(RecordingProvider::new(vec![
@@ -212,6 +254,67 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
     assert!(requests[1].messages.iter().any(|message| {
         message.role == ChatRole::Tool && message.tool_call_id == Some(CallId::from("call-1"))
     }));
+}
+
+#[tokio::test]
+async fn stream_saves_finished_checkpoint_with_stable_history() {
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ],
+    )]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+
+    let mut agent_stream = agent
+        .stream(ChatMessage::user("hello"))
+        .await
+        .expect("stream should start");
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = agent_stream.events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Finished { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for finished event");
+
+    let records = checkpoints.records();
+    let latest = records.last().expect("finished checkpoint exists");
+
+    assert_eq!(latest.run_id, agent_stream.run_id);
+    assert_eq!(latest.turn_id, agent_stream.turn_id);
+    assert_eq!(latest.kind, CheckpointKind::Agent);
+    assert_eq!(latest.status, CheckpointStatus::Finished);
+    assert!(
+        latest
+            .state
+            .windows(b"done".len())
+            .any(|window| window == b"done")
+    );
 }
 
 #[tokio::test]

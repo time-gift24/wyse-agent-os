@@ -163,6 +163,32 @@ pub struct CheckpointRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+impl CheckpointRecord {
+    /// Creates a checkpoint record with a fresh [`CheckpointId`].
+    #[must_use]
+    pub fn new(
+        run_id: RunId,
+        turn_id: TurnId,
+        kind: CheckpointKind,
+        status: CheckpointStatus,
+        state_version: u32,
+        state: Vec<u8>,
+        last_seq: u64,
+    ) -> Self {
+        Self {
+            run_id,
+            turn_id,
+            checkpoint_id: CheckpointId::new(),
+            kind,
+            status,
+            state_version,
+            state,
+            last_seq,
+            updated_at: Utc::now(),
+        }
+    }
+}
+
 /// Stores latest turn checkpoints.
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
