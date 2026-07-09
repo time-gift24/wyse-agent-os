@@ -6,5 +6,5 @@ pub mod error;
 
 pub(crate) mod r#loop;
 
-pub use definition::{Agent, AgentBuilder, AgentConfig, AgentStream};
+pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;

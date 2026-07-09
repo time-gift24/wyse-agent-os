@@ -10,7 +10,7 @@ use wyse_llm::LlmError;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AgentError {
-    /// Input message role is not accepted by `Agent::stream`.
+    /// Input message role is not accepted by `Agent::run_turn`.
     #[error("invalid input message role: {role:?}")]
     InvalidInputMessageRole {
         /// Rejected role.

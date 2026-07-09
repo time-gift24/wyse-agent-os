@@ -6,13 +6,13 @@ use std::sync::{
 };
 
 use tokio_util::sync::CancellationToken;
-use wyse_checkpoint::{CheckpointKind, CheckpointStatus, CheckpointStore};
+use wyse_checkpoint::CheckpointStore;
 use wyse_core::{AgentId, ChatMessage, ChatRole, RunId, TurnId};
-use wyse_infra::event_stream_bus::{EventStream, EventStreamBus};
+use wyse_infra::event_stream_bus::EventStreamBus;
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
 
-use crate::{AgentError, checkpoint::AgentCheckpointState};
+use crate::AgentError;
 
 /// Runtime tuning for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,20 +32,8 @@ impl Default for AgentConfig {
     }
 }
 
-/// Stream handle returned by [`Agent::stream`].
-#[non_exhaustive]
-pub struct AgentStream {
-    /// Run identity for this stream.
-    pub run_id: RunId,
-    /// Turn identity for this stream.
-    pub turn_id: TurnId,
-    /// Live event stream for the run.
-    pub events: EventStream,
-    /// Cancellation handle for this run.
-    pub cancel: CancellationToken,
-}
-
 /// Stateful agent that owns conversation history.
+#[derive(Clone)]
 pub struct Agent {
     id: AgentId,
     name: String,
@@ -57,6 +45,9 @@ pub struct Agent {
     config: AgentConfig,
     history: Arc<Mutex<Vec<ChatMessage>>>,
     active: Arc<AtomicBool>,
+    current_run_id: Arc<Mutex<Option<RunId>>>,
+    current_turn_id: Arc<Mutex<Option<TurnId>>>,
+    cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl Agent {
@@ -66,13 +57,13 @@ impl Agent {
         AgentBuilder::default()
     }
 
-    /// Starts streaming one user message through the agent.
+    /// Starts one user turn through the agent.
     ///
     /// # Errors
     ///
-    /// Returns an error if the input message role is not `User`, another run is
-    /// active, or subscribing to the event bus fails.
-    pub async fn stream(&self, message: ChatMessage) -> Result<AgentStream, AgentError> {
+    /// Returns an error if the input message role is not `User` or another run
+    /// is active.
+    pub async fn run_turn(&self, message: ChatMessage) -> Result<RunId, AgentError> {
         if message.role != ChatRole::User {
             return Err(AgentError::InvalidInputMessageRole { role: message.role });
         }
@@ -83,14 +74,19 @@ impl Agent {
 
         let run_id = RunId::new();
         let turn_id = TurnId::new();
-        let events = match self.event_bus.subscribe_run(run_id).await {
-            Ok(events) => events,
-            Err(source) => {
-                self.active.store(false, Ordering::SeqCst);
-                return Err(AgentError::from(source));
-            }
-        };
         let cancel = CancellationToken::new();
+        *self
+            .current_run_id
+            .lock()
+            .expect("current run mutex should not be poisoned") = Some(run_id);
+        *self
+            .current_turn_id
+            .lock()
+            .expect("current turn mutex should not be poisoned") = Some(turn_id);
+        *self
+            .cancel
+            .lock()
+            .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
         let mut history = self
             .history
             .lock()
@@ -125,97 +121,40 @@ impl Agent {
             active.store(false, Ordering::SeqCst);
         });
 
-        Ok(AgentStream {
-            run_id,
-            turn_id,
-            events,
-            cancel,
-        })
+        Ok(run_id)
     }
 
-    /// Resumes a retryable run from its latest agent checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if another run is active, the agent has no checkpoint
-    /// store, the latest checkpoint is missing or not retryable, the checkpoint
-    /// state cannot be decoded, or subscribing to the event bus fails.
-    pub async fn resume(&self, run_id: RunId, turn_id: TurnId) -> Result<AgentStream, AgentError> {
-        if self.active.swap(true, Ordering::SeqCst) {
-            return Err(AgentError::RunAlreadyActive);
-        }
-
-        let Some(checkpoint_store) = &self.checkpoint_store else {
-            self.active.store(false, Ordering::SeqCst);
-            return Err(AgentError::MissingBuilderField {
-                field: "checkpoint_store",
-            });
-        };
-        let record = match checkpoint_store
-            .latest_turn(run_id, turn_id, CheckpointKind::Agent)
-            .await?
+    /// Cancels the current run, if any.
+    pub fn stop(&self) {
+        if let Some(cancel) = self
+            .cancel
+            .lock()
+            .expect("cancel mutex should not be poisoned")
+            .as_ref()
         {
-            Some(record) if record.status == CheckpointStatus::WaitingRetry => record,
-            Some(_) | None => {
-                self.active.store(false, Ordering::SeqCst);
-                return Err(AgentError::CheckpointNotRetryable);
-            }
-        };
-        let checkpoint = match AgentCheckpointState::decode(&record.state, record.state_version) {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                self.active.store(false, Ordering::SeqCst);
-                return Err(error);
-            }
-        };
-        if checkpoint.agent_id != self.id {
-            self.active.store(false, Ordering::SeqCst);
-            return Err(AgentError::CheckpointAgentMismatch {
-                expected: self.id,
-                actual: checkpoint.agent_id,
-            });
+            cancel.cancel();
         }
-        let events = match self.event_bus.subscribe_run(run_id).await {
-            Ok(events) => events,
-            Err(source) => {
-                self.active.store(false, Ordering::SeqCst);
-                return Err(AgentError::from(source));
-            }
-        };
-        let cancel = CancellationToken::new();
-        let loop_input = crate::r#loop::AgentLoopInput {
-            run_id,
-            turn_id,
-            agent_id: self.id,
-            agent_name: self.name.clone(),
-            system_prompt: self.system_prompt.clone(),
-            history: checkpoint.history,
-            llm_provider: Arc::clone(&self.llm_provider),
-            tool_registry: Arc::clone(&self.tool_registry),
-            event_bus: Arc::clone(&self.event_bus),
-            checkpoint_store: self.checkpoint_store.clone(),
-            config: self.config.clone(),
-            cancel: cancel.clone(),
-            start_seq: record.last_seq.saturating_add(1),
-        };
-        let history = Arc::clone(&self.history);
-        let active = Arc::clone(&self.active);
+    }
 
-        tokio::spawn(async move {
-            if let Ok(new_history) = crate::r#loop::run_agent_loop(loop_input).await {
-                *history
-                    .lock()
-                    .expect("agent history mutex should not be poisoned") = new_history;
-            }
-            active.store(false, Ordering::SeqCst);
-        });
+    /// Returns the current run id, if one has been started.
+    pub fn current_run(&self) -> Option<RunId> {
+        *self
+            .current_run_id
+            .lock()
+            .expect("current run mutex should not be poisoned")
+    }
 
-        Ok(AgentStream {
-            run_id,
-            turn_id,
-            events,
-            cancel,
-        })
+    /// Returns the current turn id, if one has been started.
+    pub fn current_turn(&self) -> Option<TurnId> {
+        *self
+            .current_turn_id
+            .lock()
+            .expect("current turn mutex should not be poisoned")
+    }
+
+    /// Returns the configured event bus.
+    pub fn event_bus(&self) -> Arc<dyn EventStreamBus> {
+        Arc::clone(&self.event_bus)
     }
 }
 
@@ -316,6 +255,9 @@ impl AgentBuilder {
             config: self.config.unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
             active: Arc::new(AtomicBool::new(false)),
+            current_run_id: Arc::new(Mutex::new(None)),
+            current_turn_id: Arc::new(Mutex::new(None)),
+            cancel: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -330,17 +272,13 @@ mod tests {
         sync::watch,
         time::{Duration, timeout},
     };
-    use wyse_core::{ChatMessage, ModelId, RunId};
-    use wyse_infra::event_stream_bus::{
-        EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
-    };
+    use wyse_core::{ChatMessage, ModelId, StreamEnvelope};
+    use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
     use wyse_llm::{
         ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError,
         LlmProvider, MockLlmProvider,
     };
     use wyse_tools::BuiltinToolRegistry;
-
-    use serde_json;
 
     use super::*;
 
@@ -369,75 +307,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_returns_turn_id() {
-        let agent = test_agent();
+    async fn run_turn_returns_run_id_and_sets_current_ids() {
+        let provider = Arc::new(BlockingStartProvider::new());
+        let bus = Arc::new(InMemoryEventStreamBus::default());
+        let agent = Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(provider.clone())
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(bus)
+            .build()
+            .expect("agent should build");
 
-        let agent_stream = agent
-            .stream(ChatMessage::user("hello"))
+        let run_id = agent
+            .run_turn(ChatMessage::user("hello"))
             .await
-            .expect("stream should start");
+            .expect("run should start");
 
-        assert_eq!(agent_stream.turn_id.as_uuid().get_version_num(), 7);
-        agent_stream.cancel.cancel();
+        assert_eq!(agent.current_run(), Some(run_id));
+        assert!(agent.current_turn().is_some());
+        agent.stop();
     }
 
     #[tokio::test]
     async fn stream_rejects_non_user_message() {
         let agent = test_agent();
 
-        let error = match agent.stream(ChatMessage::assistant("nope")).await {
-            Ok(_) => panic!("assistant input should be rejected"),
+        let error = match agent.run_turn(ChatMessage::assistant("nope")).await {
+            Ok(_) => panic!("assistant message should be rejected"),
             Err(error) => error,
         };
 
-        assert!(matches!(error, AgentError::InvalidInputMessageRole { .. }));
+        assert!(matches!(
+            error,
+            AgentError::InvalidInputMessageRole {
+                role: ChatRole::Assistant
+            }
+        ));
     }
 
-    struct FailingEventBus;
-
-    #[async_trait]
-    impl EventStreamBus for FailingEventBus {
-        async fn publish(
-            &self,
-            _envelope: wyse_core::StreamEnvelope,
-        ) -> Result<(), EventStreamBusError> {
-            Ok(())
-        }
-
-        async fn subscribe_run(&self, _run_id: RunId) -> Result<EventStream, EventStreamBusError> {
-            Err(EventStreamBusError::Deserialize(
-                serde_json::from_str::<serde_json::Value>("}")
-                    .expect_err("invalid json should fail"),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_resets_active_on_subscribe_failure() {
-        let agent = Agent::builder()
-            .name("test-agent")
-            .system_prompt("be helpful")
-            .llm_provider(Arc::new(MockLlmProvider::new()))
-            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-            .event_bus(Arc::new(FailingEventBus))
-            .build()
-            .expect("agent should build");
-
-        let error = match agent.stream(ChatMessage::user("fail me")).await {
-            Ok(_) => panic!("subscription failure should return error"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(error, AgentError::EventBus { .. }));
-        assert!(!agent.active.load(Ordering::SeqCst));
-    }
-
-    struct BlockingStreamProvider {
+    struct BlockingStartProvider {
+        started_tx: watch::Sender<bool>,
         release: watch::Receiver<bool>,
     }
 
+    impl BlockingStartProvider {
+        fn new() -> Self {
+            let (started_tx, _started_rx) = watch::channel(false);
+            let (_release_tx, release_rx) = watch::channel(false);
+            Self {
+                started_tx,
+                release: release_rx,
+            }
+        }
+    }
+
     #[async_trait]
-    impl LlmProvider for BlockingStreamProvider {
+    impl LlmProvider for BlockingStartProvider {
         fn provider_name(&self) -> &str {
             "blocking"
         }
@@ -451,6 +377,9 @@ mod tests {
         }
 
         async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+            self.started_tx
+                .send(true)
+                .expect("started signal should send");
             let release = self.release.clone();
 
             Ok(Box::pin(stream::unfold(
@@ -476,25 +405,41 @@ mod tests {
 
     #[tokio::test]
     async fn stream_rejects_second_run_while_background_loop_is_active() {
+        let (started_tx, started_rx) = watch::channel(false);
         let (release, release_rx) = watch::channel(false);
+        let provider = Arc::new(BlockingStartProvider {
+            started_tx,
+            release: release_rx,
+        });
         let agent = Agent::builder()
             .name("test-agent")
             .system_prompt("be helpful")
-            .llm_provider(Arc::new(BlockingStreamProvider {
-                release: release_rx,
-            }))
+            .llm_provider(provider.clone())
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(Arc::new(InMemoryEventStreamBus::default()))
             .build()
             .expect("agent should build");
 
-        let mut stream = agent
-            .stream(ChatMessage::user("hello"))
+        let first_run_id = agent
+            .run_turn(ChatMessage::user("hello"))
             .await
-            .expect("stream should start");
+            .expect("first run should start");
 
+        timeout(Duration::from_secs(1), async {
+            let mut started_rx = started_rx.clone();
+            while !*started_rx.borrow() {
+                started_rx
+                    .changed()
+                    .await
+                    .expect("started signal should remain open");
+            }
+        })
+        .await
+        .expect("background loop should start");
+
+        assert_eq!(agent.current_run(), Some(first_run_id));
         assert!(agent.active.load(Ordering::SeqCst));
-        let error = match agent.stream(ChatMessage::user("again")).await {
+        let error = match agent.run_turn(ChatMessage::user("again")).await {
             Ok(_) => panic!("second run should be rejected while loop is active"),
             Err(error) => error,
         };
@@ -502,10 +447,15 @@ mod tests {
 
         release.send(true).expect("release signal should send");
         timeout(Duration::from_secs(1), async {
-            while let Some(envelope) = stream.events.next().await {
-                let envelope = envelope.expect("event should be delivered");
+            let mut events = agent
+                .event_bus()
+                .subscribe_run(first_run_id)
+                .await
+                .expect("event subscription should succeed");
+            while let Some(envelope) = events.next().await {
+                let StreamEnvelope { event, .. } = envelope.expect("event should be delivered");
                 if matches!(
-                    envelope.event,
+                    event,
                     wyse_core::RuntimeEvent::Agent {
                         event: wyse_core::AgentEvent::Finished { .. },
                         ..
