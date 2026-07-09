@@ -33,6 +33,7 @@ impl Default for AgentConfig {
 }
 
 /// Stream handle returned by [`Agent::stream`].
+#[non_exhaustive]
 pub struct AgentStream {
     /// Run identity for this stream.
     pub run_id: RunId,
