@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/wyse-agent",
+    "crates/wyse-checkpoint",
     "crates/wyse-core",
     "crates/wyse-filesystem",
     "crates/wyse-infra",
@@ -20,6 +21,7 @@ async-trait = "0.1.89"
 bon = "3.9"
 bytes = "1.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 futures-core = "0.3.32"
 futures-util = "0.3.32"
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls", "stream"] }
