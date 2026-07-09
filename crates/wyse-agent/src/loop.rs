@@ -301,21 +301,6 @@ async fn publish_failed(
 }
 
 async fn publish_cancelled(input: &AgentLoopInput, seq: &mut u64) -> Result<(), AgentError> {
-    save_checkpoint(
-        input,
-        *seq,
-        CheckpointStatus::Cancelled,
-        checkpoint_state(
-            input,
-            AgentCheckpointPhase::Cancelled,
-            0,
-            None,
-            TokenUsage::default(),
-            Vec::new(),
-            0,
-        ),
-    )
-    .await?;
     publish_agent_event(input, seq, AgentEvent::Cancelled, None).await
 }
 
@@ -336,7 +321,7 @@ async fn save_checkpoint(
         status,
         AGENT_CHECKPOINT_STATE_VERSION,
         state.encode()?,
-        seq,
+        seq.saturating_sub(1),
     );
     store.put_latest(record).await?;
     Ok(())

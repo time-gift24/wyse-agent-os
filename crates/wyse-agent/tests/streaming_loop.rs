@@ -309,6 +309,7 @@ async fn stream_saves_finished_checkpoint_with_stable_history() {
     assert_eq!(latest.turn_id, agent_stream.turn_id);
     assert_eq!(latest.kind, CheckpointKind::Agent);
     assert_eq!(latest.status, CheckpointStatus::Finished);
+    assert_eq!(latest.last_seq, 4);
     assert!(
         latest
             .state
