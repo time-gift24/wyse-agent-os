@@ -36,6 +36,13 @@ pub enum CheckpointError {
         /// Sequence value that did not fit.
         value: u64,
     },
+    /// Blocking checkpoint task failed.
+    #[error("blocking checkpoint task failed")]
+    BlockingTask {
+        /// Underlying join error.
+        #[source]
+        source: tokio::task::JoinError,
+    },
 }
 
 impl From<rusqlite::Error> for CheckpointError {

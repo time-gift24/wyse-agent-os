@@ -14,6 +14,7 @@ use crate::{CheckpointError, CheckpointKind, CheckpointRecord, CheckpointStatus,
 
 /// SQLite-backed latest checkpoint store.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct SqliteCheckpointStore {
     connection: Arc<Mutex<Connection>>,
 }
@@ -49,49 +50,55 @@ impl SqliteCheckpointStore {
 #[async_trait]
 impl CheckpointStore for SqliteCheckpointStore {
     async fn put_latest(&self, record: CheckpointRecord) -> Result<(), CheckpointError> {
-        let connection = self
-            .connection
-            .lock()
-            .expect("sqlite checkpoint store mutex should not be poisoned");
-        connection.execute(
-            r#"
-            INSERT INTO checkpoints (
-                run_id,
-                turn_id,
-                checkpoint_id,
-                kind,
-                status,
-                state_version,
-                state,
-                last_seq,
-                updated_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-            ON CONFLICT(run_id, turn_id, kind) DO UPDATE SET
-                checkpoint_id = excluded.checkpoint_id,
-                status = excluded.status,
-                state_version = excluded.state_version,
-                state = excluded.state,
-                last_seq = excluded.last_seq,
-                updated_at = excluded.updated_at
-            "#,
-            params![
-                record.run_id.to_string(),
-                record.turn_id.to_string(),
-                record.checkpoint_id.to_string(),
-                record.kind.as_str(),
-                record.status.as_str(),
-                i64::from(record.state_version),
-                record.state,
-                i64::try_from(record.last_seq).map_err(|_| {
-                    CheckpointError::InvalidSequence {
-                        value: record.last_seq,
-                    }
-                })?,
-                record.updated_at.to_rfc3339(),
-            ],
-        )?;
-        Ok(())
+        let last_seq =
+            i64::try_from(record.last_seq).map_err(|_| CheckpointError::InvalidSequence {
+                value: record.last_seq,
+            })?;
+        let connection = Arc::clone(&self.connection);
+        tokio::task::spawn_blocking(move || {
+            let connection = connection
+                .lock()
+                .expect("sqlite checkpoint store mutex should not be poisoned");
+            connection
+                .execute(
+                    r#"
+                    INSERT INTO checkpoints (
+                        run_id,
+                        turn_id,
+                        checkpoint_id,
+                        kind,
+                        status,
+                        state_version,
+                        state,
+                        last_seq,
+                        updated_at
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    ON CONFLICT(run_id, turn_id, kind) DO UPDATE SET
+                        checkpoint_id = excluded.checkpoint_id,
+                        status = excluded.status,
+                        state_version = excluded.state_version,
+                        state = excluded.state,
+                        last_seq = excluded.last_seq,
+                        updated_at = excluded.updated_at
+                    "#,
+                    params![
+                        record.run_id.to_string(),
+                        record.turn_id.to_string(),
+                        record.checkpoint_id.to_string(),
+                        record.kind.as_str(),
+                        record.status.as_str(),
+                        i64::from(record.state_version),
+                        record.state,
+                        last_seq,
+                        record.updated_at.to_rfc3339(),
+                    ],
+                )
+                .map(|_| ())
+                .map_err(CheckpointError::from)
+        })
+        .await
+        .map_err(|source| CheckpointError::BlockingTask { source })?
     }
 
     async fn latest_turn(
@@ -100,31 +107,35 @@ impl CheckpointStore for SqliteCheckpointStore {
         turn_id: TurnId,
         kind: CheckpointKind,
     ) -> Result<Option<CheckpointRecord>, CheckpointError> {
-        let connection = self
-            .connection
-            .lock()
-            .expect("sqlite checkpoint store mutex should not be poisoned");
-        connection
-            .query_row(
-                r#"
-                SELECT
-                    run_id,
-                    turn_id,
-                    checkpoint_id,
-                    kind,
-                    status,
-                    state_version,
-                    state,
-                    last_seq,
-                    updated_at
-                FROM checkpoints
-                WHERE run_id = ?1 AND turn_id = ?2 AND kind = ?3
-                "#,
-                params![run_id.to_string(), turn_id.to_string(), kind.as_str()],
-                row_to_record,
-            )
-            .optional()
-            .map_err(CheckpointError::from)
+        let connection = Arc::clone(&self.connection);
+        tokio::task::spawn_blocking(move || {
+            let connection = connection
+                .lock()
+                .expect("sqlite checkpoint store mutex should not be poisoned");
+            connection
+                .query_row(
+                    r#"
+                    SELECT
+                        run_id,
+                        turn_id,
+                        checkpoint_id,
+                        kind,
+                        status,
+                        state_version,
+                        state,
+                        last_seq,
+                        updated_at
+                    FROM checkpoints
+                    WHERE run_id = ?1 AND turn_id = ?2 AND kind = ?3
+                    "#,
+                    params![run_id.to_string(), turn_id.to_string(), kind.as_str()],
+                    row_to_record,
+                )
+                .optional()
+                .map_err(CheckpointError::from)
+        })
+        .await
+        .map_err(|source| CheckpointError::BlockingTask { source })?
     }
 }
 

@@ -80,6 +80,10 @@ impl CheckpointKind {
     }
 
     /// Parses the database representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stored kind is unknown.
     pub fn from_db(value: &str) -> Result<Self, CheckpointError> {
         match value {
             "agent" => Ok(Self::Agent),
@@ -118,6 +122,10 @@ impl CheckpointStatus {
     }
 
     /// Parses the database representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stored status is unknown.
     pub fn from_db(value: &str) -> Result<Self, CheckpointError> {
         match value {
             "running" => Ok(Self::Running),

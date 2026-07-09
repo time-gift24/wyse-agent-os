@@ -11,11 +11,9 @@ chrono.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 wyse-core.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true
 
 [lints]
 workspace = true
