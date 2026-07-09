@@ -379,6 +379,9 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
             .windows(b"partial".len())
             .any(|window| window == b"partial")
     );
+    let checkpoint_state: serde_json::Value = serde_json::from_slice(&latest.state)
+        .expect("waiting retry checkpoint state should deserialize");
+    assert_eq!(checkpoint_state["retry_count"].as_u64(), Some(1));
 }
 
 #[tokio::test]

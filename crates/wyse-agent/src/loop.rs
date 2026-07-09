@@ -115,7 +115,7 @@ pub(crate) async fn run_agent_loop(
                     checkpoint_state(
                         &input,
                         AgentCheckpointPhase::RunningLlm { turn_index },
-                        0,
+                        1,
                         Some(source.to_string()),
                         usage,
                         Vec::new(),
@@ -161,7 +161,7 @@ pub(crate) async fn run_agent_loop(
                         checkpoint_state(
                             &input,
                             AgentCheckpointPhase::RunningLlm { turn_index },
-                            0,
+                            1,
                             Some(error.to_string()),
                             usage,
                             Vec::new(),
