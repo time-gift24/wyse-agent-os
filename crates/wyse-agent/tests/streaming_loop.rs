@@ -504,6 +504,22 @@ async fn publish_failure_does_not_prevent_finished_checkpoint_or_history_commit(
 async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
     let agent_id = AgentId::new();
     let provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                index: 0,
+                call_id: Some(CallId::from("call-1")),
+                name: Some("echo".to_owned()),
+                arguments_delta: r#"{"message":"hello"}"#.to_owned(),
+            }),
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::ToolCalls,
+                usage: Some(TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    total_tokens: 8,
+                }),
+            },
+        ]),
         ProviderResponse::StreamResults(vec![
             Ok(ChatStreamEvent::TextDelta {
                 delta: "partial".to_owned(),
@@ -516,18 +532,26 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
             },
             ChatStreamEvent::Finished {
                 finish_reason: FinishReason::Stop,
-                usage: None,
+                usage: Some(TokenUsage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    total_tokens: 3,
+                }),
             },
         ]),
     ]));
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(EchoTool::new()))
+        .expect("echo should register");
     let agent = Agent::builder()
         .id(agent_id)
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider.clone())
-        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .tool_registry(Arc::new(registry))
         .event_bus(bus.clone())
         .checkpoint_store(checkpoints.clone())
         .build()
@@ -567,9 +591,15 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider.clone())
-        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .tool_registry({
+            let mut registry = BuiltinToolRegistry::default();
+            registry
+                .register(Arc::new(EchoTool::new()))
+                .expect("echo should register");
+            Arc::new(registry)
+        })
         .event_bus(bus.clone())
-        .checkpoint_store(checkpoints)
+        .checkpoint_store(checkpoints.clone())
         .resume(failed_run_id, failed_turn_id)
         .await
         .expect("agent should resume");
@@ -614,17 +644,27 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
     );
 
     let requests = provider.requests();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1].messages.iter().any(|message| {
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].messages.iter().any(|message| {
         message.role == ChatRole::User && message.content == ChatContent::Text("hello".to_owned())
     }));
-    assert!(!requests[1].messages.iter().any(|message| {
+    assert!(requests[2].messages.iter().any(|message| {
+        message.role == ChatRole::Tool && message.tool_call_id == Some(CallId::from("call-1"))
+    }));
+    assert!(!requests[2].messages.iter().any(|message| {
         message.role == ChatRole::User && message.content == ChatContent::Text("retry".to_owned())
     }));
-    assert!(!requests[1].messages.iter().any(|message| {
+    assert!(!requests[2].messages.iter().any(|message| {
         message.role == ChatRole::Assistant
             && message.content == ChatContent::Text("partial".to_owned())
     }));
+
+    let latest = wait_for_latest_checkpoint(&checkpoints, CheckpointStatus::Finished).await;
+    let checkpoint_state: serde_json::Value = serde_json::from_slice(&latest.state)
+        .expect("finished checkpoint state should deserialize");
+    assert_eq!(checkpoint_state["usage"]["input_tokens"].as_u64(), Some(5));
+    assert_eq!(checkpoint_state["usage"]["output_tokens"].as_u64(), Some(6));
+    assert_eq!(checkpoint_state["usage"]["total_tokens"].as_u64(), Some(11));
 }
 
 #[tokio::test]

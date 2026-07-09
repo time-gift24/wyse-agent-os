@@ -35,6 +35,7 @@ pub(crate) struct AgentLoopInput {
     pub(crate) config: AgentConfig,
     pub(crate) cancel: CancellationToken,
     pub(crate) start_seq: u64,
+    pub(crate) start_usage: TokenUsage,
 }
 
 struct AgentLoopState {
@@ -43,11 +44,8 @@ struct AgentLoopState {
 }
 
 impl AgentLoopState {
-    fn new(seq: u64) -> Self {
-        Self {
-            seq,
-            usage: TokenUsage::default(),
-        }
+    fn new(seq: u64, usage: TokenUsage) -> Self {
+        Self { seq, usage }
     }
 
     fn reserve_event_seq(&mut self) -> u64 {
@@ -60,7 +58,7 @@ impl AgentLoopState {
 pub(crate) async fn run_agent_loop(
     mut input: AgentLoopInput,
 ) -> Result<Vec<ChatMessage>, AgentError> {
-    let mut state = AgentLoopState::new(input.start_seq);
+    let mut state = AgentLoopState::new(input.start_seq, input.start_usage);
 
     save_checkpoint(&input, &state, CheckpointStatus::Running).await?;
 

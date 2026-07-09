@@ -110,6 +110,7 @@ impl Agent {
             config: self.config.clone(),
             cancel: cancel.clone(),
             start_seq: 1,
+            start_usage: TokenUsage::default(),
         };
         let history = Arc::clone(&self.history);
         let active = Arc::clone(&self.active);
@@ -170,12 +171,14 @@ impl Agent {
             return Err(AgentError::RunAlreadyActive);
         }
 
-        let run_id = self
-            .current_run()
-            .ok_or(AgentError::CheckpointNotRetryable)?;
-        let turn_id = self
-            .current_turn()
-            .ok_or(AgentError::CheckpointNotRetryable)?;
+        let Some(run_id) = self.current_run() else {
+            self.active.store(false, Ordering::SeqCst);
+            return Err(AgentError::CheckpointNotRetryable);
+        };
+        let Some(turn_id) = self.current_turn() else {
+            self.active.store(false, Ordering::SeqCst);
+            return Err(AgentError::CheckpointNotRetryable);
+        };
         let cancel = CancellationToken::new();
         *self
             .cancel
@@ -190,6 +193,10 @@ impl Agent {
             .next_seq
             .lock()
             .expect("next seq mutex should not be poisoned");
+        let start_usage = *self
+            .usage
+            .lock()
+            .expect("usage mutex should not be poisoned");
 
         let loop_input = crate::r#loop::AgentLoopInput {
             run_id,
@@ -205,6 +212,7 @@ impl Agent {
             config: self.config.clone(),
             cancel,
             start_seq,
+            start_usage,
         };
         let history = Arc::clone(&self.history);
         let active = Arc::clone(&self.active);
@@ -616,5 +624,39 @@ mod tests {
         })
         .await
         .expect("active flag should clear after loop completion");
+    }
+
+    #[tokio::test]
+    async fn resume_turn_keeps_agent_inactive_when_checkpoint_is_not_retryable() {
+        let provider = Arc::new(BlockingStartProvider::new());
+        let agent = Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(provider)
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .build()
+            .expect("agent should build");
+
+        let error = agent
+            .resume_turn()
+            .await
+            .expect_err("resume should reject non-resumed agent");
+        assert!(matches!(error, AgentError::CheckpointNotRetryable));
+
+        let run_id = agent
+            .run_turn(ChatMessage::user("hello"))
+            .await
+            .expect("run_turn should still start");
+        assert_eq!(agent.current_run(), Some(run_id));
+
+        agent.stop();
+        timeout(Duration::from_secs(1), async {
+            while agent.active.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active flag should clear after cancellation");
     }
 }
