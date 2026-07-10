@@ -5,6 +5,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    task::Poll,
     time::Duration,
 };
 
@@ -516,7 +517,7 @@ async fn approval_wrong_id_does_not_interrupt_active_request() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn approval_cancellation_wins_before_tool_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = approval_agent(
@@ -527,7 +528,13 @@ async fn approval_cancellation_wins_before_tool_execution() {
 
     let (_run_id, mut events) =
         run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
-    let _approval_id = wait_for_approval_request(&mut events).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    let resolution = agent.resolve_tool_approval(approval_id, ApprovalDecision::Approve);
+    tokio::pin!(resolution);
+    assert!(matches!(
+        futures_util::poll!(&mut resolution),
+        Poll::Pending
+    ));
     agent.stop();
 
     timeout(Duration::from_secs(1), async {
@@ -550,6 +557,7 @@ async fn approval_cancellation_wins_before_tool_execution() {
     })
     .await
     .expect("timed out waiting for cancellation");
+    assert!(matches!(resolution.await, Err(AgentError::NoActiveTurn)));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
