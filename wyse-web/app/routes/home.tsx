@@ -1,58 +1,14 @@
-import { ArrowRightIcon, AtomIcon } from "lucide-react"
+import { ArrowRightIcon } from "lucide-react"
 
-import { ThemeToggle } from "~/components/theme-toggle"
+import { SiteNavbar } from "~/components/site-navbar"
 import { Badge } from "~/components/ui/badge"
 import { Button } from "~/components/ui/button"
-import {
-  NavigationMenu,
-  NavigationMenuItem,
-  NavigationMenuLink,
-  NavigationMenuList,
-  navigationMenuTriggerStyle,
-} from "~/components/ui/navigation-menu"
-import { Separator } from "~/components/ui/separator"
 
 export default function Home() {
   return (
     <main className="flex min-h-[100dvh]">
       <section className="flex min-h-[100dvh] w-full flex-col px-4 py-4 md:px-8 md:py-6">
-        <header className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-3 py-2">
-          <a
-            href="/"
-            className="flex min-w-0 items-center gap-2 text-sm font-medium md:text-base"
-            aria-label="Wyse Agent OS home"
-          >
-            <AtomIcon className="size-5 shrink-0" aria-hidden="true" />
-            <span className="truncate">Wyse Agent OS</span>
-          </a>
-
-          <NavigationMenu className="hidden flex-none md:flex">
-            <NavigationMenuList>
-              <NavigationMenuItem>
-                <NavigationMenuLink
-                  render={<a href="#runtime" />}
-                  className={navigationMenuTriggerStyle()}
-                >
-                  Features
-                </NavigationMenuLink>
-              </NavigationMenuItem>
-              <NavigationMenuItem>
-                <NavigationMenuLink
-                  render={<a href="#workflows" />}
-                  className={navigationMenuTriggerStyle()}
-                >
-                  About
-                </NavigationMenuLink>
-              </NavigationMenuItem>
-            </NavigationMenuList>
-          </NavigationMenu>
-
-          <div className="flex items-center gap-3">
-            <Separator orientation="vertical" className="hidden md:block" />
-            <ThemeToggle />
-            <Button size="lg">Sign up</Button>
-          </div>
-        </header>
+        <SiteNavbar />
 
         <div className="flex flex-1 items-center justify-center py-16 md:py-24">
           <div className="flex max-w-4xl flex-col items-center gap-8 text-center">

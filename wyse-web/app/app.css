@@ -168,7 +168,11 @@
   --wyse-glass-strong: oklch(1 0 0 / 14%);
   --wyse-action: var(--wyse-baltic-sea);
   --wyse-action-ink: oklch(0.18 0.03 236);
-  --wyse-accent: color-mix(in oklch, var(--wyse-quiet-violet) 48%, var(--wyse-cloud-cover));
+  --wyse-accent: color-mix(
+    in oklch,
+    var(--wyse-quiet-violet) 48%,
+    var(--wyse-cloud-cover)
+  );
   --wyse-accent-ink: var(--wyse-cloud-dancer);
   --wyse-focus: var(--wyse-baltic-sea);
   --wyse-danger: oklch(0.704 0.12 25);
@@ -353,6 +357,23 @@
     backdrop-filter: blur(18px) saturate(130%);
     -webkit-backdrop-filter: blur(18px) saturate(130%);
   }
+
+  .site-navbar-glass {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    visibility: hidden;
+    opacity: 0;
+    transform: scale(0.985);
+    transform-origin: 50% 50%;
+    will-change: opacity, transform;
+  }
+
+  .site-navbar-glass .glass-surface {
+    min-width: 100%;
+    min-height: 100%;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -373,7 +394,11 @@
     --wyse-glass-strong: oklch(1 0 0 / 14%);
     --wyse-action: var(--wyse-baltic-sea);
     --wyse-action-ink: oklch(0.18 0.03 236);
-    --wyse-accent: color-mix(in oklch, var(--wyse-quiet-violet) 48%, var(--wyse-cloud-cover));
+    --wyse-accent: color-mix(
+      in oklch,
+      var(--wyse-quiet-violet) 48%,
+      var(--wyse-cloud-cover)
+    );
     --wyse-accent-ink: var(--wyse-cloud-dancer);
     --wyse-focus: var(--wyse-baltic-sea);
     --wyse-danger: oklch(0.704 0.12 25);
@@ -436,6 +461,12 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .wyse-glass-band {
+    background: var(--wyse-paper);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .site-navbar-glass .glass-surface {
     background: var(--wyse-paper);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
