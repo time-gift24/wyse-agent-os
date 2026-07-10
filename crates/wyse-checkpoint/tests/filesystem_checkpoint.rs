@@ -8,7 +8,7 @@ use wyse_checkpoint::{
     AgentCheckpoint, AgentState, AgentStatus, CheckpointError, FilesystemAgentCheckpoint,
 };
 use wyse_core::{
-    AgentEvent, AgentId, ChatMessage, EventSource, HistoryQuery, RunId, RuntimeEvent,
+    AgentEvent, AgentId, ChatMessage, ChatRole, EventSource, HistoryQuery, RunId, RuntimeEvent,
     StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{Entry, VirtualPath};
@@ -118,6 +118,41 @@ async fn append_rejects_an_already_sequenced_message() {
         .expect_err("sequenced input");
 
     assert!(matches!(error, CheckpointError::MessageAlreadySequenced));
+    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert!(!filesystem.exists("/agents/a/messages/1.json"));
+}
+
+#[tokio::test]
+async fn append_rejects_a_system_message_before_writing() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let mut envelope = message_envelope(agent_id, RunId::new(), TurnId::new());
+    let RuntimeEvent::Agent {
+        event: AgentEvent::Message { message, .. },
+        ..
+    } = &mut envelope.event
+    else {
+        panic!("message fixture");
+    };
+    *message = ChatMessage::system("system prompt");
+
+    let error = checkpoint
+        .append_message(envelope)
+        .await
+        .expect_err("system message role");
+
+    assert!(matches!(
+        error,
+        CheckpointError::InvalidMessageRole {
+            role: ChatRole::System
+        }
+    ));
     assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
     assert!(!filesystem.exists("/agents/a/messages/1.json"));
 }

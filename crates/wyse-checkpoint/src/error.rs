@@ -1,7 +1,7 @@
 //! Error types for agent checkpoint persistence.
 
 use thiserror::Error;
-use wyse_core::{AgentId, RunId, TurnId};
+use wyse_core::{AgentId, ChatRole, RunId, TurnId};
 use wyse_filesystem::{CasUpdateError, FilesystemError};
 
 /// Error returned by agent checkpoint operations.
@@ -26,6 +26,12 @@ pub enum CheckpointError {
     /// A checkpoint append input already has a business sequence.
     #[error("checkpoint append requires an unsequenced message")]
     MessageAlreadySequenced,
+    /// A message role cannot be committed to checkpoint history.
+    #[error("invalid checkpoint message role: {role:?}")]
+    InvalidMessageRole {
+        /// Rejected message role.
+        role: ChatRole,
+    },
     /// The requested history page size is outside the supported range.
     #[error("history limit must be between 1 and {maximum}: {actual}")]
     InvalidHistoryLimit {

@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
 use wyse_core::{
-    AgentEvent, AgentId, EventSource, HistoryPage, HistoryQuery, RunId, RuntimeEvent,
+    AgentEvent, AgentId, ChatRole, EventSource, HistoryPage, HistoryQuery, RunId, RuntimeEvent,
     StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{
@@ -308,11 +308,17 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         }
         let RuntimeEvent::Agent {
             agent_id,
-            event: AgentEvent::Message { turn_id, .. },
+            event: AgentEvent::Message { turn_id, message },
         } = &envelope.event
         else {
             return Err(CheckpointError::UnexpectedMessageEvent);
         };
+        if !matches!(
+            message.role,
+            ChatRole::User | ChatRole::Assistant | ChatRole::Tool
+        ) {
+            return Err(CheckpointError::InvalidMessageRole { role: message.role });
+        }
         let input_agent_id = *agent_id;
         let run_id = envelope.run_id;
         let turn_id = *turn_id;
