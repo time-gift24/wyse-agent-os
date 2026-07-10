@@ -68,15 +68,20 @@ export function Dashboard({ locale, t }: DashboardProps) {
           className="wyse-dashboard-shortcut-list"
           aria-label={t("dashboard.shortcuts")}
         >
-          {shortcuts.map((shortcut) => (
-            <a
-              key={shortcut.href}
-              className="wyse-dashboard-shortcut"
-              href={shortcut.href}
-            >
-              {shortcut.title}
-            </a>
-          ))}
+          <a
+            id="agents"
+            className="wyse-dashboard-shortcut"
+            href={shortcuts[0].href}
+          >
+            {shortcuts[0].title}
+          </a>
+          <a
+            id="workflows"
+            className="wyse-dashboard-shortcut"
+            href={shortcuts[1].href}
+          >
+            {shortcuts[1].title}
+          </a>
         </nav>
         <div className="wyse-dashboard-empty">
           <h3 className="wyse-dashboard-empty-title">

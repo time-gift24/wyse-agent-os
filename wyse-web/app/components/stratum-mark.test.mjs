@@ -141,3 +141,10 @@ test("dashboard component rules keep visual declarations in Tailwind apply utili
     /(?:^|\n)\s*(?:border|background|box-shadow|backdrop-filter|-webkit-backdrop-filter):/
   )
 })
+
+test("dashboard quick-open links have reachable semantic targets", async () => {
+  const dashboard = await readFile(dashboardUrl, "utf8")
+
+  assert.equal((dashboard.match(/id="agents"/g) ?? []).length, 1)
+  assert.equal((dashboard.match(/id="workflows"/g) ?? []).length, 1)
+})
