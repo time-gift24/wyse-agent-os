@@ -18,6 +18,15 @@ pub enum EventStreamBusError {
         /// Cursor requested by the subscriber.
         cursor: EventCursor,
     },
+    /// Requested cursor cannot be advanced to the next transport sequence.
+    #[error("event cursor cannot advance beyond the maximum transport sequence")]
+    CursorOverflow,
+    /// NATS event stream configuration is invalid.
+    #[error("invalid nats event stream configuration: {reason}")]
+    InvalidConfig {
+        /// Invalid configuration condition.
+        reason: &'static str,
+    },
     /// Event envelope serialization failed.
     #[error("failed to serialize stream envelope")]
     Serialize(#[source] serde_json::Error),

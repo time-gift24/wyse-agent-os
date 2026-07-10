@@ -3,6 +3,11 @@ name: wyse-infra-test
 services:
   nats-stream:
     image: nats:2-alpine
-    command: ["-js"]
+    command: ["-js", "--store_dir", "/data"]
     ports:
       - "44227:4222"
+    volumes:
+      - nats-stream-data:/data
+
+volumes:
+  nats-stream-data:

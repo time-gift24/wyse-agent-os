@@ -1,6 +1,6 @@
 //! Event stream bus public definitions.
 
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -16,9 +16,19 @@ pub type EventStream =
 #[async_trait]
 pub trait EventStreamBus: Send + Sync {
     /// Publishes one complete stream envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the envelope has no agent scope, cannot be serialized, or the backend
+    /// rejects the publish.
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError>;
 
     /// Subscribes to one agent's retained and live events from the requested position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventStreamBusError::CursorExpired`] if the requested cursor is no longer
+    /// retained, or a backend error if the subscription cannot be created.
     async fn subscribe_agent(
         &self,
         agent_id: AgentId,
@@ -33,19 +43,28 @@ pub struct NatsEventStreamBusConfig {
     pub url: String,
     /// JetStream stream name.
     pub stream_name: String,
-    /// Subject prefix before `<run_id>.<event_type>`.
+    /// Subject prefix before `<agent_id>.<agent_event_type>`.
     pub subject_prefix: String,
     /// Number of stream replicas.
     pub replicas: usize,
+    /// Maximum retained event age.
+    pub max_age: Duration,
+    /// Maximum retained stream size in bytes.
+    pub max_bytes: i64,
+    /// Maximum retained event count.
+    pub max_messages: i64,
 }
 
 impl Default for NatsEventStreamBusConfig {
     fn default() -> Self {
         Self {
             url: "nats://localhost:4222".to_owned(),
-            stream_name: "WYSE_EVENTS".to_owned(),
-            subject_prefix: "wyse.events".to_owned(),
+            stream_name: "AGENT_EVENTS".to_owned(),
+            subject_prefix: "events.agent".to_owned(),
             replicas: 1,
+            max_age: Duration::from_secs(7 * 24 * 60 * 60),
+            max_bytes: 1_073_741_824,
+            max_messages: 1_000_000,
         }
     }
 }
