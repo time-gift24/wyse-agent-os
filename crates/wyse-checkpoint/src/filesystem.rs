@@ -337,6 +337,10 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
 
             let existing = self.read_message(&state, seq).await?;
             if self.read_message(&state, beyond).await?.is_some() {
+                let refreshed = self.read_state().await?;
+                if refreshed.last_seq != state.last_seq {
+                    continue;
+                }
                 trace_checkpoint_corruption(&state, beyond);
                 return Err(CheckpointError::MessageBeyondFrontier {
                     seq: beyond,

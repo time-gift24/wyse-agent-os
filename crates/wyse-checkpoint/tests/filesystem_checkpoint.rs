@@ -779,3 +779,51 @@ async fn append_reads_only_state_and_the_constant_size_frontier() {
     assert_eq!(filesystem.read_count("/agents/a/messages/11.json"), 1);
     assert_eq!(filesystem.read_count("/agents/a/messages/12.json"), 1);
 }
+
+#[tokio::test]
+async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let mut advanced_state = checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    filesystem.pause_next_read("/agents/a/messages/2.json");
+
+    let append = tokio::spawn({
+        let checkpoint = checkpoint.clone();
+        async move {
+            checkpoint
+                .append_message(
+                    run_id,
+                    turn_id,
+                    DateTime::<Utc>::UNIX_EPOCH,
+                    EventSource::Run,
+                    ChatMessage::user("requested"),
+                    BTreeMap::new(),
+                )
+                .await
+        }
+    });
+    filesystem.wait_for_read_pause().await;
+    let committed = message_envelope(agent_id, run_id, turn_id, 1);
+    let frontier = message_envelope(agent_id, run_id, turn_id, 2);
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&committed));
+    filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&frontier));
+    advanced_state.last_seq = 1;
+    filesystem.insert_entry("/agents/a/agent.json", json_entry(&advanced_state));
+    filesystem.resume_read();
+
+    let appended = append
+        .await
+        .expect("append task")
+        .expect("stale append retries");
+
+    assert_eq!(appended.event.business_seq(), Some(3));
+    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 3);
+    assert!(filesystem.exists("/agents/a/messages/3.json"));
+}

@@ -24,6 +24,9 @@ pub(super) struct MemoryCasFilesystem {
     pause_next_version_write: AtomicBool,
     version_write_paused: Notify,
     resume_version_write: Notify,
+    pause_read_path: Mutex<Option<VirtualPath>>,
+    read_paused: Notify,
+    resume_read: Notify,
 }
 
 impl MemoryCasFilesystem {
@@ -87,6 +90,19 @@ impl MemoryCasFilesystem {
         self.resume_version_write.notify_one();
     }
 
+    pub(super) fn pause_next_read(&self, path: &str) {
+        let path = VirtualPath::try_from(path).expect("valid fixture path");
+        *self.pause_read_path.lock().expect("pause read mutex") = Some(path);
+    }
+
+    pub(super) async fn wait_for_read_pause(&self) {
+        self.read_paused.notified().await;
+    }
+
+    pub(super) fn resume_read(&self) {
+        self.resume_read.notify_one();
+    }
+
     pub(super) fn reset_read_counts(&self) {
         self.read_counts.lock().expect("read counts mutex").clear();
         self.list_count.store(0, Ordering::SeqCst);
@@ -121,6 +137,19 @@ impl Filesystem for MemoryCasFilesystem {
             .expect("read counts mutex")
             .entry(path.clone())
             .or_default() += 1;
+        let should_pause = {
+            let mut pause_path = self.pause_read_path.lock().expect("pause read mutex");
+            if pause_path.as_ref() == Some(path) {
+                pause_path.take();
+                true
+            } else {
+                false
+            }
+        };
+        if should_pause {
+            self.read_paused.notify_one();
+            self.resume_read.notified().await;
+        }
         Ok(self
             .records
             .lock()
