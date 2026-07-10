@@ -33,6 +33,11 @@ pub struct FilesystemAgentCheckpoint {
     root: VirtualPath,
 }
 
+enum CommitSequenceOutcome {
+    Committed(AgentState),
+    Advanced,
+}
+
 impl FilesystemAgentCheckpoint {
     /// Creates a checkpoint rooted at an agent-visible virtual path.
     #[must_use]
@@ -117,7 +122,7 @@ impl FilesystemAgentCheckpoint {
         &self,
         expected_previous: u64,
         seq: u64,
-    ) -> Result<AgentState, CheckpointError> {
+    ) -> Result<CommitSequenceOutcome, CheckpointError> {
         let updated_at = Utc::now();
         let attempts = AtomicU64::new(0);
         let result = cas_update(
@@ -142,32 +147,26 @@ impl FilesystemAgentCheckpoint {
         )
         .await;
         trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), Some(seq));
-        result.map_err(CheckpointError::from)
+        match result {
+            Ok(state) => Ok(CommitSequenceOutcome::Committed(state)),
+            Err(CasUpdateError::Apply(CheckpointError::MessageBeyondFrontier {
+                seq: attempted,
+                frontier,
+            })) if attempted == seq && frontier > seq => Ok(CommitSequenceOutcome::Advanced),
+            Err(error) => Err(CheckpointError::from(error)),
+        }
     }
 
     async fn reconcile_frontier(
         &self,
         state: AgentState,
         message_sequences: &BTreeSet<u64>,
-    ) -> Result<AgentState, CheckpointError> {
-        self.validate_committed_messages(&state).await?;
-
-        let frontier = state
-            .last_seq
-            .checked_add(1)
-            .ok_or(CheckpointError::SequenceOverflow)?;
-        if let Some(seq) = message_sequences
-            .range((Excluded(frontier), Unbounded))
-            .next()
-        {
-            trace_checkpoint_corruption(&state, *seq);
-            return Err(CheckpointError::MessageBeyondFrontier {
-                seq: *seq,
-                frontier,
-            });
-        }
+    ) -> Result<Option<AgentState>, CheckpointError> {
+        let frontier = self
+            .validate_integrity_snapshot(&state, message_sequences)
+            .await?;
         if !message_sequences.contains(&frontier) {
-            return Ok(state);
+            return Ok(Some(state));
         }
         let frontier_message = self
             .read_message(&state, frontier)
@@ -190,7 +189,10 @@ impl FilesystemAgentCheckpoint {
             reconciliation_count = 1_u64,
             "checkpoint frontier reconciliation"
         );
-        self.commit_sequence(state.last_seq, frontier).await
+        match self.commit_sequence(state.last_seq, frontier).await? {
+            CommitSequenceOutcome::Committed(state) => Ok(Some(state)),
+            CommitSequenceOutcome::Advanced => Ok(None),
+        }
     }
 
     async fn list_message_sequences(&self) -> Result<BTreeSet<u64>, CheckpointError> {
@@ -208,6 +210,42 @@ impl FilesystemAgentCheckpoint {
         Ok(sequences)
     }
 
+    async fn read_integrity_snapshot(
+        &self,
+    ) -> Result<(AgentState, BTreeSet<u64>), CheckpointError> {
+        loop {
+            let state = self.read_state().await?;
+            let message_sequences = self.list_message_sequences().await?;
+            let refreshed = self.read_state().await?;
+            if refreshed.last_seq == state.last_seq {
+                return Ok((refreshed, message_sequences));
+            }
+        }
+    }
+
+    async fn validate_integrity_snapshot(
+        &self,
+        state: &AgentState,
+        message_sequences: &BTreeSet<u64>,
+    ) -> Result<u64, CheckpointError> {
+        let frontier = state
+            .last_seq
+            .checked_add(1)
+            .ok_or(CheckpointError::SequenceOverflow)?;
+        if let Some(seq) = message_sequences
+            .range((Excluded(frontier), Unbounded))
+            .next()
+        {
+            trace_checkpoint_corruption(state, *seq);
+            return Err(CheckpointError::MessageBeyondFrontier {
+                seq: *seq,
+                frontier,
+            });
+        }
+        self.validate_committed_messages(state).await?;
+        Ok(frontier)
+    }
+
     async fn validate_committed_messages(&self, state: &AgentState) -> Result<(), CheckpointError> {
         for seq in 1..=state.last_seq {
             if self.read_message(state, seq).await?.is_none() {
@@ -223,13 +261,10 @@ impl FilesystemAgentCheckpoint {
 impl AgentCheckpoint for FilesystemAgentCheckpoint {
     async fn load_agent(&self) -> Result<AgentState, CheckpointError> {
         loop {
-            let state = self.read_state().await?;
-            let message_sequences = self.list_message_sequences().await?;
-            let refreshed = self.read_state().await?;
-            if refreshed.last_seq != state.last_seq {
-                continue;
+            let (state, message_sequences) = self.read_integrity_snapshot().await?;
+            if let Some(state) = self.reconcile_frontier(state, &message_sequences).await? {
+                return Ok(state);
             }
-            return self.reconcile_frontier(refreshed, &message_sequences).await;
         }
     }
 
@@ -276,12 +311,10 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         let mut append_attempt = 0_u64;
         loop {
             append_attempt = append_attempt.saturating_add(1);
-            let state = self.read_state().await?;
-            self.validate_committed_messages(&state).await?;
-            let seq = state
-                .last_seq
-                .checked_add(1)
-                .ok_or(CheckpointError::SequenceOverflow)?;
+            let (state, message_sequences) = self.read_integrity_snapshot().await?;
+            let seq = self
+                .validate_integrity_snapshot(&state, &message_sequences)
+                .await?;
             let envelope = StreamEnvelope {
                 run_id,
                 timestamp,

@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use tokio::sync::Notify;
 use wyse_filesystem::{
     CasExpectation, DirEntry, Entry, FileMetadata, FileType, Filesystem, FilesystemError,
     RecordVersion, VersionedEntry, VirtualPath,
@@ -20,6 +21,9 @@ pub(super) struct MemoryCasFilesystem {
     list_count: AtomicU64,
     next_version: AtomicU64,
     fail_next_version_write: AtomicBool,
+    pause_next_version_write: AtomicBool,
+    version_write_paused: Notify,
+    resume_version_write: Notify,
 }
 
 impl MemoryCasFilesystem {
@@ -54,12 +58,33 @@ impl MemoryCasFilesystem {
             .map(|record| record.version)
     }
 
+    pub(super) fn entry(&self, path: &str) -> Option<Entry> {
+        let path = VirtualPath::try_from(path).expect("valid fixture path");
+        self.records
+            .lock()
+            .expect("records mutex")
+            .get(&path)
+            .map(|record| record.entry.clone())
+    }
+
     pub(super) fn fail_next_version_write(&self) {
         self.fail_next_version_write.store(true, Ordering::SeqCst);
     }
 
     pub(super) fn version_write_failure_pending(&self) -> bool {
         self.fail_next_version_write.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn pause_next_version_write(&self) {
+        self.pause_next_version_write.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) async fn wait_for_version_write_pause(&self) {
+        self.version_write_paused.notified().await;
+    }
+
+    pub(super) fn resume_version_write(&self) {
+        self.resume_version_write.notify_one();
     }
 
     pub(super) fn reset_read_counts(&self) {
@@ -109,12 +134,18 @@ impl Filesystem for MemoryCasFilesystem {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        let mut records = self.records.lock().expect("records mutex");
+        if matches!(cas, CasExpectation::Version(_))
+            && self.pause_next_version_write.swap(false, Ordering::SeqCst)
+        {
+            self.version_write_paused.notify_one();
+            self.resume_version_write.notified().await;
+        }
         if matches!(cas, CasExpectation::Version(_))
             && self.fail_next_version_write.swap(false, Ordering::SeqCst)
         {
             return Err(FilesystemError::VersionMismatch { path: path.clone() });
         }
+        let mut records = self.records.lock().expect("records mutex");
 
         match cas {
             CasExpectation::Absent if records.contains_key(path) => {

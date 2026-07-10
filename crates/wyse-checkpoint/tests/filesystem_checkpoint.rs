@@ -312,6 +312,49 @@ async fn append_rejects_an_uncommitted_frontier_from_a_different_run() {
 }
 
 #[tokio::test]
+async fn append_rejects_discontiguous_message_before_advancing_frontier() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let second = message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
+    filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
+
+    let error = checkpoint
+        .append_message(
+            RunId::new(),
+            TurnId::new(),
+            DateTime::<Utc>::UNIX_EPOCH,
+            EventSource::Run,
+            ChatMessage::user("must not persist"),
+            BTreeMap::new(),
+        )
+        .await
+        .expect_err("discontiguous message");
+
+    assert!(matches!(
+        error,
+        CheckpointError::MessageBeyondFrontier {
+            seq: 2,
+            frontier: 1
+        }
+    ));
+    let state: AgentState = serde_json::from_slice(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent entry")
+            .contents(),
+    )
+    .expect("agent state");
+    assert_eq!(state.last_seq, 0);
+    assert!(!filesystem.exists("/agents/a/messages/1.json"));
+}
+
+#[tokio::test]
 async fn load_rejects_missing_committed_message() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
@@ -451,6 +494,50 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
 
     assert_eq!(updated.status, AgentStatus::Running);
     assert_eq!(updated.last_seq, 1);
+}
+
+#[tokio::test]
+async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let mut latest_state = checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let first = message_envelope(agent_id, run_id, turn_id, 1);
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
+    filesystem.pause_next_version_write();
+
+    let load = tokio::spawn({
+        let checkpoint = checkpoint.clone();
+        async move { checkpoint.load_agent().await }
+    });
+    filesystem.wait_for_version_write_pause().await;
+    let second = message_envelope(agent_id, run_id, turn_id, 2);
+    filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
+    latest_state.last_seq = 2;
+    filesystem.insert_entry("/agents/a/agent.json", json_entry(&latest_state));
+    filesystem.resume_version_write();
+
+    let loaded = load
+        .await
+        .expect("load task")
+        .expect("load retries after state advance");
+    let page = checkpoint
+        .history_page(HistoryQuery {
+            after_seq: 0,
+            through_seq: Some(2),
+            limit: 2,
+        })
+        .await
+        .expect("latest valid history");
+
+    assert_eq!(loaded.last_seq, 2);
+    assert_eq!(event_sequences(&page.events), [1, 2]);
 }
 
 #[tokio::test]
