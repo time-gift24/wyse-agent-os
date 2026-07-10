@@ -167,7 +167,7 @@ export function SiteNavbar() {
           <LocaleToggle />
           <ThemeToggle />
           <Button
-            className="site-navbar-cta"
+            className="site-navbar-cta max-sm:hidden"
             render={<a href="#dashboard" />}
             size="lg"
           >

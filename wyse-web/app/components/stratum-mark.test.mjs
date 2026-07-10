@@ -192,7 +192,7 @@ test("the mobile navbar keeps controls while compacting redundant content", asyn
   assert.match(navbar, /<ThemeToggle\s*\/>/)
   assert.match(navbar, /className="site-navbar-brand-copy"/)
   assert.match(navbar, /className="site-navbar-actions"/)
-  assert.match(navbar, /className="site-navbar-cta"/)
+  assert.match(navbar, /className="site-navbar-cta(?:\s|")/)
   assert.match(
     appCss,
     /\.site-navbar-brand-copy\s*{\s*@apply hidden [^;]*sm:flex;\s*}/
@@ -205,4 +205,10 @@ test("the mobile navbar keeps controls while compacting redundant content", asyn
     appCss,
     /\.site-navbar-actions\s*{\s*@apply [^;]*gap-1[^;]*sm:gap-3;\s*}/
   )
+})
+
+test("the mobile navbar CTA has an instance-level responsive hide utility", async () => {
+  const navbar = await readFile(navbarUrl, "utf8")
+
+  assert.match(navbar, /<Button\s+className="site-navbar-cta max-sm:hidden"/)
 })
