@@ -28,6 +28,8 @@ export const messages = {
     "dashboard.empty.title": "新的运行会显示在这里",
     "dashboard.empty.body": "连接运行时后，这里将展示实时执行记录。",
     "locale.toggle": "切换显示语言",
+    "locale.option.zh": "中文",
+    "locale.option.en": "EN",
   },
   en: {
     "hero.title": "Build typed agents",
@@ -51,6 +53,8 @@ export const messages = {
     "dashboard.empty.title": "New runs will appear here",
     "dashboard.empty.body": "Connect a runtime to show live execution records here.",
     "locale.toggle": "Change display language",
+    "locale.option.zh": "中文",
+    "locale.option.en": "EN",
   },
 } as const satisfies Record<Locale, Record<string, string>>
 

@@ -15,7 +15,7 @@ export function LocaleToggle() {
         type="button"
         variant={locale === "zh" ? "secondary" : "ghost"}
       >
-        中文
+        {t("locale.option.zh")}
       </Button>
       <Button
         aria-pressed={locale === "en"}
@@ -24,7 +24,7 @@ export function LocaleToggle() {
         type="button"
         variant={locale === "en" ? "secondary" : "ghost"}
       >
-        EN
+        {t("locale.option.en")}
       </Button>
     </div>
   )
