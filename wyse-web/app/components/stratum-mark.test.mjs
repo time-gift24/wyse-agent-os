@@ -16,6 +16,9 @@ test("the supplied Stratum SVG is background-free and keeps its original geometr
   assert.match(asset, /viewBox="480 108 712 712"/)
   assert.match(asset, /data-stratum-weave/)
   assert.match(asset, /data-stratum-diamond/)
+  assert.match(asset, /M 624\.64,488/)
+  assert.match(asset, /M 873\.32,404\.71/)
+  assert.match(asset, /#65aa9f/)
   assert.doesNotMatch(asset, /<rect\b/)
 })
 
@@ -25,6 +28,9 @@ test("the compact Stratum SVG remains a transparent white mark", async () => {
 
   assert.ok(fills.length >= 9)
   assert.deepEqual(new Set(fills), new Set(["#fff"]))
+  assert.match(asset, /stroke-width="12"/)
+  assert.match(asset, /stroke-linecap="round"/)
+  assert.match(asset, /stroke-linejoin="round"/)
   assert.doesNotMatch(asset, /<rect\b/)
 })
 
@@ -36,9 +42,17 @@ test("the Stratum component scopes motion to its diamond", async () => {
 
   assert.match(component, /stratum-mark\.svg\?raw/)
   assert.match(component, /stratum-mark-compact\.svg\?raw/)
+  assert.match(component, /variant = "default"/)
+  assert.match(component, /variant === "compact"/)
+  assert.match(component, /dangerouslySetInnerHTML/)
   assert.match(component, /data-stratum-diamond/)
+  assert.match(component, /querySelector<SVGGElement>/)
+  assert.match(component, /viewBox\.baseVal/)
   assert.match(component, /prefers-reduced-motion: no-preference/)
   assert.match(component, /gsap\.timeline/)
+  assert.match(component, /setAttribute\(\s*"transform"/)
+  assert.doesNotMatch(component, /svgOrigin/)
+  assert.doesNotMatch(component, /transformBox/)
   assert.doesNotMatch(component, /gsap\.(?:to|from|fromTo)\([^)]*weave/s)
   assert.doesNotMatch(appCss, /drop-shadow/)
 })

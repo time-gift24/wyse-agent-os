@@ -156,6 +156,7 @@ export function WorkspacePager({
               aria-hidden={index !== activeSlideIndex}
               className="workspace-pager-slide"
               data-workspace-pager="slide"
+              inert={index !== activeSlideIndex}
               key={index}
             >
               {slide}

@@ -52,13 +52,16 @@ export function ChatWorkspace() {
             </SidebarFooter>
           </Sidebar>
           <SidebarInset className="wyse-workspace-inset">
-            <main className="wyse-chat-main">
+            <section className="wyse-chat-main">
               <div className="wyse-chat-copy">
                 <p className="wyse-chat-eyebrow">{t("nav.chat")}</p>
                 <h2 className="wyse-chat-title">{t("chat.title")}</h2>
                 <p className="wyse-chat-body">{t("chat.body")}</p>
               </div>
-              <form className="wyse-chat-composer">
+              <form
+                className="wyse-chat-composer"
+                onSubmit={(event) => event.preventDefault()}
+              >
                 <label className="wyse-visually-hidden" htmlFor="chat-prompt">
                   {t("chat.prompt")}
                 </label>
@@ -72,7 +75,7 @@ export function ChatWorkspace() {
                   <SendIcon aria-hidden="true" />
                 </button>
               </form>
-            </main>
+            </section>
           </SidebarInset>
         </SidebarProvider>
       </div>

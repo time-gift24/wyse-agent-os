@@ -72,7 +72,7 @@ export function OrchestrationWorkspace() {
             </SidebarFooter>
           </Sidebar>
           <SidebarInset className="wyse-workspace-inset">
-            <main className="wyse-orchestration-main">
+            <section className="wyse-orchestration-main">
               <header className="wyse-orchestration-header">
                 <p className="wyse-chat-eyebrow">{t("nav.orchestration")}</p>
                 <h2 className="wyse-orchestration-title">
@@ -90,7 +90,7 @@ export function OrchestrationWorkspace() {
                   {t("orchestration.result")}
                 </div>
               </div>
-            </main>
+            </section>
           </SidebarInset>
         </SidebarProvider>
       </div>

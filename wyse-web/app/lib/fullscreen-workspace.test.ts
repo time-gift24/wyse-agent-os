@@ -38,6 +38,37 @@ test("builds both workspace panes on the shadcn Sidebar foundation", async () =>
   }
 })
 
+test("removes inactive pager slides from interaction and tab order", async () => {
+  const pager = await component("workspace-pager.tsx")
+
+  assert.match(pager, /aria-hidden=\{index !== activeSlideIndex\}/)
+  assert.match(pager, /inert=\{index !== activeSlideIndex\}/)
+})
+
+test("keeps SidebarInset workspace content out of nested main landmarks", async () => {
+  const [chat, orchestration] = await Promise.all([
+    component("chat-workspace.tsx"),
+    component("orchestration-workspace.tsx"),
+  ])
+
+  for (const source of [chat, orchestration]) {
+    assert.doesNotMatch(source, /<SidebarInset[^>]*>[\s\S]*?<main\b/)
+    assert.match(
+      source,
+      /<section className="wyse-(?:chat|orchestration)-main"/
+    )
+  }
+})
+
+test("prevents the static chat composer from submitting the page", async () => {
+  const chat = await component("chat-workspace.tsx")
+
+  assert.match(
+    chat,
+    /<form\s+className="wyse-chat-composer"\s+onSubmit=\{\(event\) => event\.preventDefault\(\)\}/
+  )
+})
+
 test("keeps workspace styling solid and removes the old dashboard", async () => {
   const css = await readFile(new URL("../app.css", import.meta.url), "utf8")
 
