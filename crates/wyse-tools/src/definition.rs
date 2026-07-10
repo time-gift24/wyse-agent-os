@@ -5,9 +5,44 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wyse_core::{CallId, ToolName, ToolSpec};
+use wyse_core::{CallId, DangerLevel, ToolKind, ToolName, ToolSpec};
 
 use crate::ToolError;
+
+/// Registry-wide tool permission behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolPermissionMode {
+    #[default]
+    Allow,
+    PartialAllow,
+    RequireApproval,
+}
+
+/// Result of authorizing one registered tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToolAuthorization {
+    Allowed,
+    RequireApproval {
+        tool_kind: ToolKind,
+        danger_level: DangerLevel,
+    },
+}
+
+impl ToolAuthorization {
+    /// Returns metadata when the tool call requires approval.
+    #[must_use]
+    pub const fn approval_metadata(self) -> Option<(ToolKind, DangerLevel)> {
+        match self {
+            Self::Allowed => None,
+            Self::RequireApproval {
+                tool_kind,
+                danger_level,
+            } => Some((tool_kind, danger_level)),
+        }
+    }
+}
 
 /// Input passed to one runtime tool call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,7 +100,19 @@ pub trait ToolRegistry: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when another tool with the same name is already registered.
-    fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError>;
+    fn register(
+        &mut self,
+        tool: Arc<dyn Tool>,
+        tool_kind: ToolKind,
+        danger_level: DangerLevel,
+    ) -> Result<(), ToolError>;
+
+    /// Returns the authorization result for a registered tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is not registered.
+    fn authorization(&self, name: &ToolName) -> Result<ToolAuthorization, ToolError>;
 
     /// Returns a registered tool by name.
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>>;

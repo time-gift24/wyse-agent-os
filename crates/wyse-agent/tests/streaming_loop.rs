@@ -14,9 +14,9 @@ use wyse_checkpoint::{
     CheckpointError, CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore,
 };
 use wyse_core::{
-    AgentEvent, AgentId, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent,
-    ModelId, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCallDelta, ToolName, ToolSpec,
-    TurnId,
+    AgentEvent, AgentId, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel, LlmCallRole,
+    LlmEvent, ModelId, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCallDelta, ToolKind,
+    ToolName, ToolSpec, TurnId,
 };
 use wyse_infra::event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
@@ -24,7 +24,10 @@ use wyse_infra::event_stream_bus::{
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
-use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolInput, ToolOutput, ToolRegistry};
+use wyse_tools::{
+    BuiltinToolRegistry, EchoTool, ToolAuthorization, ToolError, ToolInput, ToolOutput,
+    ToolRegistry,
+};
 
 #[derive(Debug)]
 enum ProviderResponse {
@@ -113,10 +116,19 @@ impl BlockingToolRegistry {
 
 #[async_trait]
 impl ToolRegistry for BlockingToolRegistry {
-    fn register(&mut self, tool: Arc<dyn wyse_tools::Tool>) -> Result<(), ToolError> {
+    fn register(
+        &mut self,
+        tool: Arc<dyn wyse_tools::Tool>,
+        _tool_kind: ToolKind,
+        _danger_level: DangerLevel,
+    ) -> Result<(), ToolError> {
         Err(ToolError::DuplicateTool {
             name: tool.spec().name.clone(),
         })
+    }
+
+    fn authorization(&self, _name: &ToolName) -> Result<ToolAuthorization, ToolError> {
+        Ok(ToolAuthorization::Allowed)
     }
 
     fn get(&self, _name: &ToolName) -> Option<Arc<dyn wyse_tools::Tool>> {
@@ -260,7 +272,7 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
     ]));
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(EchoTool::new()))
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect("echo should register");
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let agent = Agent::builder()
@@ -652,7 +664,7 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
     let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(EchoTool::new()))
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect("echo should register");
     let agent = Agent::builder()
         .id(agent_id)
@@ -702,7 +714,7 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
         .tool_registry({
             let mut registry = BuiltinToolRegistry::default();
             registry
-                .register(Arc::new(EchoTool::new()))
+                .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
                 .expect("echo should register");
             Arc::new(registry)
         })
