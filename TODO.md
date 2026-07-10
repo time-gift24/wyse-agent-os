@@ -32,7 +32,7 @@
 
 - [ ] `wyse-llm`
   - 统一 chat、completion、streaming、embedding、rerank 抽象
-  - `LlmProvider::provider_name()`，供 agent event metadata 组合 `provider:model`
+  - 从 `ModelId`（`provider:model`）派生 agent event 的 provider metadata
   - 优先实现 OpenAI-compatible provider
   - 测试用 mock provider
   - tool-call normalization

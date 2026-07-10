@@ -462,12 +462,8 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for BlockingStartProvider {
-        fn provider_name(&self) -> &str {
-            "blocking"
-        }
-
         fn model_id(&self) -> ModelId {
-            ModelId::from("mock-model")
+            "blocking:mock-model".parse().expect("model id parses")
         }
 
         async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {

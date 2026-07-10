@@ -3,6 +3,7 @@
 use std::{error::Error, fmt};
 
 use thiserror::Error;
+use wyse_core::ModelId;
 
 /// Secret API key used by provider clients.
 #[derive(Clone, PartialEq, Eq)]
@@ -32,6 +33,12 @@ impl fmt::Debug for ApiKey {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum LlmError {
+    /// A provider was already registered for the model.
+    #[error("provider already registered for model: {model}")]
+    DuplicateProvider { model: ModelId },
+    /// No provider was registered for the model.
+    #[error("provider not found for model: {model}")]
+    ProviderNotFound { model: ModelId },
     /// Request is invalid before it reaches a provider.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),

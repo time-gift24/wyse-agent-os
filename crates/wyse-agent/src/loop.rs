@@ -289,16 +289,16 @@ impl Agent {
     ) -> Result<(), AgentError> {
         let mut metadata = BTreeMap::new();
         metadata.insert("agent_name".to_owned(), Value::String(self.name.clone()));
+        let model = self.llm_provider.model_id();
         metadata.insert(
             "llm_provider".to_owned(),
-            Value::String(self.llm_provider.provider_name().to_owned()),
+            Value::String(model.provider_name().to_owned()),
         );
-        let model = self.llm_provider.model_id();
-        metadata.insert("model".to_owned(), Value::String(model.as_str().to_owned()));
         metadata.insert(
-            "llm".to_owned(),
-            Value::String(format!("{}:{}", self.llm_provider.provider_name(), model)),
+            "model".to_owned(),
+            Value::String(model.model_name().to_owned()),
         );
+        metadata.insert("llm".to_owned(), Value::String(model.as_str().to_owned()));
         if let Some(extra_metadata) = extra_metadata {
             metadata.extend(extra_metadata);
         }

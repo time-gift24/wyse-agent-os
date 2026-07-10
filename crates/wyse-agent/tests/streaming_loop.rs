@@ -58,12 +58,8 @@ impl RecordingProvider {
 
 #[async_trait]
 impl LlmProvider for RecordingProvider {
-    fn provider_name(&self) -> &str {
-        "recording"
-    }
-
     fn model_id(&self) -> ModelId {
-        ModelId::from("mock-model")
+        "recording:mock-model".parse().expect("model id parses")
     }
 
     async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -314,8 +310,18 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
     assert!(saw_tool_finished);
     let requests = provider.requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].model, ModelId::from("mock-model"));
-    assert_eq!(requests[1].model, ModelId::from("mock-model"));
+    assert_eq!(
+        requests[0].model,
+        "recording:mock-model"
+            .parse::<ModelId>()
+            .expect("model id parses")
+    );
+    assert_eq!(
+        requests[1].model,
+        "recording:mock-model"
+            .parse::<ModelId>()
+            .expect("model id parses")
+    );
     assert!(requests[1].messages.iter().any(|message| {
         message.role == ChatRole::Tool && message.tool_call_id == Some(CallId::from("call-1"))
     }));

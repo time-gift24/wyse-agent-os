@@ -1,0 +1,7 @@
+[openai]
+api_key = "replace-with-openai-api-key"
+models = ["gpt-4.1-mini"]
+
+[deepseek]
+api_key = "replace-with-deepseek-api-key"
+models = ["deepseek-v4-flash"]
