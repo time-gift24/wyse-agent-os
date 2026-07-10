@@ -389,11 +389,7 @@
   }
 
   .wyse-dashboard-overview {
-    border: 1px solid var(--wyse-line);
-    border-radius: var(--radius-wyse-panel);
-    background: var(--wyse-bg-paper);
-    box-shadow: var(--wyse-shadow-soft);
-    @apply grid gap-6 p-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:p-10;
+    @apply grid gap-6 rounded-5xl border border-border p-6 shadow-wyse-soft [background:var(--wyse-bg-paper)] md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:p-10;
   }
 
   .wyse-dashboard-copy {
@@ -421,20 +417,11 @@
   }
 
   .wyse-dashboard-card {
-    border: 1px solid var(--wyse-line);
-    background: var(--wyse-bg-glass-band);
-    box-shadow: var(--wyse-shadow-soft);
-    backdrop-filter: blur(18px) saturate(130%);
-    -webkit-backdrop-filter: blur(18px) saturate(130%);
-    @apply grid gap-3 rounded-3xl p-5;
+    @apply grid gap-3 rounded-3xl border border-border p-5 shadow-wyse-soft backdrop-blur-[18px] backdrop-saturate-[130%] [background:var(--wyse-bg-glass-band)];
   }
 
   .wyse-dashboard-timeline {
-    border: 1px solid var(--wyse-line);
-    border-radius: var(--radius-wyse-panel);
-    background: var(--wyse-bg-paper);
-    box-shadow: var(--wyse-shadow-soft);
-    @apply grid gap-3 p-5 md:p-7;
+    @apply grid gap-3 rounded-5xl border border-border p-5 shadow-wyse-soft [background:var(--wyse-bg-paper)] md:p-7;
   }
 
   .wyse-dashboard-section-title {
@@ -475,11 +462,7 @@
   }
 
   .wyse-dashboard-shortcuts {
-    border: 1px solid var(--wyse-line);
-    border-radius: var(--radius-wyse-panel);
-    background: var(--wyse-bg-paper);
-    box-shadow: var(--wyse-shadow-soft);
-    @apply grid gap-4 p-5 md:p-7;
+    @apply grid gap-4 rounded-5xl border border-border p-5 shadow-wyse-soft [background:var(--wyse-bg-paper)] md:p-7;
   }
 
   .wyse-dashboard-shortcut-list {
@@ -491,12 +474,7 @@
   }
 
   .wyse-dashboard-empty {
-    border: 1px solid var(--wyse-line);
-    background: var(--wyse-bg-glass-band);
-    box-shadow: var(--wyse-shadow-soft);
-    backdrop-filter: blur(18px) saturate(130%);
-    -webkit-backdrop-filter: blur(18px) saturate(130%);
-    @apply grid gap-2 rounded-3xl p-5 text-muted-foreground;
+    @apply grid gap-2 rounded-3xl border border-border p-5 text-muted-foreground shadow-wyse-soft backdrop-blur-[18px] backdrop-saturate-[130%] [background:var(--wyse-bg-glass-band)];
   }
 
   .wyse-dashboard-skeleton {

@@ -114,3 +114,17 @@ test("the dashboard remains a static run-first sample", async () => {
   assert.match(dashboard, /status\.review/)
   assert.doesNotMatch(sample, /fetch\(|axios|\b\d+(?:\.\d+)?(?:%|ms)\b/)
 })
+
+test("dashboard component rules keep visual declarations in Tailwind apply utilities", async () => {
+  const appCss = await readFile(appCssUrl, "utf8")
+  const dashboardRules = [
+    ...appCss.matchAll(/\.wyse-dashboard[^\{]*\{([^}]*)\}/g),
+  ]
+    .map(([, declarations]) => declarations)
+    .join("\n")
+
+  assert.doesNotMatch(
+    dashboardRules,
+    /(?:^|\n)\s*(?:border|background|box-shadow|backdrop-filter|-webkit-backdrop-filter):/
+  )
+})
