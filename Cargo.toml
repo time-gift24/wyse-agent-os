@@ -22,7 +22,6 @@ async-trait = "0.1.89"
 bon = "3.9"
 bytes = "1.11.0"
 chrono = { version = "0.4.45", features = ["serde"] }
-rusqlite = { version = "0.39.0", features = ["bundled"] }
 futures-core = "0.3.32"
 futures-util = "0.3.32"
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls", "stream"] }
@@ -35,6 +34,7 @@ tokio-util = "0.7.18"
 tracing = "0.1.41"
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
 wyse-core = { path = "crates/wyse-core" }
+wyse-filesystem = { path = "crates/wyse-filesystem" }
 wyse-agent = { path = "crates/wyse-agent" }
 wyse-checkpoint = { path = "crates/wyse-checkpoint" }
 wyse-infra = { path = "crates/wyse-infra" }

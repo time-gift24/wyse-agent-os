@@ -1,252 +1,58 @@
-//! Checkpoint store public definitions.
+//! Agent checkpoint interface.
 
-use std::{fmt, str::FromStr};
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use wyse_core::{RunId, TurnId};
+use serde_json::Value;
+use wyse_core::{
+    ChatMessage, EventSource, HistoryPage, HistoryQuery, RunId, StreamEnvelope, TokenUsage, TurnId,
+};
 
-use crate::CheckpointError;
+use crate::{AgentState, AgentStatus, CheckpointError};
 
-/// Identity of one checkpoint write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CheckpointId(Uuid);
-
-impl CheckpointId {
-    /// Creates a new UUIDv7 checkpoint id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-
-    /// Returns the inner UUID.
-    #[must_use]
-    pub const fn as_uuid(self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for CheckpointId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for CheckpointId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<Uuid> for CheckpointId {
-    fn from(value: Uuid) -> Self {
-        Self(value)
-    }
-}
-
-impl From<CheckpointId> for Uuid {
-    fn from(value: CheckpointId) -> Self {
-        value.0
-    }
-}
-
-impl FromStr for CheckpointId {
-    type Err = uuid::Error;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<Uuid>().map(Self)
-    }
-}
-
-/// Type of checkpoint payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum CheckpointKind {
-    /// Agent turn checkpoint.
-    Agent,
-}
-
-impl CheckpointKind {
-    /// Returns the database representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-        }
-    }
-
-    /// Parses the database representation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the stored kind is unknown.
-    pub fn from_db(value: &str) -> Result<Self, CheckpointError> {
-        match value {
-            "agent" => Ok(Self::Agent),
-            _ => Err(CheckpointError::UnknownKind {
-                value: value.to_owned(),
-            }),
-        }
-    }
-}
-
-/// Latest checkpoint status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum CheckpointStatus {
-    /// Runtime work is active.
-    Running,
-    /// Runtime work paused at a retryable failure.
-    WaitingRetry,
-    /// Runtime work finished successfully.
-    Finished,
-    /// Runtime work failed and cannot be retried automatically.
-    Failed,
-    /// Runtime work was cancelled.
-    Cancelled,
-}
-
-impl CheckpointStatus {
-    /// Returns the database representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::WaitingRetry => "waiting_retry",
-            Self::Finished => "finished",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    /// Parses the database representation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the stored status is unknown.
-    pub fn from_db(value: &str) -> Result<Self, CheckpointError> {
-        match value {
-            "running" => Ok(Self::Running),
-            "waiting_retry" => Ok(Self::WaitingRetry),
-            "finished" => Ok(Self::Finished),
-            "failed" => Ok(Self::Failed),
-            "cancelled" => Ok(Self::Cancelled),
-            _ => Err(CheckpointError::UnknownStatus {
-                value: value.to_owned(),
-            }),
-        }
-    }
-}
-
-/// Latest checkpoint for one `(run_id, turn_id, kind)`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct CheckpointRecord {
-    /// Workflow run identity.
-    pub run_id: RunId,
-    /// Resumable turn identity.
-    pub turn_id: TurnId,
-    /// Identity of this checkpoint write.
-    pub checkpoint_id: CheckpointId,
-    /// Payload kind.
-    pub kind: CheckpointKind,
-    /// Runtime status.
-    pub status: CheckpointStatus,
-    /// Version of the serialized state payload.
-    pub state_version: u32,
-    /// Serialized state payload bytes.
-    pub state: Vec<u8>,
-    /// Last stream sequence covered by this checkpoint.
-    pub last_seq: u64,
-    /// Last update time.
-    pub updated_at: DateTime<Utc>,
-}
-
-impl CheckpointRecord {
-    /// Creates a checkpoint record with a fresh [`CheckpointId`].
-    #[must_use]
-    pub fn new(
-        run_id: RunId,
-        turn_id: TurnId,
-        kind: CheckpointKind,
-        status: CheckpointStatus,
-        state_version: u32,
-        state: Vec<u8>,
-        last_seq: u64,
-    ) -> Self {
-        Self {
-            run_id,
-            turn_id,
-            checkpoint_id: CheckpointId::new(),
-            kind,
-            status,
-            state_version,
-            state,
-            last_seq,
-            updated_at: Utc::now(),
-        }
-    }
-}
-
-/// Stores latest turn checkpoints.
+/// Persists the state and complete message history of one injected agent.
 #[async_trait]
-pub trait CheckpointStore: Send + Sync {
-    /// Upserts the latest checkpoint for `(run_id, turn_id, kind)`.
+pub trait AgentCheckpoint: Send + Sync {
+    /// Loads the current persisted agent state.
     ///
     /// # Errors
     ///
-    /// Returns an error when persistence fails.
-    async fn put_latest(&self, record: CheckpointRecord) -> Result<(), CheckpointError>;
+    /// Returns an error when state is missing, malformed, unsupported, or cannot be read.
+    async fn load_agent(&self) -> Result<AgentState, CheckpointError>;
 
-    /// Loads the latest checkpoint for `(run_id, turn_id, kind)`.
+    /// Replaces the agent's mutable runtime state.
     ///
     /// # Errors
     ///
-    /// Returns an error when persistence fails.
-    async fn latest_turn(
+    /// Returns an error when the state update cannot be committed.
+    async fn update_state(
+        &self,
+        status: AgentStatus,
+        run_id: Option<RunId>,
+        turn_id: Option<TurnId>,
+        usage: TokenUsage,
+    ) -> Result<AgentState, CheckpointError>;
+
+    /// Appends one complete agent message and advances its committed sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the message is invalid or cannot be committed atomically.
+    async fn append_message(
         &self,
         run_id: RunId,
         turn_id: TurnId,
-        kind: CheckpointKind,
-    ) -> Result<Option<CheckpointRecord>, CheckpointError>;
-}
+        timestamp: DateTime<Utc>,
+        source: EventSource,
+        message: ChatMessage,
+        metadata: BTreeMap<String, Value>,
+    ) -> Result<StreamEnvelope, CheckpointError>;
 
-#[cfg(test)]
-mod tests {
-    use chrono::Utc;
-    use wyse_core::{RunId, TurnId};
-
-    use super::*;
-
-    #[test]
-    fn checkpoint_id_uses_uuid_v7() {
-        let id = CheckpointId::new();
-
-        assert_eq!(id.as_uuid().get_version_num(), 7);
-    }
-
-    #[test]
-    fn checkpoint_record_keeps_turn_kind_key_fields() {
-        let record = CheckpointRecord {
-            run_id: RunId::new(),
-            turn_id: TurnId::new(),
-            checkpoint_id: CheckpointId::new(),
-            kind: CheckpointKind::Agent,
-            status: CheckpointStatus::Running,
-            state_version: 1,
-            state: br#"{"ok":true}"#.to_vec(),
-            last_seq: 7,
-            updated_at: Utc::now(),
-        };
-
-        assert_eq!(record.kind, CheckpointKind::Agent);
-        assert_eq!(record.status, CheckpointStatus::Running);
-        assert_eq!(record.state_version, 1);
-        assert_eq!(record.last_seq, 7);
-    }
+    /// Loads one fixed-range page of committed complete messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query or persisted message history is invalid.
+    async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage, CheckpointError>;
 }

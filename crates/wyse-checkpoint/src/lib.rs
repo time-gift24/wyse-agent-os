@@ -2,10 +2,8 @@
 
 mod definition;
 mod error;
-mod sqlite;
+mod state;
 
-pub use definition::{
-    CheckpointId, CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore,
-};
+pub use definition::AgentCheckpoint;
 pub use error::CheckpointError;
-pub use sqlite::SqliteCheckpointStore;
+pub use state::{AGENT_STATE_VERSION, AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE};
