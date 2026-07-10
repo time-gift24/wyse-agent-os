@@ -42,6 +42,8 @@
   --wyse-accent: var(--wyse-almost-aqua);
   --wyse-accent-ink: oklch(0.265 0.02 166);
   --wyse-focus: var(--wyse-baltic-sea);
+  --stratum-mark-core: var(--wyse-blue-fusion);
+  --stratum-mark-compact: var(--wyse-ink-muted);
   --wyse-danger: oklch(0.58 0.135 24);
 
   --wyse-bg-canvas:
@@ -175,6 +177,7 @@
   );
   --wyse-accent-ink: var(--wyse-cloud-dancer);
   --wyse-focus: var(--wyse-baltic-sea);
+  --stratum-mark-core: var(--wyse-baltic-sea);
   --wyse-danger: oklch(0.704 0.12 25);
   --wyse-bg-canvas:
     radial-gradient(
@@ -374,6 +377,11 @@
     min-width: 100%;
     min-height: 100%;
   }
+
+  .stratum-mark--compact path {
+    fill: var(--stratum-mark-compact);
+    stroke: var(--stratum-mark-compact);
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -401,6 +409,7 @@
     );
     --wyse-accent-ink: var(--wyse-cloud-dancer);
     --wyse-focus: var(--wyse-baltic-sea);
+    --stratum-mark-core: var(--wyse-baltic-sea);
     --wyse-danger: oklch(0.704 0.12 25);
     --wyse-bg-canvas:
       radial-gradient(

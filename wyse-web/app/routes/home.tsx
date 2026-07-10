@@ -1,7 +1,7 @@
 import { ArrowRightIcon } from "lucide-react"
 
 import { SiteNavbar } from "~/components/site-navbar"
-import { Badge } from "~/components/ui/badge"
+import { StratumMark } from "~/components/stratum-mark"
 import { Button } from "~/components/ui/button"
 
 export default function Home() {
@@ -12,10 +12,7 @@ export default function Home() {
 
         <div className="flex flex-1 items-center justify-center py-16 md:py-24">
           <div className="flex max-w-4xl flex-col items-center gap-8 text-center">
-            <Badge variant="outline" className="h-9 gap-2 px-2 text-sm">
-              <Badge>New</Badge>
-              <span>Runtime shell preview</span>
-            </Badge>
+            <StratumMark className="size-32 md:size-40" />
 
             <div className="flex flex-col gap-5">
               <h1 className="font-heading text-5xl leading-[0.98] font-semibold tracking-tight text-balance md:text-7xl">

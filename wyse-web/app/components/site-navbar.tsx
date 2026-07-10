@@ -4,9 +4,9 @@ import { useRef } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { ScrollTrigger } from "gsap/ScrollTrigger"
-import { AtomIcon } from "lucide-react"
 
 import GlassSurface from "~/components/GlassSurface"
+import { StratumMark } from "~/components/stratum-mark"
 import { ThemeToggle } from "~/components/theme-toggle"
 import { Button } from "~/components/ui/button"
 import {
@@ -115,10 +115,13 @@ export function SiteNavbar() {
         <a
           href="/"
           className="relative z-10 flex min-w-0 items-center gap-2 text-sm font-medium md:text-base"
-          aria-label="Wyse Agent OS home"
+          aria-label="运筹 Stratum home"
         >
-          <AtomIcon className="size-5 shrink-0" aria-hidden="true" />
-          <span className="truncate">Wyse Agent OS</span>
+          <StratumMark animated={false} variant="compact" className="size-7" />
+          <span className="flex min-w-0 items-baseline gap-1.5 truncate">
+            <span className="font-heading font-semibold">运筹</span>
+            <span className="text-xs text-muted-foreground">Stratum</span>
+          </span>
         </a>
 
         <NavigationMenu className="relative z-10 hidden flex-none md:flex">
