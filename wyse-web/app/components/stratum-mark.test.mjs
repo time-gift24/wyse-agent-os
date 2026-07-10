@@ -11,6 +11,11 @@ const compactAssetUrl = new URL(
   import.meta.url
 )
 const appCssUrl = new URL("../app.css", import.meta.url)
+const dashboardUrl = new URL("./dashboard.tsx", import.meta.url)
+const dashboardSampleUrl = new URL(
+  "../lib/dashboard-sample.ts",
+  import.meta.url
+)
 
 test("the supplied Stratum SVG is background-free and keeps its original geometry", async () => {
   const asset = await readFile(assetUrl, "utf8").catch((error) => {
@@ -94,4 +99,18 @@ test("the Stratum mark inlines the SVG and animates only its diamond", async () 
   assert.match(home, /<StratumMark className="size-32/)
   assert.match(appCss, /\.stratum-mark--compact/)
   assert.doesNotMatch(appCss, /drop-shadow/)
+})
+
+test("the dashboard remains a static run-first sample", async () => {
+  const [dashboard, sample] = await Promise.all([
+    readFile(dashboardUrl, "utf8"),
+    readFile(dashboardSampleUrl, "utf8"),
+  ])
+
+  assert.match(dashboard, /id="dashboard"/)
+  assert.match(dashboard, /getDashboardSample/)
+  assert.match(dashboard, /status\.running/)
+  assert.match(dashboard, /status\.queued/)
+  assert.match(dashboard, /status\.review/)
+  assert.doesNotMatch(sample, /fetch\(|axios|\b\d+(?:\.\d+)?(?:%|ms)\b/)
 })

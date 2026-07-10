@@ -280,6 +280,7 @@
   --color-wyse-glass: var(--wyse-glass);
   --color-wyse-action: var(--wyse-action);
   --color-wyse-accent: var(--wyse-accent);
+  --color-wyse-accent-ink: var(--wyse-accent-ink);
   --color-wyse-cloud-dancer: var(--wyse-cloud-dancer);
   --color-wyse-lemon-icing: var(--wyse-lemon-icing);
   --color-wyse-nimbus-cloud: var(--wyse-nimbus-cloud);
@@ -382,6 +383,125 @@
     fill: var(--stratum-mark-compact);
     stroke: var(--stratum-mark-compact);
   }
+
+  .wyse-dashboard {
+    @apply mx-auto grid w-full max-w-6xl scroll-mt-24 gap-6 px-4 pb-12 md:px-8 md:pb-20;
+  }
+
+  .wyse-dashboard-overview {
+    border: 1px solid var(--wyse-line);
+    border-radius: var(--radius-wyse-panel);
+    background: var(--wyse-bg-paper);
+    box-shadow: var(--wyse-shadow-soft);
+    @apply grid gap-6 p-6 md:grid-cols-[minmax(0,1fr)_auto] md:items-end md:p-10;
+  }
+
+  .wyse-dashboard-copy {
+    @apply grid gap-3;
+  }
+
+  .wyse-dashboard-eyebrow {
+    @apply text-sm font-semibold tracking-[0.16em] text-muted-foreground uppercase;
+  }
+
+  .wyse-dashboard-title {
+    @apply font-heading text-4xl leading-tight font-semibold tracking-tight text-balance md:text-6xl;
+  }
+
+  .wyse-dashboard-body {
+    @apply max-w-2xl text-base leading-relaxed text-muted-foreground md:text-lg;
+  }
+
+  .wyse-dashboard-primary {
+    @apply inline-flex h-8 items-center justify-center rounded-md bg-primary px-2.5 text-xs/relaxed font-medium text-primary-foreground transition-colors hover:bg-primary/80 focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none;
+  }
+
+  .wyse-dashboard-grid {
+    @apply grid gap-4 md:grid-cols-3;
+  }
+
+  .wyse-dashboard-card {
+    border: 1px solid var(--wyse-line);
+    background: var(--wyse-bg-glass-band);
+    box-shadow: var(--wyse-shadow-soft);
+    backdrop-filter: blur(18px) saturate(130%);
+    -webkit-backdrop-filter: blur(18px) saturate(130%);
+    @apply grid gap-3 rounded-3xl p-5;
+  }
+
+  .wyse-dashboard-timeline {
+    border: 1px solid var(--wyse-line);
+    border-radius: var(--radius-wyse-panel);
+    background: var(--wyse-bg-paper);
+    box-shadow: var(--wyse-shadow-soft);
+    @apply grid gap-3 p-5 md:p-7;
+  }
+
+  .wyse-dashboard-section-title {
+    @apply font-heading text-2xl font-semibold tracking-tight;
+  }
+
+  .wyse-dashboard-run {
+    @apply grid gap-2 rounded-2xl border border-border bg-secondary/40 p-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-center;
+  }
+
+  .wyse-dashboard-run-copy {
+    @apply grid gap-1;
+  }
+
+  .wyse-dashboard-run-title,
+  .wyse-dashboard-empty-title {
+    @apply font-semibold;
+  }
+
+  .wyse-dashboard-run-detail {
+    @apply text-sm text-muted-foreground;
+  }
+
+  .wyse-status {
+    @apply inline-flex w-fit items-center rounded-full px-2.5 py-1 text-xs font-semibold;
+  }
+
+  .wyse-status--running {
+    @apply bg-wyse-almost-aqua/50 text-wyse-accent-ink;
+  }
+
+  .wyse-status--queued {
+    @apply bg-wyse-lemon-icing/70 text-wyse-ink;
+  }
+
+  .wyse-status--review {
+    @apply bg-wyse-raindrops-rose/70 text-wyse-ink;
+  }
+
+  .wyse-dashboard-shortcuts {
+    border: 1px solid var(--wyse-line);
+    border-radius: var(--radius-wyse-panel);
+    background: var(--wyse-bg-paper);
+    box-shadow: var(--wyse-shadow-soft);
+    @apply grid gap-4 p-5 md:p-7;
+  }
+
+  .wyse-dashboard-shortcut-list {
+    @apply flex flex-wrap gap-3;
+  }
+
+  .wyse-dashboard-shortcut {
+    @apply inline-flex items-center rounded-full border border-border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/30 focus-visible:outline-none;
+  }
+
+  .wyse-dashboard-empty {
+    border: 1px solid var(--wyse-line);
+    background: var(--wyse-bg-glass-band);
+    box-shadow: var(--wyse-shadow-soft);
+    backdrop-filter: blur(18px) saturate(130%);
+    -webkit-backdrop-filter: blur(18px) saturate(130%);
+    @apply grid gap-2 rounded-3xl p-5 text-muted-foreground;
+  }
+
+  .wyse-dashboard-skeleton {
+    @apply animate-pulse rounded-2xl bg-muted/70;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -479,5 +599,15 @@
     background: var(--wyse-paper);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .wyse-dashboard-skeleton {
+    animation: none;
   }
 }
