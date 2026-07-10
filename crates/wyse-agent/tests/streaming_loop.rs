@@ -30,6 +30,7 @@ use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolInput, ToolOutput
 enum ProviderResponse {
     Events(Vec<ChatStreamEvent>),
     StreamResults(Vec<Result<ChatStreamEvent, LlmError>>),
+    StartError(LlmError),
     PendingStart { entered: Arc<tokio::sync::Notify> },
 }
 
@@ -86,6 +87,7 @@ impl LlmProvider for RecordingProvider {
                 Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
             }
             ProviderResponse::StreamResults(results) => Ok(Box::pin(stream::iter(results))),
+            ProviderResponse::StartError(error) => Err(error),
             ProviderResponse::PendingStart { entered } => {
                 entered.notify_waiters();
                 pending::<Result<ChatStream, LlmError>>().await
@@ -436,6 +438,50 @@ async fn stream_saves_waiting_retry_without_partial_assistant_on_llm_error() {
             .state
             .windows(b"partial".len())
             .any(|window| window == b"partial")
+    );
+}
+
+#[tokio::test]
+async fn stream_creation_failure_saves_one_retry_checkpoint() {
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::StartError(
+        LlmError::UnsupportedCapability("stream creation failed"),
+    )]));
+    let checkpoints = Arc::new(RecordingCheckpointStore::default());
+    let agent = Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .checkpoint_store(checkpoints.clone())
+        .build()
+        .expect("agent should build");
+    let (_run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+
+    timeout(Duration::from_secs(1), async {
+        while let Some(envelope) = events.next().await {
+            let envelope = envelope.expect("event should be delivered");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+
+    assert_eq!(
+        checkpoints
+            .records()
+            .iter()
+            .filter(|record| record.status == CheckpointStatus::WaitingRetry)
+            .count(),
+        1
     );
 }
 

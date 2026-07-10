@@ -70,8 +70,6 @@ impl Agent {
             } {
                 Ok(stream) => stream,
                 Err(source) => {
-                    self.save_checkpoint(CheckpointStatus::WaitingRetry, &history)
-                        .await?;
                     self.publish_llm_event(
                         turn_index,
                         llm_call_id,
