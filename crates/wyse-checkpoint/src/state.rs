@@ -18,8 +18,8 @@ pub enum AgentStatus {
     Idle,
     /// The agent is actively processing a turn.
     Running,
-    /// The agent is paused before a retry.
-    WaitingRetry,
+    /// The agent finished its work.
+    Finished,
     /// The agent failed and cannot retry automatically.
     Failed,
     /// The agent was cancelled.

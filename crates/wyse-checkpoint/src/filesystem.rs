@@ -1,7 +1,7 @@
 //! Filesystem-backed agent checkpoint storage.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     ops::Bound::{Excluded, Unbounded},
     sync::{
         Arc,
@@ -10,10 +10,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde_json::Value;
 use wyse_core::{
-    AgentEvent, AgentId, ChatMessage, EventSource, HistoryPage, HistoryQuery, RunId, RuntimeEvent,
+    AgentEvent, AgentId, EventSource, HistoryPage, HistoryQuery, RunId, RuntimeEvent,
     StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{
@@ -301,17 +301,31 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
 
     async fn append_message(
         &self,
-        run_id: RunId,
-        turn_id: TurnId,
-        timestamp: DateTime<Utc>,
-        source: EventSource,
-        message: ChatMessage,
-        metadata: BTreeMap<String, Value>,
+        envelope: StreamEnvelope,
     ) -> Result<StreamEnvelope, CheckpointError> {
+        if envelope.business_seq.is_some() {
+            return Err(CheckpointError::MessageAlreadySequenced);
+        }
+        let RuntimeEvent::Agent {
+            agent_id,
+            event: AgentEvent::Message { turn_id, .. },
+        } = &envelope.event
+        else {
+            return Err(CheckpointError::UnexpectedMessageEvent);
+        };
+        let input_agent_id = *agent_id;
+        let run_id = envelope.run_id;
+        let turn_id = *turn_id;
         let mut append_attempt = 0_u64;
         loop {
             append_attempt = append_attempt.saturating_add(1);
             let state = self.read_state().await?;
+            if input_agent_id != state.agent_id {
+                return Err(CheckpointError::AgentMismatch {
+                    expected: state.agent_id,
+                    actual: input_agent_id,
+                });
+            }
             let seq = state
                 .last_seq
                 .checked_add(1)
@@ -319,21 +333,9 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
             let beyond = seq
                 .checked_add(1)
                 .ok_or(CheckpointError::SequenceOverflow)?;
-            let envelope = StreamEnvelope {
-                run_id,
-                timestamp,
-                source: source.clone(),
-                event: RuntimeEvent::Agent {
-                    agent_id: state.agent_id,
-                    event: AgentEvent::Message {
-                        seq,
-                        turn_id,
-                        message: message.clone(),
-                    },
-                },
-                metadata: metadata.clone(),
-            };
-            validate_message(&envelope, state.agent_id, seq, Some(run_id), Some(turn_id))?;
+            let mut committed = envelope.clone();
+            committed.business_seq = Some(seq);
+            validate_message(&committed, state.agent_id, seq, Some(run_id), Some(turn_id))?;
 
             let existing = self.read_message(&state, seq).await?;
             if self.read_message(&state, beyond).await?.is_some() {
@@ -351,7 +353,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                 validate_message(&existing, state.agent_id, seq, Some(run_id), Some(turn_id))
                     .inspect_err(|_| trace_checkpoint_corruption(&state, seq))?;
                 self.commit_sequence(state.last_seq, seq).await?;
-                if existing == envelope {
+                if existing == committed {
                     return Ok(existing);
                 }
                 tracing::info!(
@@ -369,14 +371,14 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                 .filesystem
                 .put(
                     &self.message_path(seq)?,
-                    encode_message(&envelope)?,
+                    encode_message(&committed)?,
                     CasExpectation::Absent,
                 )
                 .await
             {
                 Ok(_) => {
                     self.commit_sequence(state.last_seq, seq).await?;
-                    return Ok(envelope);
+                    return Ok(committed);
                 }
                 Err(FilesystemError::VersionMismatch { .. }) => {
                     continue;
@@ -425,7 +427,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         }
         let next_front_seq = events
             .last()
-            .and_then(|event| event.event.business_seq())
+            .and_then(StreamEnvelope::business_seq)
             .unwrap_or(query.after_seq);
         let page = HistoryPage {
             through_seq,
@@ -526,13 +528,13 @@ fn validate_message(
             actual: *agent_id,
         });
     }
-    let AgentEvent::Message { seq, turn_id, .. } = event else {
+    let AgentEvent::Message { turn_id, .. } = event else {
         return Err(CheckpointError::UnexpectedMessageEvent);
     };
-    if *seq != path_seq {
+    if envelope.business_seq != Some(path_seq) {
         return Err(CheckpointError::MessageSequenceMismatch {
             path_seq,
-            event_seq: *seq,
+            event_seq: envelope.business_seq.unwrap_or_default(),
         });
     }
     if let Some(expected) = expected_turn_id
@@ -550,8 +552,15 @@ fn validate_strict_message_json(value: &Value) -> Result<(), serde_json::Error> 
     let envelope = strict_object(value)?;
     strict_keys(
         envelope,
-        &["run_id", "timestamp", "source", "event"],
-        &["run_id", "timestamp", "source", "event", "metadata"],
+        &["business_seq", "run_id", "timestamp", "source", "event"],
+        &[
+            "business_seq",
+            "run_id",
+            "timestamp",
+            "source",
+            "event",
+            "metadata",
+        ],
     )?;
     validate_strict_source(&envelope["source"])?;
 
@@ -571,8 +580,8 @@ fn validate_strict_message_json(value: &Value) -> Result<(), serde_json::Error> 
     let message_data = strict_object(&agent_event["data"])?;
     strict_keys(
         message_data,
-        &["seq", "turn_id", "message"],
-        &["seq", "turn_id", "message"],
+        &["turn_id", "message"],
+        &["turn_id", "message"],
     )?;
     validate_strict_chat_message(&message_data["message"])
 }

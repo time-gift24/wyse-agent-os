@@ -2,7 +2,7 @@ mod support;
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use support::MemoryCasFilesystem;
 use wyse_checkpoint::{
     AgentCheckpoint, AgentState, AgentStatus, CheckpointError, FilesystemAgentCheckpoint,
@@ -13,21 +13,32 @@ use wyse_core::{
 };
 use wyse_filesystem::{Entry, VirtualPath};
 
-fn message_envelope(agent_id: AgentId, run_id: RunId, turn_id: TurnId, seq: u64) -> StreamEnvelope {
+fn message_envelope(agent_id: AgentId, run_id: RunId, turn_id: TurnId) -> StreamEnvelope {
     StreamEnvelope {
+        business_seq: None,
         run_id,
-        timestamp: DateTime::<Utc>::UNIX_EPOCH,
+        timestamp: Utc::now(),
         source: EventSource::Run,
         event: RuntimeEvent::Agent {
             agent_id,
             event: AgentEvent::Message {
-                seq,
                 turn_id,
-                message: ChatMessage::user(format!("message {seq}")),
+                message: ChatMessage::user("message"),
             },
         },
         metadata: BTreeMap::new(),
     }
+}
+
+fn sequenced_message_envelope(
+    agent_id: AgentId,
+    run_id: RunId,
+    turn_id: TurnId,
+    seq: u64,
+) -> StreamEnvelope {
+    let mut envelope = message_envelope(agent_id, run_id, turn_id);
+    envelope.business_seq = Some(seq);
+    envelope
 }
 
 fn json_entry<T: serde::Serialize>(value: &T) -> Entry {
@@ -37,25 +48,23 @@ fn json_entry<T: serde::Serialize>(value: &T) -> Entry {
 fn event_sequences(events: &[StreamEnvelope]) -> Vec<u64> {
     events
         .iter()
-        .map(|event| event.event.business_seq().expect("message sequence"))
+        .map(|event| event.business_seq().expect("message sequence"))
         .collect()
 }
 
 async fn append_messages(checkpoint: &FilesystemAgentCheckpoint, count: usize) {
+    let state = checkpoint.load_agent().await.expect("load agent");
+    let agent_id = state.agent_id;
     let run_id = RunId::new();
     let turn_id = TurnId::new();
     for index in 0..count {
-        checkpoint
-            .append_message(
-                run_id,
-                turn_id,
-                DateTime::<Utc>::UNIX_EPOCH,
-                EventSource::Run,
-                ChatMessage::user(format!("message {index}")),
-                BTreeMap::new(),
-            )
+        let appended = checkpoint
+            .append_message(message_envelope(agent_id, run_id, turn_id))
             .await
             .expect("append message");
+        let expected_seq =
+            state.last_seq + u64::try_from(index).expect("message index fits u64") + 1;
+        assert_eq!(appended.business_seq(), Some(expected_seq));
     }
 }
 
@@ -71,21 +80,103 @@ async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
         .await
         .expect("initialize");
     let first = checkpoint
-        .append_message(
-            RunId::new(),
-            TurnId::new(),
-            Utc::now(),
-            EventSource::Run,
-            ChatMessage::user("hello"),
-            BTreeMap::new(),
-        )
+        .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
         .await
         .expect("append");
 
-    assert_eq!(first.event.business_seq(), Some(1));
+    assert_eq!(first.business_seq(), Some(1));
     assert!(filesystem.exists("/agents/a/agent.json"));
     assert!(filesystem.exists("/agents/a/messages/1.json"));
+    let stored: StreamEnvelope = serde_json::from_slice(
+        filesystem
+            .entry("/agents/a/messages/1.json")
+            .expect("stored message")
+            .contents(),
+    )
+    .expect("decode stored message");
+    assert_eq!(stored.business_seq(), Some(1));
+    assert_eq!(stored, first);
     assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 1);
+}
+
+#[tokio::test]
+async fn append_rejects_an_already_sequenced_message() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let mut envelope = message_envelope(agent_id, RunId::new(), TurnId::new());
+    envelope.business_seq = Some(7);
+
+    let error = checkpoint
+        .append_message(envelope)
+        .await
+        .expect_err("sequenced input");
+
+    assert!(matches!(error, CheckpointError::MessageAlreadySequenced));
+    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert!(!filesystem.exists("/agents/a/messages/1.json"));
+}
+
+#[tokio::test]
+async fn append_rejects_a_message_for_a_different_agent() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let other_agent_id = AgentId::new();
+
+    let error = checkpoint
+        .append_message(message_envelope(
+            other_agent_id,
+            RunId::new(),
+            TurnId::new(),
+        ))
+        .await
+        .expect_err("agent mismatch");
+
+    assert!(matches!(
+        error,
+        CheckpointError::AgentMismatch { expected, actual }
+            if expected == agent_id && actual == other_agent_id
+    ));
+    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert!(!filesystem.exists("/agents/a/messages/1.json"));
+}
+
+#[tokio::test]
+async fn append_rejects_a_non_message_agent_event() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let turn_id = TurnId::new();
+    let mut envelope = message_envelope(agent_id, RunId::new(), turn_id);
+    envelope.event = RuntimeEvent::Agent {
+        agent_id,
+        event: AgentEvent::Started { turn_id },
+    };
+
+    let error = checkpoint
+        .append_message(envelope)
+        .await
+        .expect_err("non-message event");
+
+    assert!(matches!(error, CheckpointError::UnexpectedMessageEvent));
+    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert!(!filesystem.exists("/agents/a/messages/1.json"));
 }
 
 #[tokio::test]
@@ -99,7 +190,7 @@ async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
         .await
         .expect("initialize");
     assert_eq!(state.last_seq, 0);
-    let envelope = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
     let message_version = filesystem
         .entry_version("/agents/a/messages/1.json")
@@ -124,7 +215,7 @@ async fn load_rejects_a_discontiguous_second_message_without_a_frontier() {
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
-    let second = message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
+    let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
 
     let error = checkpoint
@@ -151,8 +242,8 @@ async fn load_rejects_a_third_message_beyond_the_single_frontier() {
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
-    let first = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
-    let third = message_envelope(agent_id, RunId::new(), TurnId::new(), 3);
+    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let third = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 3);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.insert_entry("/agents/a/messages/3.json", json_entry(&third));
 
@@ -180,7 +271,7 @@ async fn load_rejects_noncanonical_message_filenames() {
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
-    let first = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/01.json", json_entry(&first));
 
     let error = checkpoint
@@ -206,21 +297,16 @@ async fn append_retry_returns_an_identical_uncommitted_frontier_without_duplicat
         .expect("initialize");
     let run_id = RunId::new();
     let turn_id = TurnId::new();
-    let envelope = message_envelope(agent_id, run_id, turn_id, 1);
+    let requested = message_envelope(agent_id, run_id, turn_id);
+    let mut envelope = requested.clone();
+    envelope.business_seq = Some(1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
     let message_version = filesystem
         .entry_version("/agents/a/messages/1.json")
         .expect("message version");
 
     let appended = checkpoint
-        .append_message(
-            run_id,
-            turn_id,
-            DateTime::<Utc>::UNIX_EPOCH,
-            EventSource::Run,
-            ChatMessage::user("message 1"),
-            BTreeMap::new(),
-        )
+        .append_message(requested)
         .await
         .expect("retry append");
 
@@ -245,25 +331,22 @@ async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequenc
         .expect("initialize");
     let run_id = RunId::new();
     let turn_id = TurnId::new();
-    let frontier = message_envelope(agent_id, run_id, turn_id, 1);
+    let frontier = sequenced_message_envelope(agent_id, run_id, turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
     let frontier_version = filesystem
         .entry_version("/agents/a/messages/1.json")
         .expect("frontier version");
+    let mut requested = message_envelope(agent_id, run_id, turn_id);
+    requested
+        .metadata
+        .insert("request".to_owned(), serde_json::json!(true));
 
     let appended = checkpoint
-        .append_message(
-            run_id,
-            turn_id,
-            DateTime::<Utc>::UNIX_EPOCH,
-            EventSource::Run,
-            ChatMessage::user("different"),
-            BTreeMap::new(),
-        )
+        .append_message(requested)
         .await
         .expect("append after frontier");
 
-    assert_eq!(appended.event.business_seq(), Some(2));
+    assert_eq!(appended.business_seq(), Some(2));
     assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 2);
     assert!(filesystem.exists("/agents/a/messages/2.json"));
     assert_eq!(
@@ -284,19 +367,12 @@ async fn append_rejects_an_uncommitted_frontier_from_a_different_run() {
         .expect("initialize");
     let frontier_run_id = RunId::new();
     let turn_id = TurnId::new();
-    let frontier = message_envelope(agent_id, frontier_run_id, turn_id, 1);
+    let frontier = sequenced_message_envelope(agent_id, frontier_run_id, turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
     let requested_run_id = RunId::new();
 
     let error = checkpoint
-        .append_message(
-            requested_run_id,
-            turn_id,
-            DateTime::<Utc>::UNIX_EPOCH,
-            EventSource::Run,
-            ChatMessage::user("different"),
-            BTreeMap::new(),
-        )
+        .append_message(message_envelope(agent_id, requested_run_id, turn_id))
         .await
         .expect_err("run mismatch");
 
@@ -321,18 +397,11 @@ async fn append_rejects_discontiguous_message_before_advancing_frontier() {
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
-    let second = message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
+    let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
 
     let error = checkpoint
-        .append_message(
-            RunId::new(),
-            TurnId::new(),
-            DateTime::<Utc>::UNIX_EPOCH,
-            EventSource::Run,
-            ChatMessage::user("must not persist"),
-            BTreeMap::new(),
-        )
+        .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
         .await
         .expect_err("discontiguous message");
 
@@ -366,7 +435,7 @@ async fn load_rejects_missing_committed_message() {
         .expect("initialize");
     state.last_seq = 2;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
-    let first = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.remove_entry("/agents/a/messages/2.json");
 
@@ -390,8 +459,8 @@ async fn load_rejects_message_filename_body_sequence_mismatch() {
         .expect("initialize");
     state.last_seq = 2;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
-    let first = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
-    let mismatched = message_envelope(agent_id, RunId::new(), TurnId::new(), 3);
+    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let mismatched = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 3);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&mismatched));
 
@@ -420,7 +489,7 @@ async fn load_rejects_message_for_a_different_agent() {
         .await
         .expect("initialize");
     let other_agent_id = AgentId::new();
-    let frontier = message_envelope(other_agent_id, RunId::new(), TurnId::new(), 1);
+    let frontier = sequenced_message_envelope(other_agent_id, RunId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
 
     let error = checkpoint.load_agent().await.expect_err("agent mismatch");
@@ -442,7 +511,7 @@ async fn load_rejects_unknown_message_json_fields() {
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
-    let envelope = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
     let mut value = serde_json::to_value(envelope).expect("serialize envelope");
     value
         .as_object_mut()
@@ -466,7 +535,7 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
         .await
         .expect("initialize");
     advanced_state.last_seq = 1;
-    let first = message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.fail_next_version_write();
 
@@ -475,7 +544,7 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
         async move {
             checkpoint
                 .update_state(
-                    AgentStatus::Running,
+                    AgentStatus::Finished,
                     Some(RunId::new()),
                     Some(TurnId::new()),
                     TokenUsage::default(),
@@ -492,7 +561,7 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
         .expect("state update task")
         .expect("state update retries");
 
-    assert_eq!(updated.status, AgentStatus::Running);
+    assert_eq!(updated.status, AgentStatus::Finished);
     assert_eq!(updated.last_seq, 1);
 }
 
@@ -508,7 +577,7 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
         .expect("initialize");
     let run_id = RunId::new();
     let turn_id = TurnId::new();
-    let first = message_envelope(agent_id, run_id, turn_id, 1);
+    let first = sequenced_message_envelope(agent_id, run_id, turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.pause_next_version_write();
 
@@ -517,7 +586,7 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
         async move { checkpoint.load_agent().await }
     });
     filesystem.wait_for_version_write_pause().await;
-    let second = message_envelope(agent_id, run_id, turn_id, 2);
+    let second = sequenced_message_envelope(agent_id, run_id, turn_id, 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
     latest_state.last_seq = 2;
     filesystem.insert_entry("/agents/a/agent.json", json_entry(&latest_state));
@@ -750,22 +819,16 @@ async fn append_reads_only_state_and_the_constant_size_frontier() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
     checkpoint
-        .initialize(AgentId::new(), "a".to_owned())
+        .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
     append_messages(&checkpoint, 10).await;
     filesystem.reset_read_counts();
 
     checkpoint
-        .append_message(
-            RunId::new(),
-            TurnId::new(),
-            DateTime::<Utc>::UNIX_EPOCH,
-            EventSource::Run,
-            ChatMessage::user("message 11"),
-            BTreeMap::new(),
-        )
+        .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
         .await
         .expect("append after long history");
 
@@ -792,26 +855,16 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
         .expect("initialize");
     let run_id = RunId::new();
     let turn_id = TurnId::new();
+    let requested = message_envelope(agent_id, run_id, turn_id);
     filesystem.pause_next_read("/agents/a/messages/2.json");
 
     let append = tokio::spawn({
         let checkpoint = checkpoint.clone();
-        async move {
-            checkpoint
-                .append_message(
-                    run_id,
-                    turn_id,
-                    DateTime::<Utc>::UNIX_EPOCH,
-                    EventSource::Run,
-                    ChatMessage::user("requested"),
-                    BTreeMap::new(),
-                )
-                .await
-        }
+        async move { checkpoint.append_message(requested).await }
     });
     filesystem.wait_for_read_pause().await;
-    let committed = message_envelope(agent_id, run_id, turn_id, 1);
-    let frontier = message_envelope(agent_id, run_id, turn_id, 2);
+    let committed = sequenced_message_envelope(agent_id, run_id, turn_id, 1);
+    let frontier = sequenced_message_envelope(agent_id, run_id, turn_id, 2);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&committed));
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&frontier));
     advanced_state.last_seq = 1;
@@ -823,7 +876,7 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
         .expect("append task")
         .expect("stale append retries");
 
-    assert_eq!(appended.event.business_seq(), Some(3));
+    assert_eq!(appended.business_seq(), Some(3));
     assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 3);
     assert!(filesystem.exists("/agents/a/messages/3.json"));
 }

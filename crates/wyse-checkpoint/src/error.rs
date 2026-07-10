@@ -23,6 +23,9 @@ pub enum CheckpointError {
     /// The next message sequence cannot be represented.
     #[error("message sequence overflow")]
     SequenceOverflow,
+    /// A checkpoint append input already has a business sequence.
+    #[error("checkpoint append requires an unsequenced message")]
+    MessageAlreadySequenced,
     /// The requested history page size is outside the supported range.
     #[error("history limit must be between 1 and {maximum}: {actual}")]
     InvalidHistoryLimit {

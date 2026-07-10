@@ -1,13 +1,7 @@
 //! Agent checkpoint interface.
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde_json::Value;
-use wyse_core::{
-    ChatMessage, EventSource, HistoryPage, HistoryQuery, RunId, StreamEnvelope, TokenUsage, TurnId,
-};
+use wyse_core::{HistoryPage, HistoryQuery, RunId, StreamEnvelope, TokenUsage, TurnId};
 
 use crate::{AgentState, AgentStatus, CheckpointError};
 
@@ -34,19 +28,14 @@ pub trait AgentCheckpoint: Send + Sync {
         usage: TokenUsage,
     ) -> Result<AgentState, CheckpointError>;
 
-    /// Appends one complete agent message and advances its committed sequence.
+    /// Commits an unsequenced complete agent message and returns its sequenced envelope.
     ///
     /// # Errors
     ///
     /// Returns an error when the message is invalid or cannot be committed atomically.
     async fn append_message(
         &self,
-        run_id: RunId,
-        turn_id: TurnId,
-        timestamp: DateTime<Utc>,
-        source: EventSource,
-        message: ChatMessage,
-        metadata: BTreeMap<String, Value>,
+        envelope: StreamEnvelope,
     ) -> Result<StreamEnvelope, CheckpointError>;
 
     /// Loads one fixed-range page of committed complete messages.
