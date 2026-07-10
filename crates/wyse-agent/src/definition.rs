@@ -5,14 +5,17 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wyse_checkpoint::{CheckpointKind, CheckpointStatus, CheckpointStore};
-use wyse_core::{AgentId, ChatMessage, ChatRole, RunId, TokenUsage, TurnId};
+use wyse_core::{
+    AgentId, ApprovalDecision, ApprovalId, ChatMessage, ChatRole, RunId, TokenUsage, TurnId,
+};
 use wyse_infra::event_stream_bus::EventStreamBus;
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
 
-use crate::{AgentError, checkpoint::decode_checkpoint_payload};
+use crate::{AgentError, checkpoint::decode_checkpoint_payload, command::TurnCommand};
 
 /// Runtime tuning for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +54,7 @@ pub struct Agent {
     current_run_id: Arc<Mutex<Option<RunId>>>,
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
     pub(crate) cancel: Arc<Mutex<Option<CancellationToken>>>,
+    pub(crate) turn_commands: Arc<Mutex<Option<mpsc::Sender<TurnCommand>>>>,
 }
 
 impl Agent {
@@ -92,13 +96,22 @@ impl Agent {
             .cancel
             .lock()
             .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
+        let (command_tx, command_rx) = mpsc::channel(1);
+        *self
+            .turn_commands
+            .lock()
+            .expect("turn command mutex should not be poisoned") = Some(command_tx);
         self.set_next_seq(1);
         self.set_usage(TokenUsage::default());
         let agent = self.clone();
         let active = Arc::clone(&self.active);
+        let turn_commands = Arc::clone(&self.turn_commands);
 
         tokio::spawn(async move {
-            let _ = agent.run_turn_loop(Some(message)).await;
+            let _ = agent.run_turn_loop(Some(message), command_rx).await;
+            *turn_commands
+                .lock()
+                .expect("turn command mutex should not be poisoned") = None;
             active.store(false, Ordering::SeqCst);
         });
 
@@ -115,6 +128,35 @@ impl Agent {
         {
             cancel.cancel();
         }
+    }
+
+    /// Resolves the active tool approval request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no turn is active, the approval id is not active, or
+    /// the turn ends before accepting the command.
+    pub async fn resolve_tool_approval(
+        &self,
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+    ) -> Result<(), AgentError> {
+        let sender = self
+            .turn_commands
+            .lock()
+            .expect("turn command mutex should not be poisoned")
+            .clone()
+            .ok_or(AgentError::NoActiveTurn)?;
+        let (response, receiver) = oneshot::channel();
+        sender
+            .send(TurnCommand::ResolveToolApproval {
+                approval_id,
+                decision,
+                response,
+            })
+            .await
+            .map_err(|_| AgentError::NoActiveTurn)?;
+        receiver.await.map_err(|_| AgentError::NoActiveTurn)?
     }
 
     /// Returns the current run id, if one has been started.
@@ -167,11 +209,20 @@ impl Agent {
             .cancel
             .lock()
             .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
+        let (command_tx, command_rx) = mpsc::channel(1);
+        *self
+            .turn_commands
+            .lock()
+            .expect("turn command mutex should not be poisoned") = Some(command_tx);
         let agent = self.clone();
         let active = Arc::clone(&self.active);
+        let turn_commands = Arc::clone(&self.turn_commands);
 
         tokio::spawn(async move {
-            let _ = agent.run_turn_loop(None).await;
+            let _ = agent.run_turn_loop(None, command_rx).await;
+            *turn_commands
+                .lock()
+                .expect("turn command mutex should not be poisoned") = None;
             active.store(false, Ordering::SeqCst);
         });
 
@@ -317,6 +368,7 @@ impl AgentBuilder {
             current_run_id: Arc::new(Mutex::new(Some(run_id))),
             current_turn_id: Arc::new(Mutex::new(Some(turn_id))),
             cancel: Arc::new(Mutex::new(None)),
+            turn_commands: Arc::new(Mutex::new(None)),
         };
         agent.set_next_seq(record.last_seq.saturating_add(1));
         agent.set_usage(checkpoint.usage);
@@ -356,6 +408,7 @@ impl AgentBuilder {
             current_run_id: Arc::new(Mutex::new(None)),
             current_turn_id: Arc::new(Mutex::new(None)),
             cancel: Arc::new(Mutex::new(None)),
+            turn_commands: Arc::new(Mutex::new(None)),
         })
     }
 }

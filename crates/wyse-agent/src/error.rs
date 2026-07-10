@@ -19,6 +19,21 @@ pub enum AgentError {
     /// Another run is already active for this stateful agent.
     #[error("agent run is already active")]
     RunAlreadyActive,
+    /// No agent turn is currently active.
+    #[error("no agent turn is active")]
+    NoActiveTurn,
+    /// The requested tool approval is not active.
+    #[error("tool approval is not active: {approval_id}")]
+    ApprovalNotFound {
+        /// Approval request identity.
+        approval_id: wyse_core::ApprovalId,
+    },
+    /// The active turn's command channel closed.
+    #[error("agent turn command channel closed")]
+    TurnCommandClosed,
+    /// The approval decision is not supported by this runtime.
+    #[error("unsupported tool approval decision")]
+    UnsupportedApprovalDecision,
     /// LLM provider operation failed.
     #[error("llm operation failed")]
     Llm {

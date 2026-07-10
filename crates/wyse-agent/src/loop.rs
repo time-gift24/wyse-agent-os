@@ -5,12 +5,13 @@ use std::{collections::BTreeMap, sync::atomic::Ordering};
 use chrono::Utc;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use wyse_checkpoint::{CheckpointKind, CheckpointRecord, CheckpointStatus};
 use wyse_core::{
-    AgentEvent, CallId, ChatMessage, EventSource, LlmCallId, LlmEvent, RuntimeEvent,
-    StreamEnvelope, TokenUsage, ToolCall, ToolName,
+    AgentEvent, ApprovalDecision, ApprovalId, CallId, ChatMessage, EventSource, LlmCallId,
+    LlmEvent, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolName,
 };
 use wyse_llm::{ChatRequest, ChatStream, ChatStreamEvent, FinishReason};
 use wyse_tools::ToolInput;
@@ -18,10 +19,15 @@ use wyse_tools::ToolInput;
 use crate::{
     Agent, AgentError,
     checkpoint::{AGENT_CHECKPOINT_STATE_VERSION, encode_checkpoint_payload},
+    command::{TurnCommand, reject_inactive_command},
 };
 
 impl Agent {
-    pub(crate) async fn run_turn_loop(self, input: Option<ChatMessage>) -> Result<(), AgentError> {
+    pub(crate) async fn run_turn_loop(
+        self,
+        input: Option<ChatMessage>,
+        mut commands: mpsc::Receiver<TurnCommand>,
+    ) -> Result<(), AgentError> {
         let mut history = self.history_snapshot();
         if let Some(message) = input {
             history.push(message);
@@ -60,14 +66,23 @@ impl Agent {
                 tools: self.tool_registry.specs(),
                 structured_output: None,
             };
-            let cancel = self.cancel_token().expect("cancel token should be set");
-            let stream = match tokio::select! {
-                () = cancel.cancelled() => {
-                    self.publish_cancelled(&history).await?;
-                    return Err(AgentError::Cancelled);
+            let future = self.llm_provider.chat_stream(request);
+            tokio::pin!(future);
+            let stream = loop {
+                let cancel = self.cancel_token().expect("cancel token should be set");
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        self.publish_cancelled(&history).await?;
+                        return Err(AgentError::Cancelled);
+                    }
+                    command = commands.recv() => {
+                        reject_inactive_command(command)?;
+                    }
+                    result = &mut future => break result,
                 }
-                result = self.llm_provider.chat_stream(request) => result,
-            } {
+            };
+            let stream = match stream {
                 Ok(stream) => stream,
                 Err(source) => {
                     self.publish_llm_event(
@@ -93,7 +108,7 @@ impl Agent {
                 }
             };
             let assistant = match self
-                .consume_assistant_stream(turn_index, llm_call_id, stream, &history)
+                .consume_assistant_stream(turn_index, llm_call_id, stream, &history, &mut commands)
                 .await
             {
                 Ok(assistant) => assistant,
@@ -140,9 +155,17 @@ impl Agent {
                         self.publish_cancelled(&history).await?;
                         return Err(AgentError::Cancelled);
                     }
-                    let tool_message = self
-                        .execute_tool_call(turn_index, tool_call, &history)
-                        .await?;
+                    let tool_message = match self
+                        .execute_tool_call(turn_index, tool_call, &history, &mut commands)
+                        .await
+                    {
+                        Ok(message) => message,
+                        Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                        Err(error) => {
+                            self.save_failed_checkpoint(&error, &history).await?;
+                            return Err(error);
+                        }
+                    };
                     history.push(tool_message);
                     self.save_checkpoint(CheckpointStatus::Running, &history)
                         .await?;
@@ -221,7 +244,7 @@ impl Agent {
     ) -> Result<(), AgentError> {
         let seq = self.reserve_event_seq();
         self.save_checkpoint(status, history).await?;
-        self.publish_agent_event_at(seq, event, None).await
+        self.publish_agent_event_at(seq, event, None, false).await
     }
 
     async fn publish_cancelled(&self, history: &[ChatMessage]) -> Result<(), AgentError> {
@@ -277,7 +300,17 @@ impl Agent {
         extra_metadata: Option<BTreeMap<String, Value>>,
     ) -> Result<(), AgentError> {
         let seq = self.reserve_event_seq();
-        self.publish_agent_event_at(seq, event, extra_metadata)
+        self.publish_agent_event_at(seq, event, extra_metadata, false)
+            .await
+    }
+
+    async fn publish_required_agent_event(
+        &self,
+        event: AgentEvent,
+        extra_metadata: Option<BTreeMap<String, Value>>,
+    ) -> Result<(), AgentError> {
+        let seq = self.reserve_event_seq();
+        self.publish_agent_event_at(seq, event, extra_metadata, true)
             .await
     }
 
@@ -286,6 +319,7 @@ impl Agent {
         seq: u64,
         event: AgentEvent,
         extra_metadata: Option<BTreeMap<String, Value>>,
+        fail_on_publish_error: bool,
     ) -> Result<(), AgentError> {
         let mut metadata = BTreeMap::new();
         metadata.insert("agent_name".to_owned(), Value::String(self.name.clone()));
@@ -315,6 +349,9 @@ impl Agent {
             metadata,
         };
         if let Err(error) = self.event_bus.publish(envelope).await {
+            if fail_on_publish_error {
+                return Err(AgentError::from(error));
+            }
             warn!(
                 run_id = %self.current_run().expect("run id should be set"),
                 current_seq = seq,
@@ -331,6 +368,7 @@ impl Agent {
         llm_call_id: LlmCallId,
         mut stream: ChatStream,
         history: &[ChatMessage],
+        commands: &mut mpsc::Receiver<TurnCommand>,
     ) -> Result<AssistantStreamResult, AgentError> {
         let mut text = String::new();
         let mut reasoning = String::new();
@@ -340,9 +378,14 @@ impl Agent {
         loop {
             let cancel = self.cancel_token().expect("cancel token should be set");
             tokio::select! {
+                biased;
                 () = cancel.cancelled() => {
                     self.publish_cancelled(history).await?;
                     return Err(AgentError::Cancelled);
+                }
+                command = commands.recv() => {
+                    reject_inactive_command(command)?;
+                    continue;
                 }
                 event = stream.next() => {
                     let Some(event) = event else {
@@ -502,6 +545,7 @@ impl Agent {
         turn_index: usize,
         tool_call: &ToolCall,
         history: &[ChatMessage],
+        commands: &mut mpsc::Receiver<TurnCommand>,
     ) -> Result<ChatMessage, AgentError> {
         let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
         self.publish_llm_event(
@@ -517,16 +561,112 @@ impl Agent {
         .await?;
 
         let name = ToolName::from(tool_call.name.as_str());
-        let cancel = self.cancel_token().expect("cancel token should be set");
-        let tool_result = tokio::select! {
-            () = cancel.cancelled() => {
-                self.publish_cancelled(history).await?;
-                return Err(AgentError::Cancelled);
+        let authorization = match self.tool_registry.authorization(&name) {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                return self
+                    .tool_failure_message(turn_index, llm_call_id, tool_call, error.to_string())
+                    .await;
             }
-            result = self.tool_registry.call(
-                &name,
-                ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
-            ) => result,
+        };
+
+        if let Some((tool_kind, danger_level)) = authorization.approval_metadata() {
+            let approval_id = ApprovalId::new();
+            self.publish_required_agent_event(
+                AgentEvent::ToolApprovalRequested {
+                    approval_id,
+                    agent_name: self.name.clone(),
+                    call_id: tool_call.call_id.clone(),
+                    tool_name: name.clone(),
+                    arguments: tool_call.arguments.clone(),
+                    tool_kind,
+                    danger_level,
+                },
+                None,
+            )
+            .await?;
+
+            let decision = loop {
+                let cancel = self.cancel_token().expect("cancel token should be set");
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        self.publish_cancelled(history).await?;
+                        return Err(AgentError::Cancelled);
+                    }
+                    command = commands.recv() => {
+                        let Some(TurnCommand::ResolveToolApproval {
+                            approval_id: candidate,
+                            decision,
+                            response,
+                        }) = command else {
+                            return Err(AgentError::TurnCommandClosed);
+                        };
+                        if candidate != approval_id {
+                            let _ = response.send(Err(AgentError::ApprovalNotFound {
+                                approval_id: candidate,
+                            }));
+                            continue;
+                        }
+                        let _ = response.send(Ok(()));
+                        break decision;
+                    }
+                }
+            };
+
+            self.publish_agent_event(
+                AgentEvent::ToolApprovalResolved {
+                    approval_id,
+                    decision,
+                },
+                None,
+            )
+            .await?;
+
+            match decision {
+                ApprovalDecision::Approve => {}
+                ApprovalDecision::Reject => {
+                    let result = json!({
+                        "error": {
+                            "type": "approval_rejected",
+                            "message": "user rejected tool call"
+                        }
+                    });
+                    self.publish_llm_event(
+                        turn_index,
+                        llm_call_id,
+                        LlmEvent::ToolCallFailed {
+                            call_id: tool_call.call_id.clone(),
+                            error_text: "user rejected tool call".to_owned(),
+                        },
+                        Some(&tool_call.name),
+                        Some(&tool_call.call_id),
+                    )
+                    .await?;
+                    return Ok(ChatMessage::tool(tool_call.call_id.clone(), result));
+                }
+                _ => return Err(AgentError::UnsupportedApprovalDecision),
+            }
+        }
+
+        let future = self.tool_registry.call(
+            &name,
+            ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
+        );
+        tokio::pin!(future);
+        let tool_result = loop {
+            let cancel = self.cancel_token().expect("cancel token should be set");
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    self.publish_cancelled(history).await?;
+                    return Err(AgentError::Cancelled);
+                }
+                command = commands.recv() => {
+                    reject_inactive_command(command)?;
+                }
+                result = &mut future => break result,
+            }
         };
 
         match tool_result {
@@ -545,23 +685,33 @@ impl Agent {
                 Ok(ChatMessage::tool(tool_call.call_id.clone(), output.result))
             }
             Err(error) => {
-                let error_text = error.to_string();
-                self.publish_llm_event(
-                    turn_index,
-                    llm_call_id,
-                    LlmEvent::ToolCallFailed {
-                        call_id: tool_call.call_id.clone(),
-                        error_text: error_text.clone(),
-                    },
-                    Some(&tool_call.name),
-                    Some(&tool_call.call_id),
-                )
-                .await?;
-                let mut message = ChatMessage::text(wyse_core::ChatRole::Tool, error_text);
-                message.tool_call_id = Some(tool_call.call_id.clone());
-                Ok(message)
+                self.tool_failure_message(turn_index, llm_call_id, tool_call, error.to_string())
+                    .await
             }
         }
+    }
+
+    async fn tool_failure_message(
+        &self,
+        turn_index: usize,
+        llm_call_id: LlmCallId,
+        tool_call: &ToolCall,
+        error_text: String,
+    ) -> Result<ChatMessage, AgentError> {
+        self.publish_llm_event(
+            turn_index,
+            llm_call_id,
+            LlmEvent::ToolCallFailed {
+                call_id: tool_call.call_id.clone(),
+                error_text: error_text.clone(),
+            },
+            Some(&tool_call.name),
+            Some(&tool_call.call_id),
+        )
+        .await?;
+        let mut message = ChatMessage::text(wyse_core::ChatRole::Tool, error_text);
+        message.tool_call_id = Some(tool_call.call_id.clone());
+        Ok(message)
     }
 }
 
