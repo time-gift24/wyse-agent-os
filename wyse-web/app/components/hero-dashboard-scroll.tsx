@@ -18,6 +18,8 @@ export function HeroDashboardScroll() {
     const cancelAutoScroll = () => {
       hasUserIntent = true
       window.clearTimeout(timer)
+      tweenRef.current?.kill()
+      tweenRef.current = null
     }
 
     const timer = window.setTimeout(() => {
