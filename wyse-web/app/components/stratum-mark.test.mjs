@@ -5,6 +5,7 @@ import test from "node:test"
 const componentUrl = new URL("./stratum-mark.tsx", import.meta.url)
 const navbarUrl = new URL("./site-navbar.tsx", import.meta.url)
 const homeUrl = new URL("../routes/home.tsx", import.meta.url)
+const homeContentUrl = new URL("./home-content.tsx", import.meta.url)
 const assetUrl = new URL("../assets/stratum-mark.svg", import.meta.url)
 const compactAssetUrl = new URL(
   "../assets/stratum-mark-compact.svg",
@@ -67,10 +68,10 @@ test("the compact Stratum SVG uses the muted ink token at small sizes", async ()
 })
 
 test("the Stratum mark inlines the SVG and animates only its diamond", async () => {
-  const [component, navbar, home, appCss] = await Promise.all([
+  const [component, navbar, homeContent, appCss] = await Promise.all([
     readFile(componentUrl, "utf8"),
     readFile(navbarUrl, "utf8"),
-    readFile(homeUrl, "utf8"),
+    readFile(homeContentUrl, "utf8"),
     readFile(appCssUrl, "utf8"),
   ])
 
@@ -96,7 +97,7 @@ test("the Stratum mark inlines the SVG and animates only its diamond", async () 
   )
   assert.match(navbar, />运筹<\/span>/)
   assert.match(navbar, />Stratum<\/span>/)
-  assert.match(home, /<StratumMark className="size-32/)
+  assert.match(homeContent, /<StratumMark className="wyse-home-hero__mark" \/>/)
   assert.match(appCss, /\.stratum-mark--compact/)
   assert.doesNotMatch(appCss, /drop-shadow/)
 })
@@ -126,6 +127,20 @@ test("the navbar groups localized dashboard navigation", async () => {
   assert.match(navbar, /href="#workflows"/)
   assert.match(navbar, /href="#runs"/)
   assert.match(navbar, /<LocaleToggle\s*\/>/)
+})
+
+test("the home composes localized hero and dashboard content", async () => {
+  const [home, content] = await Promise.all([
+    readFile(homeUrl, "utf8"),
+    readFile(homeContentUrl, "utf8"),
+  ])
+
+  assert.match(home, /<LocaleProvider>/)
+  assert.match(home, /<HomeContent\s*\/>/)
+  assert.match(content, /<HeroDashboardScroll\s*\/>/)
+  assert.match(content, /<SiteNavbar\s*\/>/)
+  assert.match(content, /<StratumMark/)
+  assert.match(content, /<Dashboard/)
 })
 
 test("dashboard component rules keep visual declarations in Tailwind apply utilities", async () => {
