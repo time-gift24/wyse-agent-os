@@ -244,11 +244,21 @@ impl fmt::Display for ModelRef {
 impl FromStr for ModelRef {
     type Err = ModelRefParseError;
 
+    /// Parses a canonical `provider:model` reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelRefParseError::InvalidFormat`] when the value is not canonical.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let Some((provider, model)) = value.split_once(':') else {
             return Err(ModelRefParseError::InvalidFormat);
         };
-        if provider.is_empty() || model.is_empty() || model.contains(':') || value.trim() != value {
+        if provider.is_empty()
+            || model.is_empty()
+            || model.contains(':')
+            || provider.trim() != provider
+            || model.trim() != model
+        {
             return Err(ModelRefParseError::InvalidFormat);
         }
 
@@ -262,6 +272,11 @@ impl FromStr for ModelRef {
 impl TryFrom<String> for ModelRef {
     type Error = ModelRefParseError;
 
+    /// Converts a canonical `provider:model` reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelRefParseError::InvalidFormat`] when the value is not canonical.
     fn try_from(value: String) -> Result<Self, Self::Error> {
         value.parse()
     }
@@ -711,6 +726,8 @@ mod tests {
             "openai:",
             "openai:gpt:mini",
             " openai:gpt",
+            "openai :gpt",
+            "openai: gpt",
         ] {
             assert!(value.parse::<ModelRef>().is_err(), "{value} should fail");
         }
