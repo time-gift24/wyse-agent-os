@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { readFile } from "node:fs/promises"
+import { access, readFile } from "node:fs/promises"
 import test from "node:test"
 
 const componentUrl = new URL("./stratum-mark.tsx", import.meta.url)
@@ -9,6 +9,9 @@ const compactAssetUrl = new URL(
   import.meta.url
 )
 const appCssUrl = new URL("../app.css", import.meta.url)
+const homeContentUrl = new URL("./home-content.tsx", import.meta.url)
+const glassSurfaceUrl = new URL("./GlassSurface.tsx", import.meta.url)
+const glassSurfaceCssUrl = new URL("./GlassSurface.css", import.meta.url)
 
 test("the supplied Stratum SVG is background-free and keeps its original geometry", async () => {
   const asset = await readFile(assetUrl, "utf8")
@@ -55,4 +58,19 @@ test("the Stratum component scopes motion to its diamond", async () => {
   assert.doesNotMatch(component, /transformBox/)
   assert.doesNotMatch(component, /gsap\.(?:to|from|fromTo)\([^)]*weave/s)
   assert.doesNotMatch(appCss, /drop-shadow/)
+})
+
+test("the home flow excludes legacy dashboard and glass workspace artifacts", async () => {
+  const [homeContent, appCss] = await Promise.all([
+    readFile(homeContentUrl, "utf8"),
+    readFile(appCssUrl, "utf8"),
+  ])
+
+  assert.doesNotMatch(homeContent, /dashboard|GlassSurface|glass-surface/i)
+  assert.doesNotMatch(
+    appCss,
+    /wyse-dashboard|glass-surface|gradient|backdrop-filter|box-shadow/i
+  )
+  await assert.rejects(access(glassSurfaceUrl))
+  await assert.rejects(access(glassSurfaceCssUrl))
 })
