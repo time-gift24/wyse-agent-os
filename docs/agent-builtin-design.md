@@ -117,10 +117,11 @@ redaction remains the only provider-error text source.
 Automated tests remain offline:
 
 - `wyse-core` unit tests cover `ModelRef` parsing, display, and invalid input.
-- `wyse-agent-builtin` unit tests cover OpenAI and DeepSeek wiring, including
-  the canonical provider/model identity in emitted metadata.
-- A binary-level test covers a missing required input without making a network
-  request.
+- `wyse-agent-builtin` unit tests cover OpenAI and DeepSeek provider wiring,
+  including the reported provider and model identity before agent events are
+  published.
+- `simple_agent` unit tests cover prompt argument cardinality, including
+  missing and extra prompt arguments.
 
 Before handoff, run `cargo fmt`, `cargo test --workspace --all-targets`, and
 `cargo clippy --workspace --all-targets`. A manual smoke test uses a real
