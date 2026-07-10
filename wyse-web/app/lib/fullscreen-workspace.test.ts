@@ -38,6 +38,16 @@ test("builds both workspace panes on the shadcn Sidebar foundation", async () =>
   }
 })
 
+test("caps rendered Sidebar menu corners at six pixels", async () => {
+  const [sidebar, css] = await Promise.all([
+    component("ui/sidebar.tsx"),
+    readFile(new URL("../app.css", import.meta.url), "utf8"),
+  ])
+
+  assert.match(sidebar, /rounded-\[calc\(var\(--radius-sm\)\+2px\)\]/)
+  assert.match(css, /--radius-sm: 0\.25rem;/)
+})
+
 test("removes inactive pager slides from interaction and tab order", async () => {
   const pager = await component("workspace-pager.tsx")
 
