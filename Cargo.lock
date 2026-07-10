@@ -2142,6 +2142,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wyse-agent-builtin"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "wyse-agent",
+ "wyse-core",
+ "wyse-infra",
+ "wyse-llm",
+ "wyse-tools",
+]
+
+[[package]]
 name = "wyse-checkpoint"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/wyse-agent",
+    "crates/wyse-agent-builtin",
     "crates/wyse-checkpoint",
     "crates/wyse-core",
     "crates/wyse-filesystem",
@@ -33,6 +34,7 @@ tokio-util = "0.7.18"
 tracing = "0.1.41"
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
 wyse-core = { path = "crates/wyse-core" }
+wyse-agent = { path = "crates/wyse-agent" }
 wyse-checkpoint = { path = "crates/wyse-checkpoint" }
 wyse-infra = { path = "crates/wyse-infra" }
 wyse-llm = { path = "crates/wyse-llm" }
