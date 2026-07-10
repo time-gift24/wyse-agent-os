@@ -11,9 +11,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use serde_json::json;
-use wyse_core::{ToolName, ToolSpec};
+use wyse_core::{DangerLevel, ToolKind, ToolName, ToolSpec};
 
-use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolRegistry};
+use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry};
 
 pub use apply_patch::ApplyPatchTool;
 pub use file_metadata::FileMetadataTool;
@@ -22,31 +22,84 @@ pub use read_file_lines::ReadFileLinesTool;
 pub use search_text::SearchTextTool;
 
 /// Registry backed by builtin in-memory tools.
-#[derive(Default)]
+struct RegisteredTool {
+    tool: Arc<dyn Tool>,
+    tool_kind: ToolKind,
+    danger_level: DangerLevel,
+}
+
 pub struct BuiltinToolRegistry {
-    tools: BTreeMap<ToolName, Arc<dyn Tool>>,
+    tools: BTreeMap<ToolName, RegisteredTool>,
+    permission_mode: ToolPermissionMode,
+}
+
+impl BuiltinToolRegistry {
+    /// Creates a builtin registry with the requested permission behavior.
+    #[must_use]
+    pub fn new(permission_mode: ToolPermissionMode) -> Self {
+        Self {
+            tools: BTreeMap::new(),
+            permission_mode,
+        }
+    }
+}
+
+impl Default for BuiltinToolRegistry {
+    fn default() -> Self {
+        Self::new(ToolPermissionMode::Allow)
+    }
 }
 
 #[async_trait]
 impl ToolRegistry for BuiltinToolRegistry {
-    fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
+    fn register(
+        &mut self,
+        tool: Arc<dyn Tool>,
+        tool_kind: ToolKind,
+        danger_level: DangerLevel,
+    ) -> Result<(), ToolError> {
         let name = tool.spec().name.clone();
         if self.tools.contains_key(&name) {
             return Err(ToolError::DuplicateTool { name });
         }
 
-        self.tools.insert(name, tool);
+        self.tools.insert(
+            name,
+            RegisteredTool {
+                tool,
+                tool_kind,
+                danger_level,
+            },
+        );
         Ok(())
     }
 
+    fn authorization(&self, name: &ToolName) -> Result<Option<(ToolKind, DangerLevel)>, ToolError> {
+        let registered = self
+            .tools
+            .get(name)
+            .ok_or_else(|| ToolError::ToolNotFound { name: name.clone() })?;
+        let allowed = match self.permission_mode {
+            ToolPermissionMode::Allow => true,
+            ToolPermissionMode::PartialAllow => {
+                registered.tool_kind == ToolKind::Read
+                    && registered.danger_level == DangerLevel::Low
+            }
+            ToolPermissionMode::RequireApproval => false,
+        };
+        Ok((!allowed).then_some((registered.tool_kind, registered.danger_level)))
+    }
+
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        self.tools
+            .get(name)
+            .map(|registered| Arc::clone(&registered.tool))
     }
 
     fn specs(&self) -> Vec<ToolSpec> {
         self.tools
             .values()
-            .map(|tool| tool.spec().clone())
+            .map(|registered| registered.tool.spec().clone())
             .collect()
     }
 

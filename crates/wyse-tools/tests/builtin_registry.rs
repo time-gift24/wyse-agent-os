@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use wyse_core::{CallId, ToolName, ToolSpec};
+use wyse_core::{CallId, DangerLevel, ToolKind, ToolName, ToolSpec};
 use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig, VirtualPath};
 use wyse_tools::{
     ApplyPatchTool, BuiltinToolRegistry, EchoTool, FileMetadataTool, ListDirTool,
-    ReadFileLinesTool, SearchTextTool, ToolError, ToolInput, ToolRegistry,
+    ReadFileLinesTool, SearchTextTool, ToolError, ToolInput, ToolPermissionMode, ToolRegistry,
 };
 
 async fn apply_patch_test_filesystem(name: &str) -> (Arc<LocalFilesystem>, std::path::PathBuf) {
@@ -35,7 +35,11 @@ async fn read_file_lines_tool_returns_requested_line_range_through_registry() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .register(
+            Arc::new(ReadFileLinesTool::new(filesystem)),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("read file lines tool should register");
 
     let output = registry
@@ -80,7 +84,11 @@ async fn read_file_lines_tool_returns_empty_lines_when_range_starts_after_end() 
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .register(
+            Arc::new(ReadFileLinesTool::new(filesystem)),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("read file lines tool should register");
 
     let output = registry
@@ -117,7 +125,11 @@ async fn read_file_lines_tool_rejects_invalid_relative_path() {
     let (filesystem, root) = apply_patch_test_filesystem("read-lines-invalid-path").await;
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .register(
+            Arc::new(ReadFileLinesTool::new(filesystem)),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("read file lines tool should register");
 
     let error = registry
@@ -150,7 +162,11 @@ async fn read_file_lines_tool_returns_typed_error_for_non_utf8_file() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ReadFileLinesTool::new(filesystem)))
+        .register(
+            Arc::new(ReadFileLinesTool::new(filesystem)),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("read file lines tool should register");
 
     let error = registry
@@ -190,7 +206,11 @@ async fn list_dir_tool_returns_sorted_directory_entries_through_registry() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ListDirTool::new(filesystem)))
+        .register(
+            Arc::new(ListDirTool::new(filesystem)),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("list dir tool should register");
 
     let output = registry
@@ -238,7 +258,11 @@ async fn file_metadata_tool_returns_file_type_and_length_through_registry() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(FileMetadataTool::new(filesystem)))
+        .register(
+            Arc::new(FileMetadataTool::new(filesystem)),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("file metadata tool should register");
 
     let output = registry
@@ -293,7 +317,11 @@ async fn search_text_tool_returns_matches_under_directory_through_registry() {
         .expect("seed binary file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(SearchTextTool::new(filesystem)))
+        .register(
+            Arc::new(SearchTextTool::new(filesystem)),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
         .expect("search text tool should register");
 
     let output = registry
@@ -342,7 +370,7 @@ async fn search_text_tool_returns_matches_under_directory_through_registry() {
 async fn registered_echo_tool_can_be_called_through_registry() {
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(EchoTool::new()))
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect("echo tool should register");
 
     let output = registry
@@ -367,14 +395,63 @@ async fn registered_echo_tool_can_be_called_through_registry() {
 }
 
 #[test]
+fn permission_modes_apply_the_declared_matrix() {
+    let cases = [
+        (
+            ToolPermissionMode::Allow,
+            ToolKind::Write,
+            DangerLevel::High,
+            false,
+        ),
+        (
+            ToolPermissionMode::PartialAllow,
+            ToolKind::Read,
+            DangerLevel::Low,
+            false,
+        ),
+        (
+            ToolPermissionMode::PartialAllow,
+            ToolKind::Read,
+            DangerLevel::Medium,
+            true,
+        ),
+        (
+            ToolPermissionMode::PartialAllow,
+            ToolKind::Write,
+            DangerLevel::Low,
+            true,
+        ),
+        (
+            ToolPermissionMode::RequireApproval,
+            ToolKind::Read,
+            DangerLevel::Low,
+            true,
+        ),
+    ];
+
+    for (mode, kind, danger_level, expected_approval) in cases {
+        let mut registry = BuiltinToolRegistry::new(mode);
+        registry
+            .register(Arc::new(EchoTool::new()), kind, danger_level)
+            .expect("echo registers");
+
+        let approval_metadata = registry
+            .authorization(&ToolName::from("echo"))
+            .expect("echo is registered");
+
+        assert_eq!(approval_metadata.is_some(), expected_approval);
+    }
+}
+
+#[test]
 fn duplicate_registration_fails() {
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(EchoTool::new()))
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect("first registration should succeed");
 
     let error = registry
-        .register(Arc::new(EchoTool::new()))
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect_err("duplicate registration should fail");
 
     assert!(matches!(
@@ -406,7 +483,11 @@ async fn apply_patch_tool_can_create_file_through_registry() {
     let (filesystem, root) = apply_patch_test_filesystem("create").await;
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ApplyPatchTool::new(filesystem.clone())))
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem.clone())),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
         .expect("apply patch tool should register");
 
     let output = registry
@@ -447,7 +528,11 @@ async fn apply_patch_tool_updates_existing_file_through_registry() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ApplyPatchTool::new(filesystem.clone())))
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem.clone())),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
         .expect("apply patch tool should register");
 
     let output = registry
@@ -487,7 +572,11 @@ async fn apply_patch_tool_deletes_existing_file_through_registry() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ApplyPatchTool::new(filesystem.clone())))
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem.clone())),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
         .expect("apply patch tool should register");
 
     let output = registry
@@ -529,7 +618,11 @@ async fn apply_patch_tool_returns_failed_status_for_patch_conflict() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ApplyPatchTool::new(filesystem.clone())))
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem.clone())),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
         .expect("apply patch tool should register");
 
     let output = registry
@@ -572,7 +665,11 @@ async fn apply_patch_tool_returns_failed_status_for_existing_create_target() {
         .expect("seed file");
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ApplyPatchTool::new(filesystem.clone())))
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem.clone())),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
         .expect("apply patch tool should register");
 
     let output = registry
@@ -610,7 +707,11 @@ async fn apply_patch_tool_rejects_invalid_relative_path() {
     let (filesystem, root) = apply_patch_test_filesystem("invalid-path").await;
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(ApplyPatchTool::new(filesystem)))
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem)),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
         .expect("apply patch tool should register");
 
     let error = registry

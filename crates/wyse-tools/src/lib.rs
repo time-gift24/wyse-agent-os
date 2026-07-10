@@ -8,5 +8,5 @@ pub use builtin::{
     ApplyPatchTool, BuiltinToolRegistry, EchoTool, FileMetadataTool, ListDirTool,
     ReadFileLinesTool, SearchTextTool,
 };
-pub use definition::{Tool, ToolInput, ToolOutput, ToolRegistry};
+pub use definition::{Tool, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry};
 pub use error::ToolError;

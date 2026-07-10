@@ -15,3 +15,12 @@
 - Recoverable tool-domain failures should return structured tool output when the caller can act on them.
 - Keep concrete builtin implementations separate from registry code.
 - Do not add remote tool adapters, MCP adapters, shell tools, or approval flows until a concrete caller needs them.
+
+## Tool Permissions
+
+- Every registered tool declares `ToolKind` and `DangerLevel`.
+- `Allow` authorizes every tool.
+- `PartialAllow` authorizes only `Read + Low`; all other calls require approval.
+- `RequireApproval` requires approval for every tool.
+- Permission mode and registration metadata are immutable after sharing the registry.
+- Keep provider-visible specs independent from runtime permission metadata.

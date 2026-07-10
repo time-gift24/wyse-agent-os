@@ -1,7 +1,11 @@
 use std::{
     collections::VecDeque,
     future::pending,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::Poll,
     time::Duration,
 };
 
@@ -14,9 +18,9 @@ use wyse_checkpoint::{
     CheckpointError, CheckpointKind, CheckpointRecord, CheckpointStatus, CheckpointStore,
 };
 use wyse_core::{
-    AgentEvent, AgentId, CallId, ChatContent, ChatMessage, ChatRole, LlmCallRole, LlmEvent,
-    ModelId, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCallDelta, ToolName, ToolSpec,
-    TurnId,
+    AgentEvent, AgentId, ApprovalDecision, ApprovalId, CallId, ChatContent, ChatMessage, ChatRole,
+    DangerLevel, LlmCallRole, LlmEvent, ModelId, RunId, RuntimeEvent, StreamEnvelope, TokenUsage,
+    ToolCallDelta, ToolKind, ToolName, ToolSpec, TurnId,
 };
 use wyse_infra::event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
@@ -24,7 +28,10 @@ use wyse_infra::event_stream_bus::{
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
-use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolInput, ToolOutput, ToolRegistry};
+use wyse_tools::{
+    BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
+    ToolRegistry,
+};
 
 #[derive(Debug)]
 enum ProviderResponse {
@@ -113,10 +120,22 @@ impl BlockingToolRegistry {
 
 #[async_trait]
 impl ToolRegistry for BlockingToolRegistry {
-    fn register(&mut self, tool: Arc<dyn wyse_tools::Tool>) -> Result<(), ToolError> {
+    fn register(
+        &mut self,
+        tool: Arc<dyn wyse_tools::Tool>,
+        _tool_kind: ToolKind,
+        _danger_level: DangerLevel,
+    ) -> Result<(), ToolError> {
         Err(ToolError::DuplicateTool {
             name: tool.spec().name.clone(),
         })
+    }
+
+    fn authorization(
+        &self,
+        _name: &ToolName,
+    ) -> Result<Option<(ToolKind, DangerLevel)>, ToolError> {
+        Ok(None)
     }
 
     fn get(&self, _name: &ToolName) -> Option<Arc<dyn wyse_tools::Tool>> {
@@ -130,6 +149,36 @@ impl ToolRegistry for BlockingToolRegistry {
     async fn call(&self, _name: &ToolName, _input: ToolInput) -> Result<ToolOutput, ToolError> {
         self.entered.notify_waiters();
         pending::<Result<ToolOutput, ToolError>>().await
+    }
+}
+
+struct CountingTool {
+    spec: ToolSpec,
+    calls: Arc<AtomicUsize>,
+}
+
+impl CountingTool {
+    fn new(calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            spec: ToolSpec::builder()
+                .name("counting")
+                .description("counts executions")
+                .input_schema(json!({"type": "object"}))
+                .build(),
+            calls,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CountingTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ToolOutput::new(input.arguments))
     }
 }
 
@@ -188,6 +237,33 @@ impl EventStreamBus for FailingPublishEventBus {
     }
 }
 
+#[derive(Clone, Default)]
+struct FailingApprovalBus {
+    inner: InMemoryEventStreamBus,
+}
+
+#[async_trait]
+impl EventStreamBus for FailingApprovalBus {
+    async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        if matches!(
+            &envelope.event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalRequested { .. },
+                ..
+            }
+        ) {
+            let source = serde_json::from_str::<serde_json::Value>("{")
+                .expect_err("invalid json produces a serde error");
+            return Err(EventStreamBusError::Serialize(source));
+        }
+        self.inner.publish(envelope).await
+    }
+
+    async fn subscribe_run(&self, run_id: RunId) -> Result<EventStream, EventStreamBusError> {
+        self.inner.subscribe_run(run_id).await
+    }
+}
+
 async fn wait_for_latest_checkpoint(
     checkpoints: &RecordingCheckpointStore,
     status: CheckpointStatus,
@@ -233,6 +309,323 @@ async fn run_turn_and_subscribe(agent: &Agent, message: ChatMessage) -> (RunId, 
     (run_id, events)
 }
 
+async fn wait_for_approval_request(events: &mut EventStream) -> ApprovalId {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let envelope = events
+                .next()
+                .await
+                .expect("approval event")
+                .expect("event is valid");
+            if let RuntimeEvent::Agent {
+                event:
+                    AgentEvent::ToolApprovalRequested {
+                        approval_id,
+                        agent_name,
+                        call_id,
+                        tool_name,
+                        arguments,
+                        tool_kind,
+                        danger_level,
+                    },
+                ..
+            } = envelope.event
+            {
+                assert_eq!(agent_name, "test-agent");
+                assert_eq!(call_id, CallId::from("call-1"));
+                assert_eq!(tool_name, ToolName::from("counting"));
+                assert_eq!(arguments, json!({"message": "hello"}));
+                assert_eq!(tool_kind, ToolKind::Write);
+                assert_eq!(danger_level, DangerLevel::High);
+                return approval_id;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for approval request")
+}
+
+async fn wait_for_agent_finish(events: &mut EventStream) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let envelope = events
+                .next()
+                .await
+                .expect("finished event")
+                .expect("event is valid");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Finished { .. },
+                    ..
+                }
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for agent finish");
+}
+
+fn approval_provider() -> Arc<RecordingProvider> {
+    Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                index: 0,
+                call_id: Some(CallId::from("call-1")),
+                name: Some("counting".to_owned()),
+                arguments_delta: r#"{"message":"hello"}"#.to_owned(),
+            }),
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+        ]),
+        ProviderResponse::Events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: "done".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ]),
+    ]))
+}
+
+fn approval_agent(
+    calls: &Arc<AtomicUsize>,
+    provider: Arc<RecordingProvider>,
+    event_bus: Arc<dyn EventStreamBus>,
+) -> Agent {
+    let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
+    registry
+        .register(
+            Arc::new(CountingTool::new(Arc::clone(calls))),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
+        .expect("tool registers");
+
+    Agent::builder()
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(registry))
+        .event_bus(event_bus)
+        .build()
+        .expect("agent builds")
+}
+
+#[tokio::test]
+async fn approval_allows_exactly_one_tool_execution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = approval_agent(
+        &calls,
+        approval_provider(),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+
+    let (run_id, mut events) = run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    agent
+        .resolve_tool_approval(approval_id, ApprovalDecision::Approve)
+        .await
+        .expect("approval is accepted");
+    wait_for_agent_finish(&mut events).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(agent.current_run(), Some(run_id));
+}
+
+#[tokio::test]
+async fn approval_rejection_skips_tool_and_returns_structured_result() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = approval_provider();
+    let agent = approval_agent(
+        &calls,
+        Arc::clone(&provider),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    agent
+        .resolve_tool_approval(approval_id, ApprovalDecision::Reject)
+        .await
+        .expect("rejection is accepted");
+    wait_for_agent_finish(&mut events).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let requests = provider.requests();
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::Tool
+            && message.tool_call_id == Some(CallId::from("call-1"))
+            && message.content
+                == ChatContent::Json(json!({
+                    "error": {
+                        "type": "approval_rejected",
+                        "message": "user rejected tool call"
+                    }
+                }))
+    }));
+}
+
+#[tokio::test]
+async fn approval_without_active_turn_returns_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = approval_agent(
+        &calls,
+        approval_provider(),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+
+    assert!(matches!(
+        agent
+            .resolve_tool_approval(ApprovalId::new(), ApprovalDecision::Approve)
+            .await,
+        Err(AgentError::NoActiveTurn)
+    ));
+}
+
+#[tokio::test]
+async fn approval_wrong_id_does_not_interrupt_active_request() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = approval_agent(
+        &calls,
+        approval_provider(),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    let different_id = ApprovalId::new();
+    assert!(matches!(
+        agent
+            .resolve_tool_approval(different_id, ApprovalDecision::Approve)
+            .await,
+        Err(AgentError::ApprovalNotFound { approval_id }) if approval_id == different_id
+    ));
+
+    agent
+        .resolve_tool_approval(approval_id, ApprovalDecision::Approve)
+        .await
+        .expect("real approval is accepted");
+    wait_for_agent_finish(&mut events).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn approval_cancellation_wins_before_tool_execution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = approval_agent(
+        &calls,
+        approval_provider(),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    let resolution = agent.resolve_tool_approval(approval_id, ApprovalDecision::Approve);
+    tokio::pin!(resolution);
+    assert!(matches!(
+        futures_util::poll!(&mut resolution),
+        Poll::Pending
+    ));
+    agent.stop();
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let envelope = events
+                .next()
+                .await
+                .expect("cancelled event")
+                .expect("event is valid");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Cancelled,
+                    ..
+                }
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for cancellation");
+    assert!(matches!(resolution.await, Err(AgentError::NoActiveTurn)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn approval_request_publish_failure_prevents_tool_execution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bus = Arc::new(FailingApprovalBus::default());
+    let agent = approval_agent(&calls, approval_provider(), bus.clone());
+
+    let run_id = agent
+        .run_turn(ChatMessage::user("change it"))
+        .await
+        .expect("run starts");
+    let mut events = bus.subscribe_run(run_id).await.expect("subscribe succeeds");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let envelope = events
+                .next()
+                .await
+                .expect("failed event")
+                .expect("event is valid");
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Failed { .. },
+                    ..
+                }
+            ) {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for failed event");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn duplicate_approval_decisions_execute_tool_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = approval_agent(
+        &calls,
+        approval_provider(),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    let (first, second) = tokio::join!(
+        agent.resolve_tool_approval(approval_id, ApprovalDecision::Approve),
+        agent.resolve_tool_approval(approval_id, ApprovalDecision::Approve),
+    );
+    wait_for_agent_finish(&mut events).await;
+
+    assert!(first.is_ok() ^ second.is_ok());
+    let duplicate = if first.is_err() { first } else { second };
+    assert!(matches!(
+        duplicate,
+        Err(AgentError::ApprovalNotFound { .. } | AgentError::NoActiveTurn)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn stream_runs_tool_and_continues_with_tool_result() {
     let provider = Arc::new(RecordingProvider::new(vec![
@@ -260,7 +653,7 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
     ]));
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(EchoTool::new()))
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect("echo should register");
     let bus = Arc::new(InMemoryEventStreamBus::default());
     let agent = Agent::builder()
@@ -652,7 +1045,7 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
     let checkpoints = Arc::new(RecordingCheckpointStore::default());
     let mut registry = BuiltinToolRegistry::default();
     registry
-        .register(Arc::new(EchoTool::new()))
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
         .expect("echo should register");
     let agent = Agent::builder()
         .id(agent_id)
@@ -702,7 +1095,7 @@ async fn resume_turn_retries_llm_from_stable_checkpoint_history() {
         .tool_registry({
             let mut registry = BuiltinToolRegistry::default();
             registry
-                .register(Arc::new(EchoTool::new()))
+                .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
                 .expect("echo should register");
             Arc::new(registry)
         })

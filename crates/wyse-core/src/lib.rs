@@ -165,6 +165,92 @@ impl FromStr for AgentId {
     }
 }
 
+/// Identity of one tool approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ApprovalId(Uuid);
+
+impl ApprovalId {
+    /// Creates a new UUIDv7 approval id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Returns the inner UUID.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for ApprovalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ApprovalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Uuid> for ApprovalId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl From<ApprovalId> for Uuid {
+    fn from(value: ApprovalId) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for ApprovalId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse::<Uuid>().map(Self)
+    }
+}
+
+/// Whether a tool observes or mutates state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolKind {
+    /// Tool only observes state.
+    Read,
+    /// Tool may mutate state.
+    Write,
+}
+
+/// Declared danger of one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DangerLevel {
+    /// Low danger.
+    Low,
+    /// Medium danger.
+    Medium,
+    /// High danger.
+    High,
+}
+
+/// User decision for one tool approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ApprovalDecision {
+    /// Approve the tool call.
+    Approve,
+    /// Reject the tool call.
+    Reject,
+}
+
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -567,6 +653,30 @@ pub enum AgentEvent {
     },
     /// Agent run was cancelled.
     Cancelled,
+    /// A tool call requires user approval.
+    ToolApprovalRequested {
+        /// Approval request identity.
+        approval_id: ApprovalId,
+        /// Agent requesting approval.
+        agent_name: String,
+        /// Tool call identity.
+        call_id: CallId,
+        /// Provider-visible tool name.
+        tool_name: ToolName,
+        /// Tool call arguments.
+        arguments: Value,
+        /// Whether the tool observes or mutates state.
+        tool_kind: ToolKind,
+        /// Declared danger of the tool.
+        danger_level: DangerLevel,
+    },
+    /// A tool approval request was resolved.
+    ToolApprovalResolved {
+        /// Approval request identity.
+        approval_id: ApprovalId,
+        /// User decision.
+        decision: ApprovalDecision,
+    },
     /// Event emitted by one LLM call inside the agent run.
     Llm {
         /// LLM call identity.
@@ -915,5 +1025,37 @@ mod tests {
 
         assert_eq!(value["type"], "tool_call_delta");
         assert_eq!(value["data"]["call_id"], "call-1");
+    }
+
+    #[test]
+    fn approval_id_uses_uuid_v7() {
+        assert_eq!(ApprovalId::new().as_uuid().get_version_num(), 7);
+    }
+
+    #[test]
+    fn tool_approval_events_use_protocol_names() {
+        let approval_id = ApprovalId::new();
+        let requested = AgentEvent::ToolApprovalRequested {
+            approval_id,
+            agent_name: "review-agent".to_owned(),
+            call_id: CallId::from("call-1"),
+            tool_name: ToolName::from("apply_patch"),
+            arguments: serde_json::json!({"patch": "*** Begin Patch"}),
+            tool_kind: ToolKind::Write,
+            danger_level: DangerLevel::High,
+        };
+        let resolved = AgentEvent::ToolApprovalResolved {
+            approval_id,
+            decision: ApprovalDecision::Approve,
+        };
+
+        let requested_json = serde_json::to_value(requested).expect("requested event serializes");
+        let resolved_json = serde_json::to_value(resolved).expect("resolved event serializes");
+
+        assert_eq!(requested_json["type"], "tool_approval_requested");
+        assert_eq!(requested_json["data"]["tool_kind"], "write");
+        assert_eq!(requested_json["data"]["danger_level"], "high");
+        assert_eq!(resolved_json["type"], "tool_approval_resolved");
+        assert_eq!(resolved_json["data"]["decision"], "approve");
     }
 }
