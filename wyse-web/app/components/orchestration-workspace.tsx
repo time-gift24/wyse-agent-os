@@ -35,45 +35,45 @@ export function OrchestrationWorkspace() {
       data-workspace-slide="orchestration"
       className="wyse-workspace-slide"
     >
-      <SiteNavbar />
-      <div className="wyse-workspace-body">
-        <SidebarProvider className="wyse-workspace-shell">
-          <Sidebar collapsible="offcanvas" className="wyse-workspace-sidebar">
-            <SidebarHeader className="wyse-workspace-sidebar-header">
-              <span className="wyse-workspace-sidebar-title">
+      <SidebarProvider className="wyse-workspace-shell">
+        <Sidebar collapsible="offcanvas" className="wyse-workspace-sidebar">
+          <SidebarHeader className="wyse-workspace-sidebar-header">
+            <span className="wyse-workspace-sidebar-title">
+              {t("orchestration.library")}
+            </span>
+          </SidebarHeader>
+          <SidebarContent>
+            <SidebarGroup>
+              <SidebarGroupLabel>
                 {t("orchestration.library")}
-              </span>
-            </SidebarHeader>
-            <SidebarContent>
-              <SidebarGroup>
-                <SidebarGroupLabel>
-                  {t("orchestration.library")}
-                </SidebarGroupLabel>
-                <SidebarMenu>
-                  {orchestrationItems.map((item) => {
-                    const Icon = item.icon
+              </SidebarGroupLabel>
+              <SidebarMenu>
+                {orchestrationItems.map((item) => {
+                  const Icon = item.icon
 
-                    return (
-                      <SidebarMenuItem key={item.label}>
-                        <SidebarMenuButton
-                          isActive={item.label === "orchestration.workflows"}
-                        >
-                          <Icon aria-hidden="true" />
-                          <span>{t(item.label)}</span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    )
-                  })}
-                </SidebarMenu>
-              </SidebarGroup>
-            </SidebarContent>
-            <SidebarFooter className="wyse-workspace-sidebar-footer">
-              <LocaleToggle />
-              <ThemeToggle />
-            </SidebarFooter>
-          </Sidebar>
-          <SidebarInset className="wyse-workspace-inset">
-            <SidebarTrigger className="absolute top-3 left-3 md:hidden" />
+                  return (
+                    <SidebarMenuItem key={item.label}>
+                      <SidebarMenuButton
+                        isActive={item.label === "orchestration.workflows"}
+                      >
+                        <Icon aria-hidden="true" />
+                        <span>{t(item.label)}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )
+                })}
+              </SidebarMenu>
+            </SidebarGroup>
+          </SidebarContent>
+          <SidebarFooter className="wyse-workspace-sidebar-footer">
+            <LocaleToggle />
+            <ThemeToggle />
+          </SidebarFooter>
+        </Sidebar>
+        <SidebarInset className="wyse-workspace-inset">
+          <SiteNavbar />
+          <div className="wyse-workspace-body">
+            <SidebarTrigger className="absolute top-16 left-3 md:hidden" />
             <section className="wyse-orchestration-main">
               <header className="wyse-orchestration-header">
                 <p className="wyse-chat-eyebrow">{t("nav.orchestration")}</p>
@@ -93,9 +93,9 @@ export function OrchestrationWorkspace() {
                 </div>
               </div>
             </section>
-          </SidebarInset>
-        </SidebarProvider>
-      </div>
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
     </section>
   )
 }

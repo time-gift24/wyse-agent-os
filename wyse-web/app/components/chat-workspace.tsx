@@ -26,34 +26,34 @@ export function ChatWorkspace() {
 
   return (
     <section data-workspace-slide="chat" className="wyse-workspace-slide">
-      <SiteNavbar />
-      <div className="wyse-workspace-body">
-        <SidebarProvider className="wyse-workspace-shell">
-          <Sidebar collapsible="offcanvas" className="wyse-workspace-sidebar">
-            <SidebarHeader className="wyse-workspace-sidebar-header">
-              <span className="wyse-workspace-sidebar-title">
-                {t("chat.sessions")}
-              </span>
-            </SidebarHeader>
-            <SidebarContent>
-              <SidebarGroup>
-                <SidebarGroupLabel>{t("chat.recent")}</SidebarGroupLabel>
-                <SidebarMenu>
-                  <SidebarMenuItem>
-                    <SidebarMenuButton isActive>
-                      <span>{t("chat.thread")}</span>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                </SidebarMenu>
-              </SidebarGroup>
-            </SidebarContent>
-            <SidebarFooter className="wyse-workspace-sidebar-footer">
-              <LocaleToggle />
-              <ThemeToggle />
-            </SidebarFooter>
-          </Sidebar>
-          <SidebarInset className="wyse-workspace-inset">
-            <SidebarTrigger className="absolute top-3 left-3 md:hidden" />
+      <SidebarProvider className="wyse-workspace-shell">
+        <Sidebar collapsible="offcanvas" className="wyse-workspace-sidebar">
+          <SidebarHeader className="wyse-workspace-sidebar-header">
+            <span className="wyse-workspace-sidebar-title">
+              {t("chat.sessions")}
+            </span>
+          </SidebarHeader>
+          <SidebarContent>
+            <SidebarGroup>
+              <SidebarGroupLabel>{t("chat.recent")}</SidebarGroupLabel>
+              <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton isActive>
+                    <span>{t("chat.thread")}</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </SidebarMenu>
+            </SidebarGroup>
+          </SidebarContent>
+          <SidebarFooter className="wyse-workspace-sidebar-footer">
+            <LocaleToggle />
+            <ThemeToggle />
+          </SidebarFooter>
+        </Sidebar>
+        <SidebarInset className="wyse-workspace-inset">
+          <SiteNavbar />
+          <div className="wyse-workspace-body">
+            <SidebarTrigger className="absolute top-16 left-3 md:hidden" />
             <section className="wyse-chat-main">
               <div className="wyse-chat-copy">
                 <p className="wyse-chat-eyebrow">{t("nav.chat")}</p>
@@ -78,9 +78,9 @@ export function ChatWorkspace() {
                 </button>
               </form>
             </section>
-          </SidebarInset>
-        </SidebarProvider>
-      </div>
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
     </section>
   )
 }

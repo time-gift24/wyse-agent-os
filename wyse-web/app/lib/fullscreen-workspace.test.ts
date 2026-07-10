@@ -52,6 +52,20 @@ test("uses shadcn's responsive Sidebar Sheet with a mobile trigger in both works
   )
 })
 
+test("places workspace navigation inside SidebarInset beside the fixed desktop Sidebar", async () => {
+  const [chat, orchestration] = await Promise.all([
+    component("chat-workspace.tsx"),
+    component("orchestration-workspace.tsx"),
+  ])
+
+  for (const source of [chat, orchestration]) {
+    assert.match(
+      source,
+      /<SidebarProvider[\s\S]*?<Sidebar\s+collapsible="offcanvas"[\s\S]*?<SidebarInset[^>]*>[\s\S]*?<SiteNavbar\s*\/>/
+    )
+  }
+})
+
 test("caps rendered Sidebar menu corners at six pixels", async () => {
   const [sidebar, css] = await Promise.all([
     component("ui/sidebar.tsx"),
@@ -78,12 +92,12 @@ test("removes inactive pager slides from interaction and tab order", async () =>
 test("hands focus to the incoming slide before making the outgoing slide inert", async () => {
   const pager = await component("workspace-pager.tsx")
 
-  assert.match(pager, /const focusSlideIndexRef = useRef<number \| null>\(null\)/)
-  assert.match(pager, /useLayoutEffect\(/)
   assert.match(
     pager,
-    /slideRefs\.current\[focusSlideIndex\]\?\.focus\(\)/
+    /const focusSlideIndexRef = useRef<number \| null>\(null\)/
   )
+  assert.match(pager, /useLayoutEffect\(/)
+  assert.match(pager, /slideRefs\.current\[focusSlideIndex\]\?\.focus\(\)/)
 })
 
 test("keeps SidebarInset workspace content out of nested main landmarks", async () => {
