@@ -4,11 +4,11 @@ import {
   ChevronRightIcon,
   Clock3Icon,
   PlusIcon,
-  SendIcon,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
 import { AgentApprovalCard } from "~/components/agent-approval-card"
+import { AiPromptInput } from "~/components/ai-elements/prompt-input"
 import {
   finishApprovalSubmission,
   startApprovalSubmission,
@@ -20,8 +20,6 @@ import {
   Card,
   CardAction,
   CardContent,
-  CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "~/components/ui/card"
@@ -33,7 +31,6 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "~/components/ui/message-scroller"
-import { Textarea } from "~/components/ui/textarea"
 import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
 export function ChatWorkspace() {
@@ -250,35 +247,19 @@ export function ChatWorkspace() {
             </MessageScroller>
           </MessageScrollerProvider>
 
-          <Card size="sm" className="w-full shrink-0">
-            <CardHeader>
-              <CardTitle>
-                {t(
-                  state.agentId === null
-                    ? "chat.startConversation"
-                    : "chat.composer.title"
-                )}
-              </CardTitle>
-              <CardDescription>
-                {t("chat.composer.description")}
-              </CardDescription>
-            </CardHeader>
+          <Card size="sm" className="w-full shrink-0 bg-transparent ring-0">
             <CardContent>
-              <Textarea
-                ref={composerRef}
-                aria-label={t("chat.composer.label")}
-                placeholder={t("chat.composer.placeholder")}
-                rows={2}
+              <AiPromptInput
+                inputRef={composerRef}
                 value={composerText}
                 disabled={isSubmitting || isAgentBusy}
-                onChange={(event) => setComposerText(event.target.value)}
-              />
-            </CardContent>
-            <CardFooter className="justify-between gap-3 border-t">
-              <p className="text-[0.625rem] text-muted-foreground">
-                {statusText}
-              </p>
-              <div className="ml-auto flex items-center gap-2">
+                placeholder={t("chat.composer.placeholder")}
+                onChange={setComposerText}
+                onSubmit={() => void submitMessage()}
+                footer={
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="truncate">{statusText}</span>
+                    <div className="flex shrink-0 items-center gap-2">
                 {state.phase === "connection_error" ||
                 state.phase === "missing" ? (
                   <Button
@@ -305,19 +286,11 @@ export function ChatWorkspace() {
                     {t("chat.continue")}
                   </Button>
                 ) : null}
-                <Button
-                  type="button"
-                  size="lg"
-                  disabled={
-                    composerText.trim() === "" || isSubmitting || isAgentBusy
-                  }
-                  onClick={() => void submitMessage()}
-                >
-                  {t("chat.composer.send")}
-                  <SendIcon data-icon="inline-end" aria-hidden="true" />
-                </Button>
-              </div>
-            </CardFooter>
+                    </div>
+                  </div>
+                }
+              />
+            </CardContent>
           </Card>
         </div>
       </div>
