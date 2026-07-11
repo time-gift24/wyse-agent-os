@@ -10,6 +10,8 @@ export function AiPromptInput({
   inputRef,
   value,
   disabled,
+  label,
+  description,
   placeholder,
   onChange,
   onSubmit,
@@ -18,6 +20,8 @@ export function AiPromptInput({
   inputRef: Ref<HTMLTextAreaElement>
   value: string
   disabled: boolean
+  label: string
+  description: string
   placeholder: string
   onChange(value: string): void
   onSubmit(): void
@@ -32,10 +36,16 @@ export function AiPromptInput({
 
   return (
     <div className="rounded-xl border border-border bg-card shadow-[0_12px_28px_-24px_rgb(43_48_51/0.55)]">
+      <div className="px-3.5 pt-3">
+        <p className="text-sm font-medium text-foreground">{label}</p>
+        <p className="mt-0.5 text-xs/relaxed text-muted-foreground">
+          {description}
+        </p>
+      </div>
       <Textarea
         ref={inputRef}
-        aria-label="Message"
-        className="min-h-22 resize-none border-0 bg-transparent px-3.5 pt-3.5 shadow-none focus-visible:ring-0"
+        aria-label={label}
+        className="min-h-20 resize-none border-0 bg-transparent px-3.5 pt-2.5 shadow-none focus-visible:ring-0"
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}

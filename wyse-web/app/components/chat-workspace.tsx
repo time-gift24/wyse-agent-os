@@ -253,6 +253,14 @@ export function ChatWorkspace() {
                 inputRef={composerRef}
                 value={composerText}
                 disabled={isSubmitting || isAgentBusy}
+                label={t(
+                  state.agentId === null
+                    ? "chat.startConversation"
+                    : "chat.composer.title"
+                )}
+                description={t(
+                  state.agentId === null ? "chat.empty" : "chat.composer.description"
+                )}
                 placeholder={t("chat.composer.placeholder")}
                 onChange={setComposerText}
                 onSubmit={() => void submitMessage()}
