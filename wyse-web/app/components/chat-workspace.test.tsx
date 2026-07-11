@@ -61,7 +61,8 @@ describe("ChatWorkspace", () => {
       "flex min-h-0 min-w-0 flex-1 flex-col pb-4 2xl:h-full"
     )
     expect(html).not.toContain("2xl:h-[100dvh]")
-    expect(html).toContain("2xl:top-6")
+    expect(html).toContain("2xl:top-16")
+    expect(html).not.toContain("2xl:top-6")
     expect(html).not.toContain("2xl:top-0")
     expect(html).not.toContain("2xl:top-1/2")
     expect(html).not.toContain("2xl:-translate-y-1/2")

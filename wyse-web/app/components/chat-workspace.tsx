@@ -96,7 +96,7 @@ export function ChatWorkspace() {
       <div className="relative mx-auto flex h-full w-full max-w-5xl flex-col 2xl:block">
         <Card
           size="sm"
-          className="relative mb-6 w-full shrink-0 bg-transparent ring-0 2xl:absolute 2xl:top-6 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
+          className="relative mb-6 w-full shrink-0 bg-transparent ring-0 2xl:absolute 2xl:top-16 2xl:right-[calc(100%+1.5rem)] 2xl:mb-0 2xl:w-70"
         >
           <div className="absolute inset-0 -z-10">
             <GlassSurface
