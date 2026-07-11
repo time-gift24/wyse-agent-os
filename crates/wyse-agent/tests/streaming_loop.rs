@@ -3,7 +3,7 @@ use std::{
     future::pending,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::Poll,
     time::Duration,
@@ -107,11 +107,30 @@ impl LlmProvider for RecordingProvider {
     }
 }
 
+#[derive(Debug)]
+struct PendingChatProvider;
+
+#[async_trait]
+impl LlmProvider for PendingChatProvider {
+    fn model_id(&self) -> ModelId {
+        "pending:mock-model".parse().expect("model id parses")
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        Err(LlmError::UnsupportedCapability("chat"))
+    }
+
+    async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        pending().await
+    }
+}
+
 struct TestStore {
     state: Mutex<AgentState>,
     history: Mutex<Vec<StreamEnvelope>>,
     completed: Mutex<Vec<(RunId, TurnId, u64, TokenUsage)>>,
     load_entered: Option<Arc<tokio::sync::Notify>>,
+    block_load_once: AtomicBool,
     order: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
 
@@ -122,6 +141,7 @@ impl TestStore {
             history: Mutex::new(Vec::new()),
             completed: Mutex::new(Vec::new()),
             load_entered: None,
+            block_load_once: AtomicBool::new(false),
             order: None,
         }
     }
@@ -132,6 +152,7 @@ impl TestStore {
             history: Mutex::new(history),
             completed: Mutex::new(Vec::new()),
             load_entered: None,
+            block_load_once: AtomicBool::new(false),
             order: None,
         }
     }
@@ -146,6 +167,7 @@ impl TestStore {
             history: Mutex::new(history),
             completed: Mutex::new(Vec::new()),
             load_entered: None,
+            block_load_once: AtomicBool::new(false),
             order: Some(order),
         }
     }
@@ -153,6 +175,7 @@ impl TestStore {
     fn blocking_load(agent_id: AgentId, entered: Arc<tokio::sync::Notify>) -> Self {
         Self {
             load_entered: Some(entered),
+            block_load_once: AtomicBool::new(true),
             ..Self::idle(agent_id)
         }
     }
@@ -161,7 +184,9 @@ impl TestStore {
 #[async_trait]
 impl AgentStore for TestStore {
     async fn load_agent(&self) -> Result<AgentState, StoreError> {
-        if let Some(entered) = &self.load_entered {
+        if let Some(entered) = &self.load_entered
+            && self.block_load_once.swap(false, Ordering::SeqCst)
+        {
             entered.notify_one();
             pending::<()>().await;
         }
@@ -219,6 +244,7 @@ impl AgentStore for TestStore {
         envelope.business_seq = Some(seq);
         history.push(envelope.clone());
         drop(history);
+        self.state.lock().expect("state mutex").last_seq = seq;
         if let Some(order) = &self.order {
             order.lock().expect("order mutex").push("append");
         }
@@ -687,6 +713,37 @@ async fn load_history_rejects_running_store_before_request() {
 }
 
 #[tokio::test]
+async fn run_turn_rejects_persisted_running_state_before_publishing() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    let store = Arc::new(TestStore::with_state(state, Vec::new()));
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
+    let agent = agent_with_store(
+        provider.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    let error = agent
+        .run_turn(ChatMessage::user("must resume"))
+        .await
+        .expect_err("persisted running state must reject a new turn");
+
+    assert!(matches!(
+        error,
+        AgentError::PersistedRunRequiresResume {
+            run_id: actual_run_id,
+            turn_id: actual_turn_id,
+        } if actual_run_id == run_id && actual_turn_id == turn_id
+    ));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
 async fn load_history_rejects_persisted_agent_mismatch_before_request() {
     let actual = AgentId::new();
     let run_id = RunId::new();
@@ -743,17 +800,11 @@ async fn load_history_rejects_invalid_history_without_committing_partial_history
         agent.load_history().await,
         Err(AgentError::InvalidResumeHistory)
     ));
-    let (_run_id, mut events) =
-        run_turn_and_subscribe(&agent, ChatMessage::user("new input")).await;
-    wait_for_agent_finish(&mut events).await;
-
-    assert_eq!(
-        provider.requests()[0].messages,
-        vec![
-            ChatMessage::system("be helpful"),
-            ChatMessage::user("new input"),
-        ]
-    );
+    assert!(matches!(
+        agent.run_turn(ChatMessage::user("new input")).await,
+        Err(AgentError::InvalidResumeHistory)
+    ));
+    assert!(provider.requests().is_empty());
 }
 
 #[tokio::test]
@@ -1236,6 +1287,37 @@ impl EventStreamBus for FailingApprovalBus {
     }
 }
 
+#[derive(Clone, Default)]
+struct BlockingCancelledBus {
+    inner: InMemoryEventStreamBus,
+    cancelled_entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl EventStreamBus for BlockingCancelledBus {
+    async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        if matches!(
+            &envelope.event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Cancelled { .. },
+                ..
+            }
+        ) {
+            self.cancelled_entered.notify_waiters();
+            return pending().await;
+        }
+        self.inner.publish(envelope).await
+    }
+
+    async fn subscribe_agent(
+        &self,
+        agent_id: AgentId,
+        replay_start: ReplayStart,
+    ) -> Result<EventStream, EventStreamBusError> {
+        self.inner.subscribe_agent(agent_id, replay_start).await
+    }
+}
+
 fn test_agent_id() -> AgentId {
     "0197fcb8-7500-7000-8000-000000000001"
         .parse()
@@ -1353,11 +1435,14 @@ fn approval_provider() -> Arc<RecordingProvider> {
     ]))
 }
 
-fn approval_agent(
+fn approval_agent<P>(
     calls: &Arc<AtomicUsize>,
-    provider: Arc<RecordingProvider>,
+    provider: Arc<P>,
     event_bus: Arc<dyn EventStreamBus>,
-) -> Agent {
+) -> Agent
+where
+    P: LlmProvider + 'static,
+{
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
     registry
         .register(
@@ -1454,6 +1539,33 @@ async fn approval_without_active_turn_returns_error() {
 }
 
 #[tokio::test]
+async fn approval_before_any_request_returns_not_found_without_waiting() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = approval_agent(
+        &calls,
+        Arc::new(PendingChatProvider),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+    agent
+        .run_turn(ChatMessage::user("wait for provider"))
+        .await
+        .expect("run starts");
+    let approval_id = ApprovalId::new();
+
+    let result = timeout(
+        Duration::from_secs(1),
+        agent.resolve_tool_approval(approval_id, ApprovalDecision::Approve),
+    )
+    .await
+    .expect("inactive approval should return immediately");
+
+    assert!(matches!(
+        result,
+        Err(AgentError::ApprovalNotFound { approval_id: actual }) if actual == approval_id
+    ));
+}
+
+#[tokio::test]
 async fn approval_wrong_id_does_not_interrupt_active_request() {
     let calls = Arc::new(AtomicUsize::new(0));
     let agent = approval_agent(
@@ -1527,6 +1639,32 @@ async fn approval_cancellation_wins_before_tool_execution() {
 }
 
 #[tokio::test]
+async fn cancellation_clears_active_approval_before_publishing() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let bus = Arc::new(BlockingCancelledBus::default());
+    let agent = approval_agent(&calls, approval_provider(), bus.clone());
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("change it")).await;
+    let approval_id = wait_for_approval_request(&mut events).await;
+    let cancelled_entered = bus.cancelled_entered.notified();
+    tokio::pin!(cancelled_entered);
+
+    agent.stop();
+    timeout(Duration::from_secs(1), &mut cancelled_entered)
+        .await
+        .expect("cancel publication starts");
+    let result = agent
+        .resolve_tool_approval(approval_id, ApprovalDecision::Approve)
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(AgentError::ApprovalNotFound { approval_id: actual }) if actual == approval_id
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn approval_request_publish_failure_prevents_tool_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let bus = Arc::new(FailingApprovalBus::default());
@@ -1587,7 +1725,7 @@ async fn duplicate_approval_decisions_execute_tool_once() {
     let duplicate = if first.is_err() { first } else { second };
     assert!(matches!(
         duplicate,
-        Err(AgentError::ApprovalNotFound { .. } | AgentError::NoActiveTurn)
+        Err(AgentError::ApprovalNotFound { approval_id: actual }) if actual == approval_id
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
@@ -1780,7 +1918,7 @@ async fn stream_publishes_complete_turn_messages_in_order_without_business_seque
 }
 
 #[tokio::test]
-async fn failed_turn_does_not_commit_history_for_next_run() {
+async fn failed_turn_commits_complete_persisted_history_for_next_run() {
     let provider = Arc::new(RecordingProvider::new(vec![
         ProviderResponse::StreamResults(vec![
             Ok(ChatStreamEvent::TextDelta {
@@ -1793,14 +1931,18 @@ async fn failed_turn_does_not_commit_history_for_next_run() {
             usage: None,
         }]),
     ]));
+    let store = test_store();
     let agent = Agent::builder()
         .id(test_agent_id())
         .name("test-agent")
         .system_prompt("be helpful")
         .llm_provider(provider.clone())
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
-        .store(test_store())
+        .event_bus(Arc::new(StoreEventStreamBus::new(
+            Arc::clone(&store),
+            Arc::new(InMemoryEventStreamBus::default()),
+        )))
+        .store(store)
         .build()
         .expect("agent should build");
 
@@ -1845,9 +1987,97 @@ async fn failed_turn_does_not_commit_history_for_next_run() {
         message.role == ChatRole::User
             && message.content == ChatContent::Text("fresh input".to_owned())
     }));
-    assert!(!requests[1].messages.iter().any(|message| {
+    assert!(requests[1].messages.iter().any(|message| {
         message.role == ChatRole::User
             && message.content == ChatContent::Text("failed input".to_owned())
+    }));
+}
+
+#[tokio::test]
+async fn cancelled_turn_context_matches_same_process_and_restart_requests() {
+    let same_provider = Arc::new(RecordingProvider::new(vec![
+        ProviderResponse::Pending,
+        ProviderResponse::Events(vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }]),
+    ]));
+    let same_store = Arc::new(TestStore::idle(test_agent_id()));
+    let same_store_trait: Arc<dyn AgentStore> = same_store.clone();
+    let same_agent = Agent::builder()
+        .id(test_agent_id())
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(same_provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(StoreEventStreamBus::new(
+            Arc::clone(&same_store_trait),
+            Arc::new(InMemoryEventStreamBus::default()),
+        )))
+        .store(same_store_trait)
+        .build()
+        .expect("agent should build");
+    same_agent
+        .run_turn(ChatMessage::user("cancelled input"))
+        .await
+        .expect("turn starts");
+    wait_for_request_count(&same_provider, 1).await;
+    same_agent.stop();
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if same_store.state.lock().expect("state mutex").status == AgentStatus::Cancelled {
+                return;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("cancelled state is persisted");
+    sleep(Duration::from_millis(10)).await;
+
+    let restart_state = same_store.state.lock().expect("state mutex").clone();
+    let restart_history = same_store.history.lock().expect("history mutex").clone();
+    let restart_store: Arc<dyn AgentStore> =
+        Arc::new(TestStore::with_state(restart_state, restart_history));
+    let restart_provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }],
+    )]));
+    let restart_agent = Agent::builder()
+        .id(test_agent_id())
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(restart_provider.clone())
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(Arc::new(StoreEventStreamBus::new(
+            Arc::clone(&restart_store),
+            Arc::new(InMemoryEventStreamBus::default()),
+        )))
+        .store(restart_store)
+        .build()
+        .expect("agent should build");
+    restart_agent
+        .load_history()
+        .await
+        .expect("restart loads history");
+
+    same_agent
+        .run_turn(ChatMessage::user("next input"))
+        .await
+        .expect("same-process turn starts");
+    restart_agent
+        .run_turn(ChatMessage::user("next input"))
+        .await
+        .expect("restart turn starts");
+    let same_requests = wait_for_request_count(&same_provider, 2).await;
+    let restart_requests = wait_for_request_count(&restart_provider, 1).await;
+
+    assert_eq!(same_requests[1].messages, restart_requests[0].messages);
+    assert!(same_requests[1].messages.iter().any(|message| {
+        message.role == ChatRole::User
+            && message.content == ChatContent::Text("cancelled input".to_owned())
     }));
 }
 

@@ -1,0 +1,39 @@
+name: wyse-agent-os
+
+services:
+  nats:
+    image: nats:2-alpine
+    command: ["-js", "--store_dir", "/data", "--http_port", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-Y", "off", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+
+  wyse-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+      args:
+        PACKAGE: wyse-api
+        BIN: wyse-api
+    depends_on:
+      nats:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - wyse-agent-data:/var/lib/wyse
+      - ./templates:/var/lib/wyse/agents/templates:ro
+      - ./config.docker.toml:/app/config.toml:ro
+    environment:
+      RUST_LOG: info
+
+volumes:
+  nats-data:
+  wyse-agent-data:

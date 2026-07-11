@@ -1,12 +1,15 @@
 //! Event stream bus store persistence.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use tokio::time::timeout;
 use wyse_core::{AgentEvent, AgentId, ReplayStart, RuntimeEvent, StreamEnvelope, TokenUsage};
 use wyse_infra::{EventStream, EventStreamBus, EventStreamBusError};
 
 use crate::{AgentStatus, AgentStore};
+
+const COMMITTED_FORWARD_GRACE: Duration = Duration::from_secs(1);
 
 /// Persists complete agent messages and state before forwarding them to an event stream bus.
 pub struct StoreEventStreamBus {
@@ -22,8 +25,17 @@ impl StoreEventStreamBus {
     }
 
     async fn forward_committed(&self, envelope: StreamEnvelope) {
-        if let Err(error) = self.inner.publish(envelope).await {
-            tracing::warn!(source = %error, "committed agent event was not retained");
+        match timeout(COMMITTED_FORWARD_GRACE, self.inner.publish(envelope)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(source = %error, "committed agent event was not retained");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    grace_millis = COMMITTED_FORWARD_GRACE.as_millis(),
+                    "committed agent event forwarding timed out"
+                );
+            }
         }
     }
 }

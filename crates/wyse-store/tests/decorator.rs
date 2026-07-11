@@ -5,6 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures_util::future;
+use tokio::time::{Duration, timeout};
 use wyse_core::{
     AgentEvent, AgentId, ChatMessage, EventCursor, EventSource, HistoryPage, HistoryQuery,
     LlmCallId, LlmCallRole, LlmEvent, NodeId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
@@ -116,6 +118,23 @@ struct RecordingBus {
     published: Mutex<Vec<StreamEnvelope>>,
     subscriptions: Mutex<Vec<(AgentId, ReplayStart)>>,
     fail_publish: bool,
+}
+
+struct PendingBus;
+
+#[async_trait]
+impl EventStreamBus for PendingBus {
+    async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        future::pending().await
+    }
+
+    async fn subscribe_agent(
+        &self,
+        _agent_id: AgentId,
+        _replay_start: ReplayStart,
+    ) -> Result<EventStream, EventStreamBusError> {
+        Ok(Box::pin(futures_util::stream::pending()))
+    }
 }
 
 impl RecordingBus {
@@ -373,6 +392,28 @@ async fn inner_failure_after_committed_message_is_warn_only() {
 
     assert_eq!(store.appended.lock().expect("appended lock").len(), 1);
     assert_eq!(inner.published.lock().expect("published lock").len(), 1);
+}
+
+#[tokio::test]
+async fn pending_inner_publish_is_bounded_after_message_commit() {
+    let agent_id = AgentId::new();
+    let store = Arc::new(RecordingStore::new(agent_id));
+    let bus = StoreEventStreamBus::new(store.clone(), Arc::new(PendingBus));
+    let message = envelope(
+        agent_id,
+        RunId::new(),
+        AgentEvent::Message {
+            turn_id: TurnId::new(),
+            message: ChatMessage::user("hello"),
+        },
+    );
+
+    timeout(Duration::from_secs(2), bus.publish(message))
+        .await
+        .expect("best-effort forwarding is bounded")
+        .expect("durable commit remains authoritative");
+
+    assert_eq!(store.appended.lock().expect("appended lock").len(), 1);
 }
 
 #[tokio::test]

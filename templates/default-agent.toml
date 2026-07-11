@@ -1,0 +1,2 @@
+tools = ["echo"]
+prompt = "You are a helpful assistant."

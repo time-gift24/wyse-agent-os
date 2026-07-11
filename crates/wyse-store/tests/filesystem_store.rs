@@ -137,6 +137,53 @@ async fn complete_iteration_advances_and_persists_usage() {
 }
 
 #[tokio::test]
+async fn running_state_rejects_a_different_run_without_writing() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    store
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("start run");
+    let before = filesystem
+        .entry("/agents/a/agent.json")
+        .expect("agent state")
+        .contents()
+        .to_vec();
+
+    let error = store
+        .update_state(
+            AgentStatus::Running,
+            Some(RunId::new()),
+            Some(TurnId::new()),
+            TokenUsage::default(),
+        )
+        .await
+        .expect_err("a second run must not replace the persisted running turn");
+
+    assert!(matches!(error, StoreError::RunningRunConflict { .. }));
+    assert_eq!(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent state")
+            .contents(),
+        before
+    );
+}
+
+#[tokio::test]
 async fn complete_iteration_rejects_non_running_state_without_writing() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
@@ -377,6 +424,15 @@ async fn state_update_resets_new_run_iteration_and_preserves_terminal_iteration(
         .complete_iteration(old_run_id, old_turn_id, 0, TokenUsage::default())
         .await
         .expect("complete old iteration");
+    store
+        .update_state(
+            AgentStatus::Finished,
+            Some(old_run_id),
+            Some(old_turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("finish old run");
     let run_id = RunId::new();
     let turn_id = TurnId::new();
 
@@ -976,7 +1032,7 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
 }
 
 #[tokio::test]
-async fn state_update_reconciles_the_previous_run_frontier_before_replacing_identity() {
+async fn terminal_update_reconciles_the_previous_run_frontier_before_a_new_identity() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
     let store = FilesystemAgentStore::new(filesystem.clone(), root);
@@ -998,6 +1054,15 @@ async fn state_update_reconciles_the_previous_run_frontier_before_replacing_iden
         .expect("store old identity");
     let old_frontier = sequenced_message_envelope(agent_id, old_run_id, old_turn_id, 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&old_frontier));
+    store
+        .update_state(
+            AgentStatus::Finished,
+            Some(old_run_id),
+            Some(old_turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("finish old identity after reconciliation");
     let new_run_id = RunId::new();
     let new_turn_id = TurnId::new();
 

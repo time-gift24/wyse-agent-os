@@ -1,7 +1,7 @@
 //! Error types for agent runtime operations.
 
 use thiserror::Error;
-use wyse_core::{AgentId, CallId, ChatRole};
+use wyse_core::{AgentId, CallId, ChatRole, RunId, TurnId};
 use wyse_infra::event_stream_bus::EventStreamBusError;
 use wyse_llm::LlmError;
 use wyse_store::{AgentStatus, StoreError};
@@ -19,6 +19,14 @@ pub enum AgentError {
     /// Another run is already active for this stateful agent.
     #[error("agent run is already active")]
     RunAlreadyActive,
+    /// Durable state contains an unfinished run that must be resumed.
+    #[error("persisted agent run requires resume")]
+    PersistedRunRequiresResume {
+        /// Persisted run identity.
+        run_id: RunId,
+        /// Persisted turn identity.
+        turn_id: TurnId,
+    },
     /// No agent turn is currently active.
     #[error("no agent turn is active")]
     NoActiveTurn,
@@ -28,9 +36,6 @@ pub enum AgentError {
         /// Approval request identity.
         approval_id: wyse_core::ApprovalId,
     },
-    /// The active turn's command channel closed.
-    #[error("agent turn command channel closed")]
-    TurnCommandClosed,
     /// The approval decision is not supported by this runtime.
     #[error("unsupported tool approval decision")]
     UnsupportedApprovalDecision,

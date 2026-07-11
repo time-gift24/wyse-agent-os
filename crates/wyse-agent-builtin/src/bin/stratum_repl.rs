@@ -1,6 +1,5 @@
 use std::{
     io::{BufRead, Write},
-    path::PathBuf,
     sync::Arc,
 };
 
@@ -8,10 +7,10 @@ use clap::Parser;
 use futures_util::StreamExt;
 use thiserror::Error;
 use wyse_agent::{Agent, AgentError};
-use wyse_agent_builtin::build_default_agent;
+use wyse_config::{Config, ConfigError, ResolvedAgentDefinition};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatContent, ChatMessage, ChatRole,
-    DangerLevel, ModelId, ModelIdParseError, ReplayStart, RuntimeEvent, ToolKind,
+    DangerLevel, ModelId, ReplayStart, RuntimeEvent, ToolKind, ToolName,
 };
 use wyse_filesystem::{
     Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
@@ -29,6 +28,7 @@ use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolPermissionMode, T
 
 const CONFIG_PATH: &str = "config.toml";
 const DEFAULT_AGENT_NAME: &str = "default-agent";
+const DEFAULT_PROMPT: &str = "You are a helpful assistant.";
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
@@ -41,40 +41,12 @@ struct Args {
     debug: bool,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    stratum: StratumConfig,
-    openai: Option<ProviderConfig>,
-    deepseek: Option<ProviderConfig>,
-}
-
-impl Config {
-    fn read() -> Result<Self, ReplError> {
-        let contents = std::fs::read_to_string(CONFIG_PATH)?;
-        toml::from_str(&contents).map_err(ReplError::from)
-    }
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StratumConfig {
-    storage_root: PathBuf,
-    model: ModelId,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderConfig {
-    api_key: String,
-}
-
 struct Session {
     agent_id: AgentId,
     agent: Agent,
     store: Arc<dyn AgentStore>,
     bus: Arc<dyn EventStreamBus>,
-    storage_root: PathBuf,
+    storage_root: std::path::PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -84,9 +56,7 @@ enum ReplError {
     #[error("failed to read configuration")]
     Io(#[from] std::io::Error),
     #[error("failed to parse configuration")]
-    Toml(#[from] toml::de::Error),
-    #[error("invalid model id")]
-    ModelId(#[from] ModelIdParseError),
+    Config(#[from] ConfigError),
     #[error("agent operation failed")]
     Agent(#[from] AgentError),
     #[error("agent store operation failed")]
@@ -111,12 +81,14 @@ enum ReplError {
     UnsupportedModel { model: ModelId },
     #[error("missing provider configuration: {provider}")]
     MissingProviderConfiguration { provider: &'static str },
+    #[error("persisted definition requests unsupported tools")]
+    UnsupportedDefinitionTools,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), ReplError> {
     let args = Args::parse();
-    let config = Config::read()?;
+    let config = Config::parse(&tokio::fs::read_to_string(CONFIG_PATH).await?)?;
     let agent_id = args.resume.unwrap_or_else(AgentId::new);
     let session = compose_session(&config, agent_id, args.resume.is_none()).await?;
     let mut output = std::io::stdout();
@@ -152,15 +124,40 @@ async fn compose_session(
     agent_id: AgentId,
     initialize: bool,
 ) -> Result<Session, ReplError> {
-    std::fs::create_dir_all(&config.stratum.storage_root)?;
+    let history_root = config.agent.storage_root.join("history");
+    tokio::fs::create_dir_all(&history_root).await?;
     if initialize {
-        std::fs::create_dir(config.stratum.storage_root.join(agent_id.to_string()))?;
+        tokio::fs::create_dir(history_root.join(agent_id.to_string())).await?;
     }
     let filesystem: Arc<dyn Filesystem> = Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
-        root: config.stratum.storage_root.clone(),
+        root: config.agent.storage_root.clone(),
         max_file_bytes: None,
     })?);
     let store = Arc::new(FilesystemAgentStore::new(filesystem, agent_root(agent_id)?));
+
+    let definition = if initialize {
+        let definition = config.resolve_template(
+            DEFAULT_AGENT_NAME.parse()?,
+            &format!("tools = [\"echo\"]\nprompt = {DEFAULT_PROMPT:?}"),
+        )?;
+        tokio::fs::write(
+            history_root
+                .join(agent_id.to_string())
+                .join("definition.toml"),
+            definition.encode()?,
+        )
+        .await?;
+        definition
+    } else {
+        ResolvedAgentDefinition::parse(
+            &tokio::fs::read_to_string(
+                history_root
+                    .join(agent_id.to_string())
+                    .join("definition.toml"),
+            )
+            .await?,
+        )?
+    };
 
     if initialize {
         store
@@ -175,20 +172,22 @@ async fn compose_session(
         store.clone(),
         Arc::new(InMemoryEventStreamBus::default()),
     ));
-    let agent = build_default_agent(
-        agent_id,
-        store.clone(),
-        bus.clone(),
-        select_provider(config)?,
-        approval_registry()?,
-    )?;
+    let agent = Agent::builder()
+        .id(agent_id)
+        .name(definition.agent_name.as_str())
+        .system_prompt(definition.prompt)
+        .llm_provider(select_provider(config, &definition.model)?)
+        .tool_registry(definition_registry(&definition.tools)?)
+        .event_bus(bus.clone())
+        .store(store.clone())
+        .build()?;
 
     Ok(Session {
         agent_id,
         agent,
         store,
         bus,
-        storage_root: config.stratum.storage_root.clone(),
+        storage_root: history_root,
     })
 }
 
@@ -312,24 +311,38 @@ async fn resolve_approval<R: BufRead, W: Write>(
     }
 }
 
-fn approval_registry() -> Result<Arc<dyn ToolRegistry>, ReplError> {
+fn definition_registry(tools: &[ToolName]) -> Result<Arc<dyn ToolRegistry>, ReplError> {
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
-    registry.register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)?;
+    for tool in tools {
+        if tool.as_str() != "echo" {
+            return Err(ReplError::UnsupportedDefinitionTools);
+        }
+        registry.register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)?;
+    }
     Ok(Arc::new(registry))
 }
 
 fn agent_root(agent_id: AgentId) -> Result<VirtualPath, ReplError> {
-    VirtualPath::try_from(format!("/{agent_id}").as_str()).map_err(ReplError::from)
+    VirtualPath::try_from(format!("/history/{agent_id}").as_str()).map_err(ReplError::from)
 }
 
-fn select_provider(config: &Config) -> Result<Arc<dyn LlmProvider>, ReplError> {
-    let model = &config.stratum.model;
+fn select_provider(config: &Config, model: &ModelId) -> Result<Arc<dyn LlmProvider>, ReplError> {
     match model.provider_name() {
         "openai" => {
             let provider = config
+                .llm
                 .openai
                 .as_ref()
                 .ok_or(ReplError::MissingProviderConfiguration { provider: "openai" })?;
+            if !provider
+                .models
+                .iter()
+                .any(|configured| configured == model.model_name())
+            {
+                return Err(ReplError::UnsupportedModel {
+                    model: model.clone(),
+                });
+            }
             Ok(Arc::new(OpenAICompatibleProvider::new(
                 OPENAI_BASE_URL,
                 ApiKey::new(provider.api_key.clone()),
@@ -339,11 +352,21 @@ fn select_provider(config: &Config) -> Result<Arc<dyn LlmProvider>, ReplError> {
         "deepseek" => {
             let provider =
                 config
+                    .llm
                     .deepseek
                     .as_ref()
                     .ok_or(ReplError::MissingProviderConfiguration {
                         provider: "deepseek",
                     })?;
+            if !provider
+                .models
+                .iter()
+                .any(|configured| configured == model.model_name())
+            {
+                return Err(ReplError::UnsupportedModel {
+                    model: model.clone(),
+                });
+            }
             let deepseek_model = match model.model_name() {
                 "deepseek-v4-flash" => DeepSeekModel::V4Flash,
                 "deepseek-v4-pro" => DeepSeekModel::V4Pro,
@@ -371,8 +394,8 @@ mod tests {
     use std::{fs, io::Cursor, sync::Arc};
 
     use super::{
-        Args, Config, ReplError, Session, agent_root, approval_registry, consume_turn_events,
-        drive_turn, restore_session, select_provider,
+        Args, Config, ReplError, Session, agent_root, compose_session, consume_turn_events,
+        definition_registry, drive_turn, restore_session,
     };
     use clap::Parser;
     use wyse_core::{
@@ -393,7 +416,7 @@ mod tests {
         initialize: bool,
     ) -> Result<Session, ReplError> {
         if initialize {
-            fs::create_dir(root.join(agent_id.to_string()))?;
+            fs::create_dir_all(root.join("history").join(agent_id.to_string()))?;
         }
         let filesystem: Arc<dyn Filesystem> =
             Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
@@ -414,7 +437,7 @@ mod tests {
             store.clone(),
             bus.clone(),
             Arc::new(provider),
-            approval_registry()?,
+            definition_registry(&[ToolName::from("echo")])?,
         )?;
 
         Ok(Session {
@@ -427,8 +450,8 @@ mod tests {
     }
 
     #[test]
-    fn approval_registry_registers_echo_as_low_danger_read_tool() -> Result<(), ReplError> {
-        let registry = approval_registry()?;
+    fn definition_registry_registers_echo_as_low_danger_read_tool() -> Result<(), ReplError> {
+        let registry = definition_registry(&[ToolName::from("echo")])?;
 
         let specs = registry.specs();
         assert_eq!(specs.len(), 1);
@@ -486,7 +509,8 @@ mod tests {
         (1..=last_seq)
             .map(|seq| {
                 Ok(serde_json::from_slice(&fs::read(
-                    root.join(agent_id.to_string())
+                    root.join("history")
+                        .join(agent_id.to_string())
                         .join(format!("messages/{seq}.json")),
                 )?)?)
             })
@@ -677,13 +701,16 @@ mod tests {
         assert!(!output.lines().any(|line| line.starts_with('{')));
 
         let state: AgentState = serde_json::from_slice(&fs::read(
-            root.join(agent_id.to_string()).join("agent.json"),
+            root.join("history")
+                .join(agent_id.to_string())
+                .join("agent.json"),
         )?)?;
         assert_eq!(state.last_seq, 4);
         let persisted = (1..=4)
             .map(|seq| -> Result<StreamEnvelope, ReplError> {
                 Ok(serde_json::from_slice(&fs::read(
-                    root.join(agent_id.to_string())
+                    root.join("history")
+                        .join(agent_id.to_string())
                         .join(format!("messages/{seq}.json")),
                 )?)?)
             })
@@ -720,7 +747,8 @@ mod tests {
         let persisted: Vec<StreamEnvelope> = (1..=2)
             .map(|seq| -> Result<StreamEnvelope, ReplError> {
                 Ok(serde_json::from_slice(&fs::read(
-                    root.join(agent_id.to_string())
+                    root.join("history")
+                        .join(agent_id.to_string())
                         .join(format!("messages/{seq}.json")),
                 )?)?)
             })
@@ -757,16 +785,20 @@ mod tests {
         .await?;
 
         let state: AgentState = serde_json::from_slice(&fs::read(
-            root.join(agent_id.to_string()).join("agent.json"),
+            root.join("history")
+                .join(agent_id.to_string())
+                .join("agent.json"),
         )?)?;
         assert_eq!(state.last_seq, 4);
         assert!(
-            root.join(agent_id.to_string())
+            root.join("history")
+                .join(agent_id.to_string())
                 .join("messages/1.json")
                 .is_file()
         );
         assert!(
-            root.join(agent_id.to_string())
+            root.join("history")
+                .join(agent_id.to_string())
                 .join("messages/4.json")
                 .is_file()
         );
@@ -860,54 +892,78 @@ mod tests {
     }
 
     #[test]
-    fn accepts_minimal_stratum_and_openai_configuration() -> Result<(), ReplError> {
-        let config: Config = toml::from_str(
+    fn config_accepts_shared_agent_and_llm_sections() -> Result<(), ReplError> {
+        let config = Config::parse(
             r#"
-[stratum]
+[agent]
 storage_root = "./.stratum/repl"
-model = "openai:gpt-4.1-mini"
 
-[openai]
+[llm]
+default = "openai:gpt-4.1-mini"
+
+[llm.openai]
 api_key = "test-key"
+models = ["gpt-4.1-mini"]
 "#,
         )?;
 
-        assert_eq!(config.stratum.model.as_str(), "openai:gpt-4.1-mini");
+        assert_eq!(config.llm.default.as_str(), "openai:gpt-4.1-mini");
         Ok(())
     }
 
     #[test]
-    fn rejects_unknown_stratum_configuration() {
-        let result = toml::from_str::<Config>(
+    fn config_rejects_unknown_agent_configuration() {
+        let result = Config::parse(
             r#"
-[stratum]
+[agent]
 storage_root = "./.stratum/repl"
-model = "openai:gpt-4.1-mini"
 unexpected = true
 
-[openai]
+[llm]
+default = "openai:gpt-4.1-mini"
+
+[llm.openai]
 api_key = "test-key"
+models = ["gpt-4.1-mini"]
 "#,
         );
 
         assert!(result.is_err());
     }
 
-    #[test]
-    fn rejects_unsupported_provider_without_network_access() -> Result<(), ReplError> {
-        let config: Config = toml::from_str(
+    #[tokio::test]
+    async fn config_new_session_writes_api_compatible_definition() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(format!("stratum-repl-{agent_id}"));
+        let config = Config::parse(&format!(
             r#"
-[stratum]
-storage_root = "./.stratum/repl"
-model = "custom:model"
-"#,
-        )?;
+[agent]
+storage_root = {root:?}
 
-        match select_provider(&config) {
-            Err(ReplError::UnsupportedProvider { .. }) => {}
-            Err(error) => panic!("unexpected provider error: {error}"),
-            Ok(_) => panic!("custom providers are unsupported"),
-        }
+[llm]
+default = "openai:gpt-4.1-mini"
+
+[llm.openai]
+api_key = "test-key"
+models = ["gpt-4.1-mini"]
+"#,
+            root = root.to_string_lossy()
+        ))?;
+
+        let session = compose_session(&config, agent_id, true).await?;
+        let definition_path = root
+            .join("history")
+            .join(agent_id.to_string())
+            .join("definition.toml");
+        let definition =
+            wyse_config::ResolvedAgentDefinition::parse(&fs::read_to_string(&definition_path)?)?;
+
+        assert_eq!(session.storage_root, root.join("history"));
+        assert_eq!(definition.agent_name.as_str(), "default-agent");
+        assert_eq!(definition.model, config.llm.default);
+        assert_eq!(definition.prompt, "You are a helpful assistant.");
+        assert_eq!(definition.tools, vec![ToolName::from("echo")]);
+        let _ = fs::remove_dir_all(root);
         Ok(())
     }
 
@@ -915,7 +971,10 @@ model = "custom:model"
     fn scopes_agent_store_to_agent_root() -> Result<(), ReplError> {
         let agent_id = AgentId::new();
 
-        assert_eq!(agent_root(agent_id)?.as_str(), format!("/{agent_id}"));
+        assert_eq!(
+            agent_root(agent_id)?.as_str(),
+            format!("/history/{agent_id}")
+        );
         Ok(())
     }
 }

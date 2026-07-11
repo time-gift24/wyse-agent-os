@@ -11,7 +11,7 @@ ARG BIN
 COPY . .
 RUN test -n "$PACKAGE" \
   && test -n "$BIN" \
-  && cargo chef prepare --recipe-path recipe.json --package "$PACKAGE" --bin "$BIN"
+  && cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ARG PACKAGE

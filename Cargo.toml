@@ -1,9 +1,11 @@
 [workspace]
 members = [
+    "crates/wyse-api",
     "crates/wyse-agent",
     "crates/wyse-agent-builtin",
     "crates/wyse-store",
     "crates/wyse-core",
+    "crates/wyse-config",
     "crates/wyse-filesystem",
     "crates/wyse-infra",
     "crates/wyse-llm",
@@ -17,6 +19,7 @@ rust-version = "1.88"
 license = "MIT"
 
 [workspace.dependencies]
+axum = "0.8.9"
 async-nats = "0.49.1"
 async-trait = "0.1.89"
 bon = "3.9"
@@ -25,22 +28,28 @@ clap = { version = "4.5.49", features = ["derive"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 futures-core = "0.3.32"
 futures-util = "0.3.32"
+http = "1.3.1"
 reqwest = { version = "0.12.25", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 toml = "0.9.8"
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7.18"
 tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tower = { version = "0.5.2", features = ["util"] }
+tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
 wyse-core = { path = "crates/wyse-core" }
+wyse-config = { path = "crates/wyse-config" }
 wyse-filesystem = { path = "crates/wyse-filesystem" }
 wyse-agent = { path = "crates/wyse-agent" }
 wyse-store = { path = "crates/wyse-store" }
 wyse-infra = { path = "crates/wyse-infra" }
 wyse-llm = { path = "crates/wyse-llm" }
 wyse-tools = { path = "crates/wyse-tools" }
+wyse-api = { path = "crates/wyse-api" }
 
 [workspace.lints.clippy]
 correctness = "deny"

@@ -1,16 +1,22 @@
 [package]
-name = "wyse-agent-builtin"
+name = "wyse-api"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-clap.workspace = true
+axum.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 wyse-agent.workspace = true
 wyse-config.workspace = true
 wyse-core.workspace = true
@@ -19,6 +25,10 @@ wyse-infra.workspace = true
 wyse-llm.workspace = true
 wyse-store.workspace = true
 wyse-tools.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true
