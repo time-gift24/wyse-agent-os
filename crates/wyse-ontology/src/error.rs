@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::DraftName;
+use crate::{DraftName, LinkId, ObjectId, RevisionId, TagName};
 use wyse_filesystem::FilesystemError;
 
 /// Error returned by ontology domain operations.
@@ -27,6 +27,18 @@ pub enum OntologyError {
         /// Every discovered validation failure.
         diagnostics: Vec<String>,
     },
+    /// Object values do not match the selected schema.
+    #[error("object values are invalid")]
+    ValueInvalid {
+        /// Every discovered validation failure.
+        diagnostics: Vec<String>,
+    },
+    /// Existing instances prevent a draft from being published.
+    #[error("draft cannot be published because existing instances are invalid")]
+    PublishInvalid {
+        /// Every discovered validation failure.
+        diagnostics: Vec<String>,
+    },
     /// A requested draft does not exist.
     #[error("draft {name} does not exist")]
     DraftMissing {
@@ -42,6 +54,36 @@ pub enum OntologyError {
     /// The filesystem backend does not support the required CAS operations.
     #[error("draft filesystem does not support compare-and-swap")]
     DraftCasUnsupported,
+    /// A published revision does not exist.
+    #[error("revision {id} does not exist")]
+    RevisionMissing {
+        /// Identity of the missing revision.
+        id: RevisionId,
+    },
+    /// A schema tag does not exist.
+    #[error("tag {name} does not exist")]
+    TagMissing {
+        /// Name of the missing tag.
+        name: TagName,
+    },
+    /// The reserved online tag cannot be deleted.
+    #[error("the online tag cannot be deleted")]
+    ReservedTag,
+    /// An object instance does not exist.
+    #[error("object {id} does not exist")]
+    ObjectMissing {
+        /// Identity of the missing object.
+        id: ObjectId,
+    },
+    /// A link instance does not exist.
+    #[error("link {id} does not exist")]
+    LinkMissing {
+        /// Identity of the missing link.
+        id: LinkId,
+    },
+    /// A repository operation failed.
+    #[error("ontology repository operation failed")]
+    Repository(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A persisted draft schema is not valid JSON.
     #[error("failed to decode draft schema")]
     DecodeSchema(#[source] serde_json::Error),
