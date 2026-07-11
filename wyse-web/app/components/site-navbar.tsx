@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef } from "react"
+import { useRef, type MouseEvent } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { ScrollTrigger } from "gsap/ScrollTrigger"
@@ -19,6 +19,7 @@ import {
   navigationMenuTriggerStyle,
 } from "~/components/ui/navigation-menu"
 import { Separator } from "~/components/ui/separator"
+import { cn } from "~/lib/utils"
 
 gsap.registerPlugin(useGSAP, ScrollTrigger)
 
@@ -26,12 +27,46 @@ export function SiteNavbar() {
   const { t } = useTranslation()
   const navRef = useRef<HTMLElement>(null)
   const glassRef = useRef<HTMLDivElement>(null)
+  const sectionNavRef = useRef<HTMLDivElement>(null)
+  const overviewLinkRef = useRef<HTMLAnchorElement>(null)
+  const longzhongLinkRef = useRef<HTMLAnchorElement>(null)
+  const indicatorRef = useRef<HTMLSpanElement>(null)
+
+  const handleSectionNavigation = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault()
+
+    const section = event.currentTarget.hash.slice(1)
+    const target = document.getElementById(section)
+
+    if (!target) {
+      return
+    }
+
+    target.scrollIntoView({
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+      block: "start",
+    })
+    window.history.replaceState(null, "", `#${section}`)
+  }
 
   useGSAP(
     () => {
       const glass = glassRef.current
 
-      if (!glass) {
+      const sectionNav = sectionNavRef.current
+      const overviewLink = overviewLinkRef.current
+      const longzhongLink = longzhongLinkRef.current
+      const indicator = indicatorRef.current
+
+      if (
+        !glass ||
+        !sectionNav ||
+        !overviewLink ||
+        !longzhongLink ||
+        !indicator
+      ) {
         return
       }
 
@@ -57,6 +92,32 @@ export function SiteNavbar() {
         })
       }
 
+      let activeSection: "overview" | "longzhong" = "overview"
+
+      const setActiveSection = (section: "overview" | "longzhong") => {
+        const target = section === "overview" ? overviewLink : longzhongLink
+        const navBounds = sectionNav.getBoundingClientRect()
+        const linkBounds = target.getBoundingClientRect()
+
+        activeSection = section
+        overviewLink.dataset.active = String(section === "overview")
+        longzhongLink.dataset.active = String(section === "longzhong")
+        if (section === "overview") {
+          overviewLink.setAttribute("aria-current", "page")
+          longzhongLink.removeAttribute("aria-current")
+        } else {
+          overviewLink.removeAttribute("aria-current")
+          longzhongLink.setAttribute("aria-current", "page")
+        }
+        gsap.to(indicator, {
+          x: linkBounds.left - navBounds.left,
+          scaleX: linkBounds.width,
+          duration: reduceMotion ? 0 : 0.5,
+          ease: "power3.inOut",
+          overwrite: "auto",
+        })
+      }
+
       let glassVisible = window.scrollY > 12
 
       const setGlassVisible = (nextVisible: boolean) => {
@@ -77,6 +138,11 @@ export function SiteNavbar() {
         scale: glassVisible ? 1 : 0.985,
         transformOrigin: "50% 50%",
       })
+      gsap.set(indicator, {
+        scaleX: 0,
+        transformOrigin: "left center",
+      })
+      setActiveSection(activeSection)
 
       ScrollTrigger.create({
         id: "site-navbar-glass",
@@ -84,6 +150,17 @@ export function SiteNavbar() {
         end: "max",
         onRefresh: () => setGlassVisible(window.scrollY > 12),
         onUpdate: () => setGlassVisible(window.scrollY > 12),
+      })
+
+      ScrollTrigger.create({
+        id: "site-navbar-longzhong",
+        trigger: document.getElementById("longzhong"),
+        start: "top center",
+        end: "bottom center",
+        onEnter: () => setActiveSection("longzhong"),
+        onEnterBack: () => setActiveSection("longzhong"),
+        onLeaveBack: () => setActiveSection("overview"),
+        onRefresh: () => setActiveSection(activeSection),
       })
     },
     { scope: navRef }
@@ -125,26 +202,55 @@ export function SiteNavbar() {
         </a>
 
         <div className="relative z-10 ml-auto flex items-center gap-3">
-          <NavigationMenu className="hidden flex-none md:flex">
-            <NavigationMenuList>
-              <NavigationMenuItem>
-                <NavigationMenuLink
-                  render={<a href="#runtime" />}
-                  className={navigationMenuTriggerStyle()}
-                >
-                  {t("nav.features")}
-                </NavigationMenuLink>
-              </NavigationMenuItem>
-              <NavigationMenuItem>
-                <NavigationMenuLink
-                  render={<a href="#workflows" />}
-                  className={navigationMenuTriggerStyle()}
-                >
-                  {t("nav.about")}
-                </NavigationMenuLink>
-              </NavigationMenuItem>
-            </NavigationMenuList>
-          </NavigationMenu>
+          <div ref={sectionNavRef} className="relative hidden md:block">
+            <NavigationMenu className="flex-none">
+              <NavigationMenuList>
+                <NavigationMenuItem>
+                  <NavigationMenuLink
+                    render={
+                      <a
+                        ref={overviewLinkRef}
+                        href="#overview"
+                        onClick={handleSectionNavigation}
+                      />
+                    }
+                    className={cn(
+                      navigationMenuTriggerStyle(),
+                      "text-muted-foreground data-[active=true]:text-foreground"
+                    )}
+                    data-active="true"
+                    aria-current="page"
+                  >
+                    {t("nav.overview")}
+                  </NavigationMenuLink>
+                </NavigationMenuItem>
+                <NavigationMenuItem>
+                  <NavigationMenuLink
+                    render={
+                      <a
+                        ref={longzhongLinkRef}
+                        href="#longzhong"
+                        onClick={handleSectionNavigation}
+                      />
+                    }
+                    className={cn(
+                      navigationMenuTriggerStyle(),
+                      "text-muted-foreground data-[active=true]:text-foreground"
+                    )}
+                    data-active="false"
+                  >
+                    {t("nav.longzhong")}
+                  </NavigationMenuLink>
+                </NavigationMenuItem>
+              </NavigationMenuList>
+            </NavigationMenu>
+            <span
+              ref={indicatorRef}
+              data-slot="section-indicator"
+              aria-hidden="true"
+              className="absolute bottom-0 left-0 h-0.5 w-px origin-left bg-primary will-change-transform"
+            />
+          </div>
           <Separator orientation="vertical" className="hidden md:block" />
           <LanguageToggle />
           <ThemeToggle />
