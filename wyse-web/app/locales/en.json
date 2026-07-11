@@ -28,30 +28,37 @@
     "history": {
       "title": "Conversation history",
       "description": "Recent reasoning and decisions",
-      "new": "New conversation",
-      "current": "Runtime architecture trade-offs",
-      "toolPolicy": "Tool approval policy",
-      "runtimePlan": "Agent Runtime roadmap",
-      "localOnly": "Static layout preview"
-    },
-    "messages": {
-      "assistantIntro": "Share the goal, constraints, and existing context. We will clarify the problem before choosing the smallest viable path.",
-      "userQuestion": "We should define the Agent Runtime boundaries without adding layers for speculative future extensions.",
-      "assistantAnswer": "Start with the three real boundaries: the run loop, model calls, and tool execution. Extract another trait only when a second implementation or a concrete isolation need appears."
-    },
-    "time": {
-      "now": "Just now",
-      "yesterday": "Yesterday",
-      "lastWeek": "Last week"
+      "new": "New conversation"
     },
     "composer": {
       "title": "Continue the conversation",
       "description": "Describe the goal, constraints, or options you are weighing.",
       "label": "Message",
       "placeholder": "Ask Longzhong…",
-      "hint": "Static layout preview; messages are not sent",
       "send": "Send"
-    }
+    },
+    "empty": "Start a new conversation to begin.",
+    "startConversation": "Start a conversation",
+    "creating": "Creating conversation…",
+    "sending": "Sending…",
+    "connecting": "Connecting…",
+    "reconnecting": "Reconnecting…",
+    "connectionFailed": "Connection failed",
+    "ready": "Connected",
+    "continue": "Continue",
+    "cancel": "Cancel",
+    "reconnect": "Reconnect",
+    "missingConversation": "Conversation is missing",
+    "removeLocalEntry": "Remove local entry",
+    "approvalRequest": "Approval request",
+    "approve": "Approve",
+    "reject": "Reject",
+    "toolKind": "Tool kind",
+    "dangerLevel": "Danger level",
+    "streamStatus": "Streaming",
+    "reasoning": "Reasoning",
+    "toolProcess": "Tool process",
+    "unknownTool": "Unknown tool"
   },
   "errors": {
     "unexpectedTitle": "Oops!",

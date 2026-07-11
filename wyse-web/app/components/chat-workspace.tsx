@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -8,9 +8,9 @@ import {
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 
+import { AgentApprovalCard } from "~/components/agent-approval-card"
+import { AgentMessageList } from "~/components/agent-message-list"
 import GlassSurface from "~/components/GlassSurface"
-import { StratumMark } from "~/components/stratum-mark"
-import { Bubble, BubbleContent } from "~/components/ui/bubble"
 import { Button } from "~/components/ui/button"
 import {
   Card,
@@ -22,13 +22,6 @@ import {
   CardTitle,
 } from "~/components/ui/card"
 import {
-  Message,
-  MessageAvatar,
-  MessageContent,
-  MessageFooter,
-  MessageHeader,
-} from "~/components/ui/message"
-import {
   MessageScroller,
   MessageScrollerButton,
   MessageScrollerContent,
@@ -37,45 +30,61 @@ import {
   MessageScrollerViewport,
 } from "~/components/ui/message-scroller"
 import { Textarea } from "~/components/ui/textarea"
-
-const historyItems = [
-  { id: "current", titleKey: "chat.history.current", timeKey: "chat.time.now" },
-  {
-    id: "tool-policy",
-    titleKey: "chat.history.toolPolicy",
-    timeKey: "chat.time.yesterday",
-  },
-  {
-    id: "runtime-plan",
-    titleKey: "chat.history.runtimePlan",
-    timeKey: "chat.time.lastWeek",
-  },
-] as const
-
-const messages = [
-  {
-    id: "assistant-intro",
-    role: "assistant",
-    bodyKey: "chat.messages.assistantIntro",
-    timeKey: "chat.time.now",
-  },
-  {
-    id: "user-question",
-    role: "user",
-    bodyKey: "chat.messages.userQuestion",
-    timeKey: "chat.time.now",
-  },
-  {
-    id: "assistant-answer",
-    role: "assistant",
-    bodyKey: "chat.messages.assistantAnswer",
-    timeKey: "chat.time.now",
-  },
-] as const
+import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
 export function ChatWorkspace() {
   const { t } = useTranslation()
+  const conversation = useAgentConversation()
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+  const [composerText, setComposerText] = useState("")
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submittingApprovalId, setSubmittingApprovalId] = useState<
+    string | null
+  >(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const { state } = conversation
+
+  const submitMessage = async () => {
+    const text = composerText.trim()
+    if (text === "" || isSubmitting) return
+
+    setIsSubmitting(true)
+    try {
+      if (state.agentId === null) await conversation.createConversation(text)
+      else await conversation.sendMessage(text)
+      setComposerText("")
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const resolveApproval = async (
+    approvalId: string,
+    decision: "approve" | "reject"
+  ) => {
+    setSubmittingApprovalId(approvalId)
+    try {
+      await conversation.resolveApproval(approvalId, decision)
+    } finally {
+      setSubmittingApprovalId((current) =>
+        current === approvalId ? null : current
+      )
+    }
+  }
+
+  const statusText = isSubmitting
+    ? t(state.agentId === null ? "chat.creating" : "chat.sending")
+    : state.phase === "connection_error"
+      ? `${t("chat.connectionFailed")}: ${state.error?.message ?? ""}`
+      : state.phase === "missing"
+        ? t("chat.missingConversation")
+        : state.phase === "recovering"
+          ? t("chat.connecting")
+          : state.view?.status === "running"
+            ? t("chat.sending")
+            : state.agentId === null
+              ? t("chat.empty")
+              : t("chat.ready")
 
   return (
     <section
@@ -136,6 +145,10 @@ export function ChatWorkspace() {
                 size="icon-sm"
                 aria-label={t("chat.history.new")}
                 title={t("chat.history.new")}
+                onClick={() => {
+                  conversation.selectAgent(null)
+                  composerRef.current?.focus()
+                }}
               >
                 <PlusIcon aria-hidden="true" />
               </Button>
@@ -143,22 +156,43 @@ export function ChatWorkspace() {
           </CardHeader>
           {isHistoryOpen ? (
             <CardContent id="chat-history" className="flex flex-col gap-1.5">
-              {historyItems.map((item, index) => (
-                <Button
-                  key={item.id}
-                  variant={index === 0 ? "secondary" : "ghost"}
-                  size="lg"
-                  className="h-auto w-full justify-start py-2 text-left"
-                >
-                  <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-                    <span className="w-full truncate">{t(item.titleKey)}</span>
-                    <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
-                      <Clock3Icon aria-hidden="true" />
-                      {t(item.timeKey)}
-                    </span>
-                  </span>
-                </Button>
-              ))}
+              {conversation.recentAgents.map((agent) => {
+                const isMissing =
+                  state.phase === "missing" && state.agentId === agent.agentId
+
+                return (
+                  <div key={agent.agentId} className="flex items-center gap-1">
+                    <Button
+                      variant={
+                        state.agentId === agent.agentId ? "secondary" : "ghost"
+                      }
+                      size="lg"
+                      className="h-auto min-w-0 flex-1 justify-start py-2 text-left"
+                      onClick={() => conversation.selectAgent(agent.agentId)}
+                    >
+                      <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
+                        <span className="w-full truncate">{agent.title}</span>
+                        <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
+                          <Clock3Icon aria-hidden="true" />
+                          {agent.lastOpenedAt}
+                        </span>
+                      </span>
+                    </Button>
+                    {isMissing ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          conversation.removeRecentAgent(agent.agentId)
+                        }
+                      >
+                        {t("chat.removeLocalEntry")}
+                      </Button>
+                    ) : null}
+                  </div>
+                )
+              })}
             </CardContent>
           ) : null}
         </Card>
@@ -171,43 +205,35 @@ export function ChatWorkspace() {
             <MessageScroller className="flex-1">
               <MessageScrollerViewport>
                 <MessageScrollerContent className="w-full px-1 py-6 md:px-6">
-                  {messages.map((message) => {
-                    const isUser = message.role === "user"
-
-                    return (
-                      <MessageScrollerItem
-                        key={message.id}
-                        messageId={message.id}
-                        scrollAnchor={isUser}
-                      >
-                        <Message align={isUser ? "end" : "start"}>
-                          {isUser ? null : (
-                            <MessageAvatar>
-                              <StratumMark
-                                animated={false}
-                                variant="compact"
-                                className="size-6"
-                              />
-                            </MessageAvatar>
-                          )}
-                          <MessageContent>
-                            <MessageHeader>
-                              {isUser ? t("chat.you") : t("chat.assistant")}
-                            </MessageHeader>
-                            <Bubble
-                              variant={isUser ? "secondary" : "ghost"}
-                              align={isUser ? "end" : "start"}
-                            >
-                              <BubbleContent>
-                                {t(message.bodyKey)}
-                              </BubbleContent>
-                            </Bubble>
-                            <MessageFooter>{t(message.timeKey)}</MessageFooter>
-                          </MessageContent>
-                        </Message>
-                      </MessageScrollerItem>
-                    )
-                  })}
+                  <AgentMessageList
+                    messages={state.messages}
+                    drafts={state.drafts}
+                    tools={state.tools}
+                  />
+                  {state.messages.length === 0 &&
+                  Object.keys(state.drafts).length === 0 ? (
+                    <MessageScrollerItem messageId="empty-conversation">
+                      <p className="text-center text-xs/relaxed text-muted-foreground">
+                        {t("chat.empty")}
+                      </p>
+                    </MessageScrollerItem>
+                  ) : null}
+                  {Object.values(state.approvals).map((approval) => (
+                    <MessageScrollerItem
+                      key={approval.approvalId}
+                      messageId={`approval:${approval.approvalId}`}
+                    >
+                      <AgentApprovalCard
+                        approval={approval}
+                        submitting={
+                          submittingApprovalId === approval.approvalId
+                        }
+                        onDecision={(decision) => {
+                          void resolveApproval(approval.approvalId, decision)
+                        }}
+                      />
+                    </MessageScrollerItem>
+                  ))}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
               <MessageScrollerButton />
@@ -216,26 +242,71 @@ export function ChatWorkspace() {
 
           <Card size="sm" className="w-full shrink-0">
             <CardHeader>
-              <CardTitle>{t("chat.composer.title")}</CardTitle>
+              <CardTitle>
+                {t(
+                  state.agentId === null
+                    ? "chat.startConversation"
+                    : "chat.composer.title"
+                )}
+              </CardTitle>
               <CardDescription>
                 {t("chat.composer.description")}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <Textarea
+                ref={composerRef}
                 aria-label={t("chat.composer.label")}
                 placeholder={t("chat.composer.placeholder")}
                 rows={2}
+                value={composerText}
+                disabled={isSubmitting}
+                onChange={(event) => setComposerText(event.target.value)}
               />
             </CardContent>
             <CardFooter className="justify-between gap-3 border-t">
               <p className="text-[0.625rem] text-muted-foreground">
-                {t("chat.composer.hint")}
+                {statusText}
               </p>
-              <Button type="button" size="lg">
-                {t("chat.composer.send")}
-                <SendIcon data-icon="inline-end" aria-hidden="true" />
-              </Button>
+              <div className="ml-auto flex items-center gap-2">
+                {state.phase === "connection_error" ||
+                state.phase === "missing" ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => conversation.reconnect()}
+                  >
+                    {t("chat.reconnect")}
+                  </Button>
+                ) : state.agentId !== null &&
+                  (state.phase === "recovering" ||
+                    state.view?.status === "running") ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void conversation.cancel()}
+                  >
+                    {t("chat.cancel")}
+                  </Button>
+                ) : state.agentId !== null ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => void conversation.resume()}
+                  >
+                    {t("chat.continue")}
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  size="lg"
+                  disabled={composerText.trim() === "" || isSubmitting}
+                  onClick={() => void submitMessage()}
+                >
+                  {t("chat.composer.send")}
+                  <SendIcon data-icon="inline-end" aria-hidden="true" />
+                </Button>
+              </div>
             </CardFooter>
           </Card>
         </div>

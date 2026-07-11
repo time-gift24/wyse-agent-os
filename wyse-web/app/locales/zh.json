@@ -28,30 +28,37 @@
     "history": {
       "title": "历史对话",
       "description": "最近的推演与决策记录",
-      "new": "新建对话",
-      "current": "运行时架构取舍",
-      "toolPolicy": "工具审批策略",
-      "runtimePlan": "Agent Runtime 路线图",
-      "localOnly": "当前为静态布局预览"
-    },
-    "messages": {
-      "assistantIntro": "你可以把目标、约束和已有上下文交给我。我们先拆清问题，再决定最小可行路径。",
-      "userQuestion": "我们需要先确定 Agent Runtime 的模块边界，避免为了未来扩展提前增加层次。",
-      "assistantAnswer": "可以先围绕运行循环、模型调用和工具执行三条真实边界组织。只有出现第二个实现或明确隔离需求时，再抽取新的 trait。"
-    },
-    "time": {
-      "now": "刚刚",
-      "yesterday": "昨天",
-      "lastWeek": "上周"
+      "new": "新建对话"
     },
     "composer": {
       "title": "继续对话",
       "description": "描述目标、限制或你正在权衡的方案。",
       "label": "输入消息",
       "placeholder": "向隆中对提问……",
-      "hint": "静态布局预览，暂不发送消息",
       "send": "发送"
-    }
+    },
+    "empty": "开始一段新对话。",
+    "startConversation": "开始对话",
+    "creating": "正在创建对话……",
+    "sending": "正在发送……",
+    "connecting": "正在连接……",
+    "reconnecting": "正在重新连接……",
+    "connectionFailed": "连接失败",
+    "ready": "已连接",
+    "continue": "继续",
+    "cancel": "取消",
+    "reconnect": "重新连接",
+    "missingConversation": "对话不存在",
+    "removeLocalEntry": "移除本地记录",
+    "approvalRequest": "审批请求",
+    "approve": "批准",
+    "reject": "拒绝",
+    "toolKind": "工具类型",
+    "dangerLevel": "风险等级",
+    "streamStatus": "流式输出中",
+    "reasoning": "推理过程",
+    "toolProcess": "工具执行过程",
+    "unknownTool": "未知工具"
   },
   "errors": {
     "unexpectedTitle": "出错了",
