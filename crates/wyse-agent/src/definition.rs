@@ -54,11 +54,17 @@ pub struct Agent {
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
     pub(crate) cancel: Arc<Mutex<Option<CancellationToken>>>,
     pub(crate) turn_commands: Arc<Mutex<Option<mpsc::Sender<TurnCommand>>>>,
+    pub(crate) active_approval: Arc<Mutex<Option<ApprovalId>>>,
 }
 
 struct ActiveGuard<'a> {
     active: &'a AtomicBool,
     armed: bool,
+}
+
+pub(crate) struct ActiveApprovalGuard<'a> {
+    active_approval: &'a Mutex<Option<ApprovalId>>,
+    approval_id: ApprovalId,
 }
 
 struct ResumeState {
@@ -87,6 +93,33 @@ impl Drop for ActiveGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.active.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+impl<'a> ActiveApprovalGuard<'a> {
+    pub(crate) fn new(
+        active_approval: &'a Mutex<Option<ApprovalId>>,
+        approval_id: ApprovalId,
+    ) -> Self {
+        *active_approval
+            .lock()
+            .expect("active approval mutex should not be poisoned") = Some(approval_id);
+        Self {
+            active_approval,
+            approval_id,
+        }
+    }
+}
+
+impl Drop for ActiveApprovalGuard<'_> {
+    fn drop(&mut self) {
+        let mut active_approval = self
+            .active_approval
+            .lock()
+            .expect("active approval mutex should not be poisoned");
+        if *active_approval == Some(self.approval_id) {
+            *active_approval = None;
         }
     }
 }
@@ -430,6 +463,14 @@ impl Agent {
             .expect("turn command mutex should not be poisoned")
             .clone()
             .ok_or(AgentError::NoActiveTurn)?;
+        if *self
+            .active_approval
+            .lock()
+            .expect("active approval mutex should not be poisoned")
+            != Some(approval_id)
+        {
+            return Err(AgentError::ApprovalNotFound { approval_id });
+        }
         let (response, receiver) = oneshot::channel();
         sender
             .send(TurnCommand::ResolveToolApproval {
@@ -582,6 +623,7 @@ impl AgentBuilder {
             current_turn_id: Arc::new(Mutex::new(None)),
             cancel: Arc::new(Mutex::new(None)),
             turn_commands: Arc::new(Mutex::new(None)),
+            active_approval: Arc::new(Mutex::new(None)),
         })
     }
 }

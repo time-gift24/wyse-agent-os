@@ -21,6 +21,7 @@ use wyse_tools::ToolInput;
 use crate::{
     Agent, AgentError,
     command::{TurnCommand, reject_inactive_command},
+    definition::ActiveApprovalGuard,
 };
 
 pub(crate) struct ResumeContinuation {
@@ -773,6 +774,8 @@ impl Agent {
 
         if let Some((tool_kind, danger_level)) = approval_metadata {
             let approval_id = ApprovalId::new();
+            let active_approval =
+                ActiveApprovalGuard::new(self.active_approval.as_ref(), approval_id);
             self.publish_required_agent_event(
                 AgentEvent::ToolApprovalRequested {
                     approval_id,
@@ -814,6 +817,7 @@ impl Agent {
                     }
                 }
             };
+            drop(active_approval);
 
             self.publish_agent_event(
                 AgentEvent::ToolApprovalResolved {

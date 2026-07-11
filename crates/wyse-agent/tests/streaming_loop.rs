@@ -107,6 +107,24 @@ impl LlmProvider for RecordingProvider {
     }
 }
 
+#[derive(Debug)]
+struct PendingChatProvider;
+
+#[async_trait]
+impl LlmProvider for PendingChatProvider {
+    fn model_id(&self) -> ModelId {
+        "pending:mock-model".parse().expect("model id parses")
+    }
+
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, LlmError> {
+        Err(LlmError::UnsupportedCapability("chat"))
+    }
+
+    async fn chat_stream(&self, _request: ChatRequest) -> Result<ChatStream, LlmError> {
+        pending().await
+    }
+}
+
 struct TestStore {
     state: Mutex<AgentState>,
     history: Mutex<Vec<StreamEnvelope>>,
@@ -1353,11 +1371,14 @@ fn approval_provider() -> Arc<RecordingProvider> {
     ]))
 }
 
-fn approval_agent(
+fn approval_agent<P>(
     calls: &Arc<AtomicUsize>,
-    provider: Arc<RecordingProvider>,
+    provider: Arc<P>,
     event_bus: Arc<dyn EventStreamBus>,
-) -> Agent {
+) -> Agent
+where
+    P: LlmProvider + 'static,
+{
     let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
     registry
         .register(
@@ -1450,6 +1471,33 @@ async fn approval_without_active_turn_returns_error() {
             .resolve_tool_approval(ApprovalId::new(), ApprovalDecision::Approve)
             .await,
         Err(AgentError::NoActiveTurn)
+    ));
+}
+
+#[tokio::test]
+async fn approval_before_any_request_returns_not_found_without_waiting() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = approval_agent(
+        &calls,
+        Arc::new(PendingChatProvider),
+        Arc::new(InMemoryEventStreamBus::default()),
+    );
+    agent
+        .run_turn(ChatMessage::user("wait for provider"))
+        .await
+        .expect("run starts");
+    let approval_id = ApprovalId::new();
+
+    let result = timeout(
+        Duration::from_secs(1),
+        agent.resolve_tool_approval(approval_id, ApprovalDecision::Approve),
+    )
+    .await
+    .expect("inactive approval should return immediately");
+
+    assert!(matches!(
+        result,
+        Err(AgentError::ApprovalNotFound { approval_id: actual }) if actual == approval_id
     ));
 }
 

@@ -203,7 +203,14 @@ async fn resume_agent(
         }
         .into());
     }
-    let run_id = hosted.agent.resume().await?;
+    let run_id = match hosted.agent.resume().await {
+        Ok(run_id) => run_id,
+        Err(error @ AgentError::ResumeNotRunning { .. }) => {
+            hosted.clear_needs_resume();
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     hosted.clear_needs_resume();
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
 }
@@ -353,6 +360,13 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             "approval_not_active",
             "tool approval is not active",
         ),
+        HostError::Agent(AgentError::MissingBuilderField { .. })
+        | HostError::Llm(_)
+        | HostError::Tool(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "agent_initialization_failed",
+            "agent initialization failed",
+        ),
         HostError::Store(source) | HostError::Agent(AgentError::Store { source }) => {
             store_error_response(source)
         }
@@ -384,10 +398,22 @@ fn store_error_response(error: &StoreError) -> (StatusCode, &'static str, &'stat
             "invalid_history_query",
             "history query is invalid",
         ),
-        StoreError::Filesystem(_)
-        | StoreError::CasUnsupported
-        | StoreError::CasTimeout
-        | StoreError::CasRetriesExhausted => (
+        StoreError::Filesystem(source) => filesystem_store_error_response(source),
+        StoreError::CasTimeout | StoreError::CasRetriesExhausted => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "store_unavailable",
+            "agent store is unavailable",
+        ),
+        _ => internal_error_response(),
+    }
+}
+
+fn filesystem_store_error_response(
+    error: &wyse_filesystem::FilesystemError,
+) -> (StatusCode, &'static str, &'static str) {
+    match error {
+        wyse_filesystem::FilesystemError::PermissionDenied { .. }
+        | wyse_filesystem::FilesystemError::LocalIo { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,
             "store_unavailable",
             "agent store is unavailable",

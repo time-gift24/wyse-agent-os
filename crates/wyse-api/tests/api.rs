@@ -1,8 +1,12 @@
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -13,7 +17,9 @@ use axum::{
 };
 use chrono::Utc;
 use serde_json::{Value, json};
+use tokio::time::timeout;
 use tower::ServiceExt;
+use wyse_agent::AgentError;
 use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router};
 use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{
@@ -26,7 +32,7 @@ use wyse_filesystem::{
 };
 use wyse_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
 use wyse_llm::{ChatRequest, ChatResponse, ChatStream, LlmError, LlmProvider, LlmProviderManager};
-use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore};
+use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError};
 
 struct Fixture {
     root: PathBuf,
@@ -330,6 +336,92 @@ impl Filesystem for FailFirstMessageFilesystem {
         {
             return Err(FilesystemError::PermissionDenied { path: path.clone() });
         }
+        self.inner.remove_dir(path).await
+    }
+}
+
+struct ResumeRaceFilesystem {
+    inner: Arc<dyn Filesystem>,
+    enabled: AtomicBool,
+    state_reads: AtomicUsize,
+}
+
+impl ResumeRaceFilesystem {
+    fn new(inner: Arc<dyn Filesystem>) -> Self {
+        Self {
+            inner,
+            enabled: AtomicBool::new(false),
+            state_reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn enable(&self) {
+        self.state_reads.store(0, Ordering::SeqCst);
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Filesystem for ResumeRaceFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        let record = self.inner.get(path).await?;
+        if !self.enabled.load(Ordering::SeqCst) || !path.as_str().ends_with("/agent.json") {
+            return Ok(record);
+        }
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        if self.state_reads.fetch_add(1, Ordering::SeqCst) < 2 {
+            return Ok(Some(record));
+        }
+        let mut state: Value =
+            serde_json::from_slice(record.entry.contents()).expect("test state decodes");
+        state["status"] = json!("failed");
+        let contents = serde_json::to_vec(&state).expect("test state encodes");
+        Ok(Some(VersionedEntry {
+            entry: Entry::new(contents),
+            version: record.version,
+        }))
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, contents).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
+        self.inner.metadata(path).await
+    }
+
+    async fn create_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.remove_dir(path).await
     }
 }
@@ -1062,4 +1154,148 @@ async fn malformed_json_uses_the_unified_error_body() {
         .expect("body is readable");
     let body: Value = serde_json::from_slice(&body).expect("error body is json");
     assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+async fn rendered_error(error: HostError) -> (StatusCode, Value) {
+    let response = error.into_response();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("error body is readable");
+    let body = serde_json::from_slice(&body).expect("error body is json");
+    (status, body)
+}
+
+#[tokio::test]
+async fn resume_race_clears_marker_when_agent_observes_non_running_state() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Running)
+        .await;
+    let filesystem = Arc::new(ResumeRaceFilesystem::new(Arc::clone(&fixture.filesystem)));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    filesystem.enable();
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/resume"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "resume_not_running");
+    assert!(!host.agent(agent_id).expect("agent exists").needs_resume());
+}
+
+#[tokio::test]
+async fn initialization_invariant_errors_use_stable_code() {
+    let model = ModelId::new("openai", "missing").expect("model is valid");
+    for error in [
+        HostError::Agent(AgentError::MissingBuilderField { field: "store" }),
+        HostError::Llm(LlmError::ProviderNotFound { model }),
+    ] {
+        let (status, body) = rendered_error(error).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "agent_initialization_failed");
+    }
+}
+
+#[tokio::test]
+async fn store_filesystem_errors_distinguish_unavailability_from_corruption() {
+    let path: VirtualPath = "/history/agent/agent.json".parse().expect("path is valid");
+    let unavailable = HostError::Store(StoreError::Filesystem(FilesystemError::LocalIo {
+        operation: "read",
+        path: path.clone(),
+        source: io::Error::other("disk unavailable"),
+    }));
+    let corrupt_layout = HostError::Store(StoreError::Filesystem(FilesystemError::NotAFile {
+        path: path.clone(),
+    }));
+    let invalid_path = HostError::Store(StoreError::Filesystem(
+        FilesystemError::InvalidVirtualPath {
+            path: "/history/../secret".to_owned(),
+            source: wyse_filesystem::VirtualPathError,
+        },
+    ));
+
+    let (unavailable_status, unavailable_body) = rendered_error(unavailable).await;
+    assert_eq!(unavailable_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(unavailable_body["error"]["code"], "store_unavailable");
+    for error in [corrupt_layout, invalid_path] {
+        let (status, body) = rendered_error(error).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "internal_error");
+        assert!(!body.to_string().contains("secret"));
+    }
+}
+
+#[tokio::test]
+async fn approval_before_any_request_conflicts_while_provider_is_pending() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(PendingProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let app = router(host);
+    let accepted = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "hello"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+    let approval_id = ApprovalId::new();
+    let response = timeout(
+        Duration::from_secs(1),
+        app.oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/approvals/{approval_id}"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"decision": "approve"}).to_string()))
+                .expect("request builds"),
+        ),
+    )
+    .await
+    .expect("inactive approval should return immediately")
+    .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("error body is json");
+    assert_eq!(body["error"]["code"], "approval_not_active");
 }
