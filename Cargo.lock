@@ -2497,6 +2497,7 @@ dependencies = [
 name = "wyse-config"
 version = "0.1.0"
 dependencies = [
+ "http",
  "serde",
  "thiserror",
  "toml",

@@ -283,6 +283,15 @@ impl AgentStore for FilesystemAgentStore {
             |current| {
                 attempts.fetch_add(1, Ordering::Relaxed);
                 validate_state(current)?;
+                if status == AgentStatus::Running
+                    && current.status == AgentStatus::Running
+                    && current.run_id != run_id
+                {
+                    return Err(StoreError::RunningRunConflict {
+                        current: current.run_id,
+                        attempted: run_id,
+                    });
+                }
                 let mut next = current.clone();
                 if status == AgentStatus::Running && current.run_id != run_id {
                     next.next_iteration = 0;

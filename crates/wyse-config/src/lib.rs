@@ -41,10 +41,15 @@ pub struct AgentConfig {
 #[non_exhaustive]
 pub struct ApiConfig {
     /// Socket address on which the API listens.
+    #[serde(default = "default_api_bind")]
     pub bind: SocketAddr,
     /// Browser origins allowed to call the API.
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+}
+
+fn default_api_bind() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 8080))
 }
 
 /// NATS event stream bus configuration.
@@ -238,6 +243,13 @@ impl Config {
         }
         validate_provider("deepseek", self.llm.deepseek.as_ref())?;
         validate_provider("openai", self.llm.openai.as_ref())?;
+        if let Some(api) = &self.api {
+            for origin in &api.allowed_origins {
+                if origin == "*" || http::HeaderValue::from_str(origin).is_err() {
+                    return Err(ConfigError::InvalidAllowedOrigin);
+                }
+            }
+        }
         self.validate_model_configured(&self.llm.default)
     }
 
@@ -421,6 +433,33 @@ prompt = "  You are a coding agent.  "
         assert_eq!(config.llm.default.as_str(), "deepseek:deepseek-v4-flash");
         assert_eq!(config.require_api().expect("api exists").bind.port(), 8080);
         assert_eq!(config.require_nats().expect("nats exists").replicas, 1);
+    }
+
+    #[test]
+    fn api_bind_defaults_to_loopback_when_omitted() {
+        let input = VALID_CONFIG.replace("bind = \"127.0.0.1:8080\"\n", "");
+
+        let config = Config::parse(&input).expect("config parses");
+
+        assert_eq!(
+            config.require_api().expect("api exists").bind,
+            "127.0.0.1:8080".parse().expect("default bind parses")
+        );
+    }
+
+    #[test]
+    fn rejects_wildcard_and_invalid_allowed_origins() {
+        for origin in ["*", "bad\norigin"] {
+            let input = VALID_CONFIG.replace(
+                "allowed_origins = [\"http://localhost:5173\"]",
+                &format!("allowed_origins = [{origin:?}]"),
+            );
+
+            assert!(matches!(
+                Config::parse(&input),
+                Err(ConfigError::InvalidAllowedOrigin)
+            ));
+        }
     }
 
     #[test]

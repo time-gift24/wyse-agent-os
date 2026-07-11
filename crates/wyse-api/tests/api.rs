@@ -409,6 +409,13 @@ impl TestEventStreamBus {
         }
     }
 
+    fn pending() -> Self {
+        Self {
+            replay_starts: Mutex::new(Vec::new()),
+            subscription: Mutex::new(Some(Ok(Box::pin(stream::pending())))),
+        }
+    }
+
     fn replay_starts(&self) -> Vec<ReplayStart> {
         self.replay_starts
             .lock()
@@ -550,6 +557,13 @@ impl FailFirstMessageFilesystem {
             .parse()
             .expect("agent id parses")
     }
+
+    fn created_agent_root(&self) -> Option<VirtualPath> {
+        self.created_root
+            .lock()
+            .expect("created root lock is not poisoned")
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -671,6 +685,161 @@ impl Filesystem for ResumeRaceFilesystem {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, contents).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
+        self.inner.metadata(path).await
+    }
+
+    async fn create_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.remove_dir(path).await
+    }
+}
+
+struct FailTerminalStateFilesystem {
+    inner: Arc<dyn Filesystem>,
+    failing: AtomicBool,
+    failed_writes: AtomicUsize,
+}
+
+#[derive(Clone, Copy)]
+enum CreationOperationFailure {
+    TemplateRead,
+    HistoryCreate,
+    DefinitionWrite,
+}
+
+struct CreationOperationFilesystem {
+    inner: Arc<dyn Filesystem>,
+    failure: CreationOperationFailure,
+}
+
+#[async_trait]
+impl Filesystem for CreationOperationFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if matches!(self.failure, CreationOperationFailure::DefinitionWrite)
+            && path.as_str().ends_with("/definition.toml")
+        {
+            return Err(FilesystemError::PermissionDenied { path: path.clone() });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        if matches!(self.failure, CreationOperationFailure::TemplateRead)
+            && path.as_str().starts_with("/templates/")
+        {
+            return Err(FilesystemError::PermissionDenied { path: path.clone() });
+        }
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, contents).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
+        self.inner.metadata(path).await
+    }
+
+    async fn create_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if matches!(self.failure, CreationOperationFailure::HistoryCreate)
+            && path.as_str().starts_with("/history/")
+        {
+            return Err(FilesystemError::PermissionDenied { path: path.clone() });
+        }
+        self.inner.create_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.remove_dir(path).await
+    }
+}
+
+impl FailTerminalStateFilesystem {
+    fn new(inner: Arc<dyn Filesystem>) -> Self {
+        Self {
+            inner,
+            failing: AtomicBool::new(true),
+            failed_writes: AtomicUsize::new(0),
+        }
+    }
+
+    fn recover(&self) {
+        self.failing.store(false, Ordering::SeqCst);
+    }
+
+    fn failed_writes(&self) -> usize {
+        self.failed_writes.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Filesystem for FailTerminalStateFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if self.failing.load(Ordering::SeqCst) && path.as_str().ends_with("/agent.json") {
+            let value: Value =
+                serde_json::from_slice(entry.contents()).expect("agent state update contains json");
+            if value["status"] != "running" {
+                self.failed_writes.fetch_add(1, Ordering::SeqCst);
+                return Err(FilesystemError::PermissionDenied { path: path.clone() });
+            }
+        }
         self.inner.put(path, entry, cas).await
     }
 
@@ -850,6 +1019,116 @@ async fn restore_rejects_definition_whose_model_was_removed() {
 }
 
 #[tokio::test]
+async fn restore_rejects_store_id_and_name_mismatches() {
+    for field in ["agent_id", "name"] {
+        let fixture = Fixture::new().await;
+        let agent_id = fixture
+            .persist_agent("coding-agent", AgentStatus::Idle)
+            .await;
+        let state_path = fixture
+            .root
+            .join("history")
+            .join(agent_id.to_string())
+            .join("agent.json");
+        let mut state: Value =
+            serde_json::from_slice(&fs::read(&state_path).expect("agent state is readable"))
+                .expect("agent state is json");
+        state[field] = if field == "agent_id" {
+            json!(AgentId::new())
+        } else {
+            json!("different-name")
+        };
+        fs::write(
+            &state_path,
+            serde_json::to_vec(&state).expect("state encodes"),
+        )
+        .expect("state is rewritten");
+
+        let error = match fixture.restore_host().await {
+            Ok(_) => panic!("identity mismatch is rejected"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, HostError::IdentityMismatch { .. }));
+    }
+}
+
+#[tokio::test]
+async fn restore_rejects_unknown_tools_and_missing_provider_manager_entries() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let definition_path = fixture
+        .root
+        .join("history")
+        .join(agent_id.to_string())
+        .join("definition.toml");
+    let definition = fs::read_to_string(&definition_path).expect("definition is readable");
+    fs::write(
+        &definition_path,
+        definition.replace("tools = [\"echo\"]", "tools = [\"unknown\"]"),
+    )
+    .expect("definition is rewritten");
+    let unknown_tool = match fixture.restore_host().await {
+        Ok(_) => panic!("unknown tool is rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(unknown_tool, HostError::ToolNotAvailable { .. }));
+
+    fs::write(&definition_path, definition).expect("definition is restored");
+    let missing_provider = match HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::new(InMemoryEventStreamBus::default()),
+        LlmProviderManager::new(),
+    )
+    .await
+    {
+        Ok(_) => panic!("missing provider entry is rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        missing_provider,
+        HostError::Llm(LlmError::ProviderNotFound { .. })
+    ));
+}
+
+#[tokio::test]
+async fn restore_accepts_the_definition_and_directory_format_written_by_the_repl() {
+    let fixture = Fixture::new().await;
+    let agent_id = AgentId::new();
+    let root = fixture.root.join("history").join(agent_id.to_string());
+    fs::create_dir(&root).expect("REPL history directory is created");
+    let definition = fixture
+        .config
+        .resolve_template(
+            "default-agent".parse().expect("name parses"),
+            "tools = [\"echo\"]\nprompt = \"You are a helpful assistant.\"",
+        )
+        .expect("REPL definition resolves");
+    fs::write(
+        root.join("definition.toml"),
+        definition.encode().expect("definition encodes"),
+    )
+    .expect("REPL definition is written");
+    FilesystemAgentStore::new(
+        Arc::clone(&fixture.filesystem),
+        format!("/history/{agent_id}").parse().expect("root parses"),
+    )
+    .initialize(agent_id, "default-agent".to_owned())
+    .await
+    .expect("REPL store initializes");
+
+    let host = fixture
+        .restore_host()
+        .await
+        .expect("API restores REPL output");
+
+    assert!(host.agent(agent_id).is_some());
+}
+
+#[tokio::test]
 async fn create_agent_rejects_blank_text_without_creating_history() {
     let fixture = Fixture::new().await;
     fixture.persist_template("coding-agent", "\"echo\"");
@@ -858,7 +1137,7 @@ async fn create_agent_rejects_blank_text_without_creating_history() {
         .post_agent(json!({"agent_name": "coding-agent", "text": " \n\t"}))
         .await;
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(
         fs::read_dir(fixture.root.join("history"))
             .expect("history is readable")
@@ -895,6 +1174,69 @@ async fn create_agent_returns_unprocessable_entity_for_unknown_tool() {
             .next()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn create_agent_preflights_tools_before_touching_history() {
+    let fixture = Fixture::new().await;
+    fixture.persist_template("coding-agent", "\"unknown\"");
+    let filesystem = Arc::new(FailFirstMessageFilesystem::new(Arc::clone(
+        &fixture.filesystem,
+    )));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+
+    let error = host
+        .create_agent(
+            "coding-agent".parse().expect("name parses"),
+            "hello".to_owned(),
+        )
+        .await
+        .expect_err("unknown tool is rejected");
+
+    assert!(matches!(error, HostError::ToolNotAvailable { .. }));
+    assert_eq!(filesystem.created_agent_root(), None);
+}
+
+#[tokio::test]
+async fn create_agent_preflights_provider_before_touching_history() {
+    let fixture = Fixture::new().await;
+    fixture.persist_template("coding-agent", "\"echo\"");
+    let filesystem = Arc::new(FailFirstMessageFilesystem::new(Arc::clone(
+        &fixture.filesystem,
+    )));
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        LlmProviderManager::new(),
+    )
+    .await
+    .expect("empty history does not require a provider");
+
+    let error = host
+        .create_agent(
+            "coding-agent".parse().expect("name parses"),
+            "hello".to_owned(),
+        )
+        .await
+        .expect_err("missing provider is rejected");
+
+    assert!(matches!(
+        error,
+        HostError::Llm(LlmError::ProviderNotFound { .. })
+    ));
+    assert_eq!(filesystem.created_agent_root(), None);
 }
 
 #[tokio::test]
@@ -1460,6 +1802,96 @@ async fn message_preamble_failure_marks_existing_agent_for_resume() {
 }
 
 #[tokio::test]
+async fn terminal_persistence_failure_cannot_be_overwritten_by_a_new_message() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let filesystem = Arc::new(FailTerminalStateFilesystem::new(Arc::clone(
+        &fixture.filesystem,
+    )));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let app = router(Arc::clone(&host));
+
+    let accepted = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "first"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+    let persisted = timeout(Duration::from_secs(1), async {
+        loop {
+            let state = host
+                .agent(agent_id)
+                .expect("agent exists")
+                .store
+                .load_agent()
+                .await
+                .expect("state loads");
+            if state.status == AgentStatus::Running && state.last_seq == 1 {
+                return state;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("running state is retained after terminal write failure");
+    timeout(Duration::from_secs(1), async {
+        while filesystem.failed_writes() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal state write is attempted and fails");
+    filesystem.recover();
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    let response = app
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "second"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let response: Value = serde_json::from_slice(&response).expect("body is json");
+
+    assert_eq!(response["error"]["code"], "resume_required");
+    let after = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(after.run_id, persisted.run_id);
+    assert_eq!(after.turn_id, persisted.turn_id);
+    assert_eq!(after.last_seq, persisted.last_seq);
+}
+
+#[tokio::test]
 async fn malformed_json_uses_the_unified_error_body() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
@@ -1571,6 +2003,85 @@ async fn store_filesystem_errors_distinguish_unavailability_from_corruption() {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"]["code"], "internal_error");
         assert!(!body.to_string().contains("secret"));
+    }
+}
+
+#[tokio::test]
+async fn direct_filesystem_errors_distinguish_operations_from_invariants() {
+    let path: VirtualPath = "/history/agent/definition.toml"
+        .parse()
+        .expect("path is valid");
+    for error in [
+        FilesystemError::PermissionDenied { path: path.clone() },
+        FilesystemError::LocalIo {
+            operation: "write",
+            path: path.clone(),
+            source: io::Error::other("disk unavailable"),
+        },
+    ] {
+        let (status, body) = rendered_error(HostError::Filesystem(error)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "store_unavailable");
+    }
+
+    for error in [
+        FilesystemError::NotAFile { path: path.clone() },
+        FilesystemError::InvalidVirtualPath {
+            path: "/history/../secret".to_owned(),
+            source: wyse_filesystem::VirtualPathError,
+        },
+    ] {
+        let (status, body) = rendered_error(HostError::Filesystem(error)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "internal_error");
+        assert!(!body.to_string().contains("secret"));
+    }
+}
+
+#[tokio::test]
+async fn creation_filesystem_operations_map_to_store_unavailable() {
+    for failure in [
+        CreationOperationFailure::TemplateRead,
+        CreationOperationFailure::HistoryCreate,
+        CreationOperationFailure::DefinitionWrite,
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.persist_template("coding-agent", "\"echo\"");
+        let filesystem: Arc<dyn Filesystem> = Arc::new(CreationOperationFilesystem {
+            inner: Arc::clone(&fixture.filesystem),
+            failure,
+        });
+        let mut providers = LlmProviderManager::new();
+        providers
+            .register(Arc::new(TestProvider(fixture.model.clone())))
+            .expect("provider registers");
+        let host = HostState::restore(
+            fixture.config.clone(),
+            filesystem,
+            Arc::new(InMemoryEventStreamBus::default()),
+            providers,
+        )
+        .await
+        .expect("host restores");
+
+        let response = router(host)
+            .oneshot(
+                Request::post("/v1/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"agent_name": "coding-agent", "text": "hello"}).to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable");
+        let body: Value = serde_json::from_slice(&body).expect("body is json");
+        assert_eq!(body["error"]["code"], "store_unavailable");
     }
 }
 
@@ -2011,4 +2522,114 @@ async fn event_stream_emits_one_safe_stream_error_then_closes() {
     assert!(body.contains("\"code\":\"event_stream_unavailable\""));
     assert!(!body.contains("missing agent scope"));
     assert!(!body.contains("event: cancelled\n"));
+}
+
+#[tokio::test]
+async fn shutdown_closes_a_pending_sse_stream() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let host = fixture
+        .restore_host_with_bus(Arc::new(TestEventStreamBus::pending()))
+        .await
+        .expect("host restores");
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::get(format!("/v1/agents/{agent_id}/events"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    let mut body = response.into_body().into_data_stream();
+
+    host.shutdown().await;
+
+    assert!(
+        timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("SSE observes shutdown")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn shutdown_stops_an_active_turn_and_waits_for_its_terminal_state() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(PendingProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let accepted = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "wait"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+
+    host.shutdown().await;
+
+    assert_eq!(
+        host.agent(agent_id)
+            .expect("agent exists")
+            .store
+            .load_agent()
+            .await
+            .expect("state loads")
+            .status,
+        AgentStatus::Cancelled
+    );
+}
+
+#[test]
+fn request_spans_and_final_error_log_use_only_safe_structured_fields() {
+    let source = include_str!("../src/api.rs");
+    for field in [
+        "agent_id = field::Empty",
+        "run_id = field::Empty",
+        "cursor = field::Empty",
+    ] {
+        assert!(
+            source.contains(field),
+            "missing request span field: {field}"
+        );
+    }
+    let error_log = source
+        .split("tracing::error!(")
+        .nth(1)
+        .expect("HTTP boundary has one error log")
+        .split(");")
+        .next()
+        .expect("error log closes");
+    assert!(error_log.contains("http.status"));
+    assert!(error_log.contains("error.code"));
+    for sensitive in [
+        "message",
+        "prompt",
+        "arguments",
+        "api_key",
+        "path",
+        "source",
+    ] {
+        assert!(
+            !error_log.contains(sensitive),
+            "HTTP error log must not contain {sensitive}"
+        );
+    }
 }

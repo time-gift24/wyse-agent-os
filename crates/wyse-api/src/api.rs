@@ -114,8 +114,9 @@ pub fn router(state: Arc<HostState>) -> Router {
     let origins = state
         .allowed_origins()
         .iter()
-        .filter(|origin| origin.as_str() != "*")
-        .filter_map(|origin| HeaderValue::from_str(origin).ok())
+        .map(|origin| {
+            HeaderValue::from_str(origin).expect("allowed origins are validated during parsing")
+        })
         .collect::<Vec<_>>();
     let router = Router::new()
         .route("/v1/agents", post(create_agent))
@@ -144,6 +145,10 @@ pub fn router(state: Arc<HostState>) -> Router {
                         "http.request",
                         route,
                         method = %request.method(),
+                        agent_id = field::Empty,
+                        agent_name = field::Empty,
+                        run_id = field::Empty,
+                        cursor = field::Empty,
                         status = field::Empty,
                         latency = field::Empty,
                     )
@@ -183,7 +188,10 @@ async fn create_agent(
 ) -> Result<Response, HostError> {
     let request = json_request(request)?;
     let agent_name: AgentName = request.agent_name.parse()?;
+    Span::current().record("agent_name", agent_name.as_str());
     let created = state.create_agent(agent_name, request.text).await?;
+    Span::current().record("agent_id", field::display(created.agent_id));
+    Span::current().record("run_id", field::display(created.run_id));
     let location = HeaderValue::from_str(&format!("/v1/agents/{}", created.agent_id))
         .expect("agent id always produces a valid location header");
     let body = AgentCreated {
@@ -201,6 +209,7 @@ async fn get_agent(
     path: Result<Path<AgentId>, PathRejection>,
 ) -> Result<Json<AgentView>, HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    record_agent_id(agent_id);
     let hosted = find_agent(&state, agent_id)?;
     let persisted = hosted.store.load_agent().await?;
     Ok(Json(persisted.into()))
@@ -212,6 +221,7 @@ async fn get_messages(
     query: Result<Query<HistoryParams>, QueryRejection>,
 ) -> Result<Json<HistoryPage>, HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    record_agent_id(agent_id);
     let Query(query) = query.map_err(|_| HostError::InvalidHistoryQuery)?;
     let hosted = find_agent(&state, agent_id)?;
     let page = hosted
@@ -232,21 +242,30 @@ async fn get_events(
     OriginalUri(uri): OriginalUri,
 ) -> Result<impl IntoResponse, HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    record_agent_id(agent_id);
     find_agent(&state, agent_id)?;
     let replay_start = replay_start(&headers, &uri)?;
+    if let ReplayStart::After(cursor) = &replay_start {
+        Span::current().record("cursor", cursor.transport_sequence());
+    }
     let events = state
         .event_bus()
         .subscribe_agent(agent_id, replay_start)
         .await?;
-    let events = stream::unfold(Some(events), |events| async move {
-        let mut events = events?;
-        match events.next().await {
-            Some(Ok(record)) => match event_record_to_sse(record) {
-                Ok(event) => Some((Ok::<_, Infallible>(event), Some(events))),
-                Err(_) => Some((Ok(stream_error_event()), None)),
-            },
-            Some(Err(_)) => Some((Ok(stream_error_event()), None)),
-            None => None,
+    let shutdown = state.shutdown_token();
+    let events = stream::unfold(Some((events, shutdown)), |state| async move {
+        let (mut events, shutdown) = state?;
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => None,
+            event = events.next() => match event {
+                Some(Ok(record)) => match event_record_to_sse(record) {
+                    Ok(event) => Some((Ok::<_, Infallible>(event), Some((events, shutdown)))),
+                    Err(_) => Some((Ok(stream_error_event()), None)),
+                },
+                Some(Err(_)) => Some((Ok(stream_error_event()), None)),
+                None => None,
+            }
         }
     });
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
@@ -312,6 +331,7 @@ async fn post_message(
     request: Result<Json<MessageRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<RunAccepted>), HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    record_agent_id(agent_id);
     let request = json_request(request)?;
     if request.text.trim().is_empty() {
         return Err(HostError::InvalidMessage);
@@ -328,6 +348,7 @@ async fn post_message(
             return Err(error.into());
         }
     };
+    Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
 }
 
@@ -336,6 +357,7 @@ async fn resume_agent(
     path: Result<Path<AgentId>, PathRejection>,
 ) -> Result<(StatusCode, Json<RunAccepted>), HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    record_agent_id(agent_id);
     let hosted = find_agent(&state, agent_id)?;
     let persisted = hosted.store.load_agent().await?;
     if persisted.status != AgentStatus::Running {
@@ -354,6 +376,7 @@ async fn resume_agent(
         Err(error) => return Err(error.into()),
     };
     hosted.clear_needs_resume();
+    Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
 }
 
@@ -362,6 +385,7 @@ async fn cancel_agent(
     path: Result<Path<AgentId>, PathRejection>,
 ) -> Result<StatusCode, HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
+    record_agent_id(agent_id);
     let hosted = find_agent(&state, agent_id)?;
     if hosted.needs_resume() {
         return Err(HostError::ResumeRequired);
@@ -376,6 +400,7 @@ async fn resolve_approval(
     request: Result<Json<ApprovalRequest>, JsonRejection>,
 ) -> Result<StatusCode, HostError> {
     let Path((agent_id, approval_id)) = path.map_err(|_| HostError::InvalidRequest)?;
+    record_agent_id(agent_id);
     let request = json_request(request)?;
     let hosted = find_agent(&state, agent_id)?;
     hosted
@@ -389,6 +414,10 @@ fn find_agent(state: &HostState, agent_id: AgentId) -> Result<Arc<crate::HostedA
     state
         .agent(agent_id)
         .ok_or(HostError::AgentNotFound { agent_id })
+}
+
+fn record_agent_id(agent_id: AgentId) {
+    Span::current().record("agent_id", field::display(agent_id));
 }
 
 impl From<AgentState> for AgentView {
@@ -420,6 +449,13 @@ struct ErrorBody {
 impl IntoResponse for HostError {
     fn into_response(self) -> Response {
         let (status, code, message) = error_response(&self);
+        if status.is_server_error() {
+            tracing::error!(
+                http.status = status.as_u16(),
+                error.code = code,
+                "http request failed"
+            );
+        }
         (
             status,
             Json(ErrorResponse {
@@ -473,8 +509,8 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             "agent has an unfinished persisted turn",
         ),
         HostError::EmptyText => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_agent_template",
+            StatusCode::BAD_REQUEST,
+            "invalid_message",
             "initial agent text must not be blank",
         ),
         HostError::ToolNotAvailable { .. } => (
@@ -501,6 +537,11 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             StatusCode::CONFLICT,
             "agent_busy",
             "agent already has an active run",
+        ),
+        HostError::Agent(AgentError::PersistedRunRequiresResume { .. }) => (
+            StatusCode::CONFLICT,
+            "resume_required",
+            "agent has an unfinished persisted turn",
         ),
         HostError::Agent(AgentError::ApprovalCommandBusy { .. }) => (
             StatusCode::CONFLICT,
@@ -542,6 +583,7 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             "event_stream_unavailable",
             "event stream is unavailable",
         ),
+        HostError::Filesystem(source) => filesystem_store_error_response(source),
         _ => internal_error_response(),
     }
 }

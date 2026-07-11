@@ -19,6 +19,9 @@ pub enum ConfigError {
     /// The agent storage root was empty.
     #[error("agent storage root must not be empty")]
     InvalidStorageRoot,
+    /// A configured CORS origin was a wildcard or invalid HTTP header value.
+    #[error("api allowed origin is invalid")]
+    InvalidAllowedOrigin,
     /// A template prompt was empty after trimming.
     #[error("agent prompt must not be empty")]
     EmptyPrompt,

@@ -6,7 +6,6 @@ mod host;
 
 use std::{path::Path, sync::Arc};
 
-use tokio_util::sync::CancellationToken;
 use wyse_config::{Config, ProviderConfig};
 use wyse_core::ModelId;
 use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
@@ -55,16 +54,15 @@ pub async fn serve(config: Config) -> Result<(), HostError> {
     let event_bus: Arc<dyn EventStreamBus> = Arc::new(create_nats_event_stream_bus(nats).await?);
     let state = HostState::restore(config, filesystem, event_bus, providers).await?;
     let listener = tokio::net::TcpListener::bind(api.bind).await?;
-    let cancellation = CancellationToken::new();
-    let shutdown = cancellation.clone();
-    let server =
-        axum::serve(listener, router(state)).with_graceful_shutdown(cancellation.cancelled_owned());
+    let shutdown = state.shutdown_token();
+    let server = axum::serve(listener, router(Arc::clone(&state)))
+        .with_graceful_shutdown(shutdown.cancelled_owned());
     let mut server = Box::pin(async move { server.await });
     tokio::select! {
         result = &mut server => result?,
         signal = tokio::signal::ctrl_c() => {
             signal?;
-            shutdown.cancel();
+            state.shutdown().await;
             server.await?;
         }
     }

@@ -178,7 +178,15 @@ impl Agent {
                 tools: self.tool_registry.specs(),
                 structured_output: None,
             };
-            let stream = self.llm_provider.chat_stream(request).await;
+            let cancel = self.cancel_token().expect("cancel token should be set");
+            let stream = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    self.publish_cancelled().await?;
+                    return Err(AgentError::Cancelled);
+                }
+                stream = self.llm_provider.chat_stream(request) => stream,
+            };
             let stream = match stream {
                 Ok(stream) => stream,
                 Err(source) => {
@@ -472,13 +480,6 @@ impl Agent {
         total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
         total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
         total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
-    }
-
-    pub(crate) fn history_snapshot(&self) -> Vec<ChatMessage> {
-        self.history
-            .lock()
-            .expect("agent history mutex should not be poisoned")
-            .clone()
     }
 
     async fn publish_cancelled(&self) -> Result<(), AgentError> {

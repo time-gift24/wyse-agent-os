@@ -28,6 +28,14 @@ pub enum StoreError {
         /// Current persisted agent status.
         actual: AgentStatus,
     },
+    /// A new running transition would replace another unfinished run.
+    #[error("persisted running run conflict")]
+    RunningRunConflict {
+        /// Run currently persisted as running.
+        current: Option<RunId>,
+        /// Different run that attempted to become running.
+        attempted: Option<RunId>,
+    },
     /// The requested iteration differs from the durable frontier.
     #[error("iteration mismatch: expected {expected}, actual {actual}")]
     IterationMismatch {

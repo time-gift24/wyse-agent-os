@@ -6,7 +6,10 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
+use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
 
 use wyse_agent::Agent;
 use wyse_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
@@ -22,6 +25,8 @@ use crate::{AgentCleanupError, HostError};
 const HISTORY_ROOT: &str = "/history";
 const TEMPLATE_ROOT: &str = "/templates";
 const DEFINITION_FILE: &str = "definition.toml";
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Shared runtime state for all recovered agents.
 pub struct HostState {
@@ -42,6 +47,7 @@ pub struct HostState {
         reason = "retained for the next API endpoint assembly tasks"
     )]
     config: Arc<Config>,
+    shutdown: CancellationToken,
 }
 
 /// One composed agent and its durable store.
@@ -168,6 +174,7 @@ impl HostState {
             event_bus,
             providers: Arc::new(providers),
             config: Arc::new(config),
+            shutdown: CancellationToken::new(),
         }))
     }
 
@@ -183,6 +190,50 @@ impl HostState {
 
     pub(crate) fn event_bus(&self) -> Arc<dyn EventStreamBus> {
         Arc::clone(&self.event_bus)
+    }
+
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+
+    /// Cancels HTTP streams and active turns, then waits up to the bounded grace period for
+    /// terminal state persistence. A timed-out running state remains durable for explicit resume.
+    pub async fn shutdown(&self) {
+        self.shutdown.cancel();
+        let agents = self
+            .agents
+            .read()
+            .expect("host registry lock should not be poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for hosted in &agents {
+            hosted.agent.stop();
+        }
+
+        let wait_for_terminal = async {
+            loop {
+                let mut running = false;
+                for hosted in &agents {
+                    match hosted.store.load_agent().await {
+                        Ok(state) if state.status == AgentStatus::Running => running = true,
+                        Ok(_) => {}
+                        Err(_) => running = true,
+                    }
+                }
+                if !running {
+                    return;
+                }
+                sleep(SHUTDOWN_POLL_INTERVAL).await;
+            }
+        };
+        if timeout(SHUTDOWN_GRACE, wait_for_terminal).await.is_err() {
+            tracing::warn!(
+                agent_count = agents.len(),
+                grace_millis = SHUTDOWN_GRACE.as_millis(),
+                "agent shutdown grace elapsed; running turns require durable resume"
+            );
+        }
     }
 
     pub(crate) fn allowed_origins(&self) -> &[String] {
@@ -220,6 +271,8 @@ impl HostState {
             .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
         let definition = self.config.resolve_template(agent_name.clone(), template)?;
         let encoded_definition = definition.encode()?.into_bytes();
+        let provider = self.providers.get(&definition.model)?;
+        let registry = tool_registry(&definition)?;
         let agent_id = AgentId::new();
         let root = agent_root(agent_id)?;
         let definition_path = child_path(&root, DEFINITION_FILE)?;
@@ -241,8 +294,6 @@ impl HostState {
                 .initialize(agent_id, agent_name.as_str().to_owned())
                 .await?;
             let store: Arc<dyn AgentStore> = store;
-            let provider = self.providers.get(&definition.model)?;
-            let registry = tool_registry(&definition)?;
             let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
                 Arc::clone(&store),
                 Arc::clone(&self.event_bus),
