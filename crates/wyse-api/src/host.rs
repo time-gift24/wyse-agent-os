@@ -2,8 +2,9 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -30,6 +31,7 @@ const TEMPLATE_ROOT: &str = "/templates";
 const DEFINITION_FILE: &str = "definition.toml";
 const ADMISSION_DRAIN_GRACE: Duration = Duration::from_secs(1);
 const CREATION_CLEANUP_GRACE: Duration = Duration::from_secs(1);
+const CREATION_STAGE_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -85,6 +87,12 @@ pub struct CreatedAgent {
     pub agent_name: AgentName,
     /// Initial run identity.
     pub run_id: RunId,
+}
+
+enum CreationStage<T, E> {
+    Completed(Result<T, E>),
+    Shutdown,
+    Timeout,
 }
 
 impl HostedAgent {
@@ -351,15 +359,8 @@ impl HostState {
             return Err(HostError::EmptyText);
         }
 
-        let agent_id = AgentId::new();
-        let root = agent_root(agent_id)?;
-        let definition_path = child_path(&root, DEFINITION_FILE)?;
-        let root_may_exist = AtomicBool::new(false);
-        let durable_accepted = AtomicBool::new(false);
-        let created_agent = Arc::new(Mutex::new(None::<Agent>));
-        let shutdown = self.shutdown.clone();
         let template_path = template_path(&agent_name)?;
-        let operation = async {
+        let preflight = async {
             let template = match self.filesystem.read_file(&template_path).await {
                 Ok(template) => template,
                 Err(FilesystemError::NotFound { .. }) => {
@@ -375,92 +376,188 @@ impl HostState {
             let encoded_definition = definition.encode()?.into_bytes();
             let provider = self.providers.get(&definition.model)?;
             let registry = tool_registry(&definition)?;
-            self.filesystem.create_dir(&root).await?;
-            root_may_exist.store(true, Ordering::Release);
-            self.filesystem
-                .put(
+            Ok::<_, HostError>((definition, encoded_definition, provider, registry))
+        };
+        let (definition, encoded_definition, provider, registry) = tokio::select! {
+            biased;
+            () = self.shutdown.cancelled() => return Err(HostError::HostShuttingDown),
+            result = preflight => result?,
+        };
+
+        let agent_id = AgentId::new();
+        let root = agent_root(agent_id)?;
+        let definition_path = child_path(&root, DEFINITION_FILE)?;
+        match creation_stage(&self.shutdown, self.filesystem.create_dir(&root)).await {
+            CreationStage::Completed(Ok(())) => {}
+            CreationStage::Completed(Err(error)) => return Err(error.into()),
+            CreationStage::Shutdown => return Err(HostError::HostShuttingDown),
+            CreationStage::Timeout => return Err(HostError::CreationStageTimeout),
+        }
+
+        match creation_stage(
+            &self.shutdown,
+            self.filesystem.put(
+                &definition_path,
+                Entry::new(encoded_definition),
+                CasExpectation::Absent,
+            ),
+        )
+        .await
+        {
+            CreationStage::Completed(Ok(_)) => {}
+            CreationStage::Completed(Err(error)) => {
+                return Err(creation_error_with_cleanup(
+                    self.filesystem.as_ref(),
+                    &root,
                     &definition_path,
-                    Entry::new(encoded_definition),
-                    CasExpectation::Absent,
+                    error.into(),
                 )
-                .await?;
-            let store = Arc::new(FilesystemAgentStore::new(
-                Arc::clone(&self.filesystem),
-                root.clone(),
-            ));
-            store
-                .initialize(agent_id, agent_name.as_str().to_owned())
-                .await?;
-            let store: Arc<dyn AgentStore> = store;
-            let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
-                Arc::clone(&store),
-                Arc::clone(&self.event_bus),
-            ));
-            let agent = Agent::builder()
-                .id(agent_id)
-                .name(agent_name.as_str())
-                .system_prompt(definition.prompt)
-                .llm_provider(provider)
-                .tool_registry(registry)
-                .event_bus(agent_bus)
-                .store(Arc::clone(&store))
-                .build()?;
-            *created_agent
-                .lock()
-                .expect("created agent lock should not be poisoned") = Some(agent.clone());
-            let run_id = agent.run_turn(ChatMessage::user(text)).await?;
-            durable_accepted.store(true, Ordering::Release);
-            let hosted = Arc::new(HostedAgent {
-                agent,
-                store,
-                needs_resume: AtomicBool::new(false),
-            });
-            let mut agents = self
-                .agents
-                .write()
-                .expect("host registry lock should not be poisoned");
-            if self.is_shutting_down() {
-                hosted.agent.stop();
+                .await);
+            }
+            CreationStage::Shutdown => return Err(HostError::HostShuttingDown),
+            CreationStage::Timeout => return Err(HostError::CreationStageTimeout),
+        }
+
+        let store = Arc::new(FilesystemAgentStore::new(
+            Arc::clone(&self.filesystem),
+            root.clone(),
+        ));
+        match creation_stage(
+            &self.shutdown,
+            store.initialize(agent_id, agent_name.as_str().to_owned()),
+        )
+        .await
+        {
+            CreationStage::Completed(Ok(_)) => {}
+            CreationStage::Completed(Err(error)) => {
+                return Err(creation_error_with_cleanup(
+                    self.filesystem.as_ref(),
+                    &root,
+                    &definition_path,
+                    error.into(),
+                )
+                .await);
+            }
+            CreationStage::Shutdown => return Err(HostError::HostShuttingDown),
+            CreationStage::Timeout => return Err(HostError::CreationStageTimeout),
+        }
+
+        let store: Arc<dyn AgentStore> = store;
+        let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
+            Arc::clone(&store),
+            Arc::clone(&self.event_bus),
+        ));
+        let agent = match Agent::builder()
+            .id(agent_id)
+            .name(agent_name.as_str())
+            .system_prompt(definition.prompt)
+            .llm_provider(provider)
+            .tool_registry(registry)
+            .event_bus(agent_bus)
+            .store(Arc::clone(&store))
+            .build()
+        {
+            Ok(agent) => agent,
+            Err(error) => {
+                return Err(creation_error_with_cleanup(
+                    self.filesystem.as_ref(),
+                    &root,
+                    &definition_path,
+                    error.into(),
+                )
+                .await);
+            }
+        };
+        let run_id = match creation_stage(&self.shutdown, agent.run_turn(ChatMessage::user(text)))
+            .await
+        {
+            CreationStage::Completed(Ok(run_id)) => run_id,
+            CreationStage::Completed(Err(error)) => {
+                agent.stop();
+                let creation = HostError::from(error);
+                if creation_messages_are_definitely_empty(self.filesystem.as_ref(), &root).await {
+                    return Err(creation_error_with_cleanup(
+                        self.filesystem.as_ref(),
+                        &root,
+                        &definition_path,
+                        creation,
+                    )
+                    .await);
+                }
+                return Err(creation);
+            }
+            CreationStage::Shutdown => {
+                agent.stop();
                 return Err(HostError::HostShuttingDown);
             }
-            agents.insert(agent_id, hosted);
-            Ok(CreatedAgent {
-                agent_id,
-                agent_name,
-                run_id,
-            })
-        };
-        let result = tokio::select! {
-            biased;
-            () = shutdown.cancelled() => Err(HostError::HostShuttingDown),
-            result = operation => result,
-        };
-
-        if let Some(agent) = created_agent
-            .lock()
-            .expect("created agent lock should not be poisoned")
-            .as_ref()
-            && self.is_shutting_down()
-        {
-            agent.stop();
-        }
-
-        match result {
-            Ok(created) => Ok(created),
-            Err(creation) if durable_accepted.load(Ordering::Acquire) => Err(creation),
-            Err(creation) if root_may_exist.load(Ordering::Acquire) => {
-                match cleanup_agent_files_bounded(self.filesystem.as_ref(), &root, &definition_path)
-                    .await
-                {
-                    Ok(()) => Err(creation),
-                    Err(cleanup) => Err(HostError::CreationCleanup {
-                        creation: Box::new(creation),
-                        cleanup,
-                    }),
-                }
+            CreationStage::Timeout => {
+                agent.stop();
+                return Err(HostError::CreationStageTimeout);
             }
-            Err(creation) => Err(creation),
+        };
+
+        let hosted = Arc::new(HostedAgent {
+            agent,
+            store,
+            needs_resume: AtomicBool::new(false),
+        });
+        let mut agents = self
+            .agents
+            .write()
+            .expect("host registry lock should not be poisoned");
+        if self.is_shutting_down() {
+            hosted.agent.stop();
+            return Err(HostError::HostShuttingDown);
         }
+        agents.insert(agent_id, hosted);
+        Ok(CreatedAgent {
+            agent_id,
+            agent_name,
+            run_id,
+        })
+    }
+}
+
+async fn creation_stage<T, E>(
+    shutdown: &CancellationToken,
+    future: impl Future<Output = Result<T, E>>,
+) -> CreationStage<T, E> {
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => CreationStage::Shutdown,
+        result = timeout(CREATION_STAGE_GRACE, future) => match result {
+            Ok(result) => CreationStage::Completed(result),
+            Err(_) => CreationStage::Timeout,
+        },
+    }
+}
+
+async fn creation_error_with_cleanup(
+    filesystem: &dyn Filesystem,
+    root: &VirtualPath,
+    definition_path: &VirtualPath,
+    creation: HostError,
+) -> HostError {
+    match cleanup_agent_files_bounded(filesystem, root, definition_path).await {
+        Ok(()) => creation,
+        Err(cleanup) => HostError::CreationCleanup {
+            creation: Box::new(creation),
+            cleanup,
+        },
+    }
+}
+
+async fn creation_messages_are_definitely_empty(
+    filesystem: &dyn Filesystem,
+    root: &VirtualPath,
+) -> bool {
+    let Ok(messages_path) = child_path(root, "messages") else {
+        return false;
+    };
+    match timeout(CREATION_CLEANUP_GRACE, filesystem.list_dir(&messages_path)).await {
+        Ok(Ok(entries)) => entries.is_empty(),
+        Ok(Err(FilesystemError::NotFound { .. })) => true,
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 

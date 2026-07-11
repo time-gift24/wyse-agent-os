@@ -9,5 +9,6 @@
 - failed/cancelled turn 中已经持久化的完整 user、assistant、tool 消息属于后续上下文；同进程后续请求必须从 Store 刷新到与重启恢复相同的 history，流式 partial delta 不进入 history。
 - `HostState` 持有共享 shutdown token。shutdown 关闭 admission 后结束 SSE，在独立固定时限内 drain 已准入请求，再 stop 所有 active Agent 并有界等待终态持久化；超时保留 durable `running`，由下次启动显式 resume。
 - create、message 和 resume 在任何持久化或 provider I/O 前必须取得 atomic admission RAII，并在 pending Store/EventStreamBus 工作中观察 shutdown token。admission drain 超时后的 late acceptance 必须自我 stop；create 还必须在 registry write lock 内重查 closed，禁止 snapshot 后注册。关闭后的新 durable work 返回安全稳定的 503，且不得触碰 Store/history。
-- persisted `running` 若 current turn 在固定 Store barrier 内完全没有任何 durable message，`/resume` 可把精确 Started-only 状态 terminalize 为 `failed`，保留 run/turn/usage/history/frontier；只要 current turn 存在任何消息，就必须走正常 resume 校验，不能用 reconciliation 掩盖损坏。
+- create 的持久化 mutation 必须拆成有界阶段，并在每个 `await` 前进入“可能已写入”状态；shutdown、timeout 或检查失败都必须 fail-safe 保留 definition/Store/history，只有 mutation 已确定结束且能确定零消息时才能 cleanup。Store commit 后的 NATS best-effort forward 必须内部有界，不能决定 durable acceptance。
+- persisted `running` 只有在 run ID 和 turn ID 都存在、且 current turn 在固定 Store barrier 内完全没有任何 durable message 时，`/resume` 才可把精确 Started-only 状态 terminalize 为 `failed`，保留 run/turn/usage/history/frontier；任一 ID 缺失或 current turn 存在任何消息都必须走正常 resume 校验，不能用 reconciliation 掩盖损坏。
 - HTTP 最终错误边界只记录一次安全的结构化 operational error；span 可记录 agent/run/cursor 等 ID，不得记录 message、prompt、tool args、secret 或 host path。

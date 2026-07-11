@@ -97,6 +97,9 @@ pub enum HostError {
     /// The host has started shutdown and no longer accepts durable work.
     #[error("host is shutting down")]
     HostShuttingDown,
+    /// An agent creation persistence stage did not finish within its fixed safety bound.
+    #[error("agent creation persistence stage timed out")]
+    CreationStageTimeout,
     /// Agent creation failed and the partial state could not be fully removed.
     #[error("agent creation failed and cleanup failed: {cleanup}")]
     CreationCleanup {

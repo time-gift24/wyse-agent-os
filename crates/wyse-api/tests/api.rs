@@ -399,6 +399,11 @@ struct PendingPublishBus {
     release: tokio::sync::Notify,
 }
 
+struct PendingSecondPublishBus {
+    publish_count: AtomicUsize,
+    second_entered: tokio::sync::Notify,
+}
+
 impl PendingPublishBus {
     fn new() -> Self {
         Self {
@@ -408,11 +413,39 @@ impl PendingPublishBus {
     }
 }
 
+impl PendingSecondPublishBus {
+    fn new() -> Self {
+        Self {
+            publish_count: AtomicUsize::new(0),
+            second_entered: tokio::sync::Notify::new(),
+        }
+    }
+}
+
 #[async_trait]
 impl EventStreamBus for PendingPublishBus {
     async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
         self.entered.notify_one();
         self.release.notified().await;
+        Ok(())
+    }
+
+    async fn subscribe_agent(
+        &self,
+        _agent_id: AgentId,
+        _replay_start: ReplayStart,
+    ) -> Result<EventStream, EventStreamBusError> {
+        Ok(Box::pin(stream::pending()))
+    }
+}
+
+#[async_trait]
+impl EventStreamBus for PendingSecondPublishBus {
+    async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        if self.publish_count.fetch_add(1, Ordering::SeqCst) == 1 {
+            self.second_entered.notify_one();
+            futures_util::future::pending().await
+        }
         Ok(())
     }
 
@@ -836,6 +869,34 @@ struct AdmissionFilesystem {
     operations: AtomicUsize,
 }
 
+#[derive(Clone, Copy)]
+enum PendingCreationStage {
+    RootCreate,
+    DefinitionPut,
+}
+
+struct PendingCreationFilesystem {
+    inner: Arc<dyn Filesystem>,
+    stage: PendingCreationStage,
+    block_once: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    remove_operations: AtomicUsize,
+}
+
+impl PendingCreationFilesystem {
+    fn new(inner: Arc<dyn Filesystem>, stage: PendingCreationStage) -> Self {
+        Self {
+            inner,
+            stage,
+            block_once: AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            remove_operations: AtomicUsize::new(0),
+        }
+    }
+}
+
 impl AdmissionFilesystem {
     fn new(inner: Arc<dyn Filesystem>) -> Self {
         Self {
@@ -923,6 +984,72 @@ impl Filesystem for AdmissionFilesystem {
 
     async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.remove_dir(path).await
+    }
+}
+
+#[async_trait]
+impl Filesystem for PendingCreationFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let result = self.inner.put(path, entry, cas).await;
+        if matches!(self.stage, PendingCreationStage::DefinitionPut)
+            && path.as_str().ends_with("/definition.toml")
+            && self.block_once.swap(false, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        result
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, contents).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
+        self.inner.metadata(path).await
+    }
+
+    async fn create_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        let result = self.inner.create_dir(path).await;
+        if matches!(self.stage, PendingCreationStage::RootCreate)
+            && path.as_str().starts_with("/history/")
+            && self.block_once.swap(false, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        result
+    }
+
+    async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.remove_operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.remove_operations.fetch_add(1, Ordering::SeqCst);
         self.inner.remove_dir(path).await
     }
 }
@@ -1530,7 +1657,7 @@ async fn create_agent_cleans_preamble_failure_without_registering_agent() {
 }
 
 #[tokio::test]
-async fn create_agent_exposes_cleanup_list_and_remove_failures() {
+async fn create_agent_preserves_on_uncertain_inspection_and_exposes_remove_failures() {
     for failure in [
         CleanupFailure::ListMessages,
         CleanupFailure::RemoveMessagesDirectory,
@@ -1560,26 +1687,27 @@ async fn create_agent_exposes_cleanup_list_and_remove_failures() {
             .await
             .expect_err("creation and cleanup should fail");
 
-        let HostError::CreationCleanup { creation, cleanup } = &error else {
-            panic!("cleanup failure should be explicit");
-        };
-        assert!(matches!(creation.as_ref(), HostError::Agent(_)));
-        assert!(matches!(
-            (failure, cleanup),
-            (
-                CleanupFailure::ListMessages,
-                AgentCleanupError::ListMessages(_)
-            ) | (
-                CleanupFailure::RemoveMessagesDirectory,
-                AgentCleanupError::RemoveMessagesDirectory(_),
-            )
-        ));
-        assert_eq!(
-            std::error::Error::source(&error)
-                .expect("creation failure is retained")
-                .to_string(),
-            "agent operation failed"
-        );
+        match failure {
+            CleanupFailure::ListMessages => {
+                assert!(matches!(error, HostError::Agent(_)));
+            }
+            CleanupFailure::RemoveMessagesDirectory => {
+                let HostError::CreationCleanup { creation, cleanup } = &error else {
+                    panic!("cleanup failure should be explicit");
+                };
+                assert!(matches!(creation.as_ref(), HostError::Agent(_)));
+                assert!(matches!(
+                    cleanup,
+                    AgentCleanupError::RemoveMessagesDirectory(_)
+                ));
+                assert_eq!(
+                    std::error::Error::source(&error)
+                        .expect("creation failure is retained")
+                        .to_string(),
+                    "agent operation failed"
+                );
+            }
+        }
         let agent_id = filesystem.created_agent_id();
         assert!(host.agent(agent_id).is_none());
         assert!(
@@ -2122,6 +2250,50 @@ async fn resume_does_not_reconcile_a_current_turn_with_any_durable_invalid_messa
             .status,
         AgentStatus::Running
     );
+}
+
+#[tokio::test]
+async fn resume_does_not_reconcile_started_only_state_without_a_run_id() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let store = FilesystemAgentStore::new(
+        Arc::clone(&fixture.filesystem),
+        format!("/history/{agent_id}").parse().expect("root parses"),
+    );
+    let turn_id = TurnId::new();
+    store
+        .update_state(
+            AgentStatus::Running,
+            None,
+            Some(turn_id),
+            Default::default(),
+        )
+        .await
+        .expect("incomplete running state persists");
+    let host = fixture.restore_host().await.expect("host restores");
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/resume"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let persisted = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(persisted.status, AgentStatus::Running);
+    assert_eq!(persisted.run_id, None);
+    assert_eq!(persisted.turn_id, Some(turn_id));
 }
 
 #[tokio::test]
@@ -3068,7 +3240,7 @@ async fn shutdown_rejects_new_create_message_and_resume_without_store_io() {
 }
 
 #[tokio::test]
-async fn shutdown_cancels_pending_create_event_publish_and_never_registers_late() {
+async fn shutdown_preserves_uncertain_create_when_started_forwarding_is_pending() {
     let fixture = Fixture::new().await;
     fixture.persist_template("coding-agent", "\"echo\"");
     let bus = Arc::new(PendingPublishBus::new());
@@ -3109,13 +3281,208 @@ async fn shutdown_cancels_pending_create_event_publish_and_never_registers_late(
     bus.release.notify_one();
     tokio::task::yield_now().await;
 
+    let root = fs::read_dir(fixture.root.join("history"))
+        .expect("history is readable")
+        .next()
+        .expect("uncertain create is preserved")
+        .expect("agent directory is readable")
+        .path();
+    assert!(root.join("definition.toml").exists());
+    assert!(root.join("agent.json").exists());
+}
+
+#[tokio::test]
+async fn shutdown_preserves_a_created_agent_when_message_forwarding_is_pending() {
+    let fixture = Fixture::new().await;
+    fixture.persist_template("coding-agent", "\"echo\"");
+    let bus = Arc::new(PendingSecondPublishBus::new());
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::clone(&bus) as Arc<dyn EventStreamBus>,
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let app = router(Arc::clone(&host));
+    let request = tokio::spawn(async move {
+        app.oneshot(
+            Request::post("/v1/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"agent_name": "coding-agent", "text": "durable"}).to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes")
+    });
+    timeout(Duration::from_secs(1), bus.second_entered.notified())
+        .await
+        .expect("message is committed before forwarding blocks");
+    let agent_id: AgentId = fs::read_dir(fixture.root.join("history"))
+        .expect("history is readable")
+        .next()
+        .expect("agent directory exists")
+        .expect("agent directory is readable")
+        .file_name()
+        .to_str()
+        .expect("agent directory is utf-8")
+        .parse()
+        .expect("agent id parses");
+    let root = fixture.root.join("history").join(agent_id.to_string());
+    assert!(root.join("definition.toml").exists());
+    assert!(root.join("agent.json").exists());
+    assert!(root.join("messages/1.json").exists());
+
+    timeout(Duration::from_secs(2), host.shutdown())
+        .await
+        .expect("shutdown remains bounded");
+    let response = request.await.expect("request task completes");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(root.join("definition.toml").exists());
+    assert!(root.join("agent.json").exists());
+    assert!(root.join("messages/1.json").exists());
+
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let restored = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("preserved agent restores");
     assert!(
-        fs::read_dir(fixture.root.join("history"))
+        restored
+            .agent(agent_id)
+            .expect("agent restores")
+            .needs_resume()
+    );
+    let response = router(restored)
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/resume"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("resume completes");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn shutdown_never_cleans_a_cancelled_in_flight_creation_mutation() {
+    for stage in [
+        PendingCreationStage::RootCreate,
+        PendingCreationStage::DefinitionPut,
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.persist_template("coding-agent", "\"echo\"");
+        let filesystem = Arc::new(PendingCreationFilesystem::new(
+            Arc::clone(&fixture.filesystem) as Arc<dyn Filesystem>,
+            stage,
+        ));
+        let mut providers = LlmProviderManager::new();
+        providers
+            .register(Arc::new(TestProvider(fixture.model.clone())))
+            .expect("provider registers");
+        let host = HostState::restore(
+            fixture.config.clone(),
+            Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+            Arc::new(InMemoryEventStreamBus::default()),
+            providers,
+        )
+        .await
+        .expect("host restores");
+        let request = tokio::spawn({
+            let host = Arc::clone(&host);
+            async move {
+                host.create_agent(
+                    "coding-agent".parse().expect("name parses"),
+                    "new".to_owned(),
+                )
+                .await
+            }
+        });
+        timeout(Duration::from_secs(1), filesystem.entered.notified())
+            .await
+            .expect("creation mutation becomes pending after its side effect");
+        let root = fs::read_dir(fixture.root.join("history"))
             .expect("history is readable")
             .next()
-            .is_none(),
-        "cancelled create must clean its unaccepted directory"
-    );
+            .expect("agent directory exists")
+            .expect("agent directory is readable")
+            .path();
+
+        timeout(Duration::from_secs(2), host.shutdown())
+            .await
+            .expect("shutdown remains bounded");
+        assert!(matches!(
+            request.await.expect("request task completes"),
+            Err(HostError::HostShuttingDown)
+        ));
+        assert_eq!(filesystem.remove_operations.load(Ordering::SeqCst), 0);
+        assert!(root.exists());
+        if matches!(stage, PendingCreationStage::DefinitionPut) {
+            assert!(root.join("definition.toml").exists());
+        }
+        filesystem.release.notify_one();
+        tokio::task::yield_now().await;
+        assert!(root.exists());
+    }
+}
+
+#[tokio::test]
+async fn creation_mutation_timeout_preserves_the_uncertain_side_effect() {
+    let fixture = Fixture::new().await;
+    fixture.persist_template("coding-agent", "\"echo\"");
+    let filesystem = Arc::new(PendingCreationFilesystem::new(
+        Arc::clone(&fixture.filesystem) as Arc<dyn Filesystem>,
+        PendingCreationStage::DefinitionPut,
+    ));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+
+    let error = timeout(
+        Duration::from_secs(2),
+        host.create_agent(
+            "coding-agent".parse().expect("name parses"),
+            "new".to_owned(),
+        ),
+    )
+    .await
+    .expect("creation stage is internally bounded")
+    .expect_err("pending mutation times out");
+
+    assert!(matches!(error, HostError::CreationStageTimeout));
+    assert_eq!(filesystem.remove_operations.load(Ordering::SeqCst), 0);
+    let root = fs::read_dir(fixture.root.join("history"))
+        .expect("history is readable")
+        .next()
+        .expect("uncertain agent directory is preserved")
+        .expect("agent directory is readable")
+        .path();
+    assert!(root.join("definition.toml").exists());
+    filesystem.release.notify_one();
+    tokio::task::yield_now().await;
+    assert!(root.join("definition.toml").exists());
 }
 
 #[test]

@@ -418,7 +418,7 @@ async fn reconcile_started_only(
     hosted: &crate::HostedAgent,
     persisted: &AgentState,
 ) -> Result<(), HostError> {
-    let Some(current_turn_id) = persisted.turn_id else {
+    let (Some(_), Some(current_turn_id)) = (persisted.run_id, persisted.turn_id) else {
         return Ok(());
     };
     let mut after_seq = 0;
@@ -597,7 +597,7 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             "resume_required",
             "agent has an unfinished persisted turn",
         ),
-        HostError::HostShuttingDown => (
+        HostError::HostShuttingDown | HostError::CreationStageTimeout => (
             StatusCode::SERVICE_UNAVAILABLE,
             "service_unavailable",
             "service is unavailable",
