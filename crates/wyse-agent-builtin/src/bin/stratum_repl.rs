@@ -10,8 +10,8 @@ use thiserror::Error;
 use wyse_agent::{Agent, AgentError};
 use wyse_agent_builtin::build_default_agent;
 use wyse_core::{
-    AgentEvent, AgentId, ChatContent, ChatMessage, ChatRole, DangerLevel, ModelId,
-    ModelIdParseError, ReplayStart, RuntimeEvent, ToolKind,
+    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatContent, ChatMessage, ChatRole,
+    DangerLevel, ModelId, ModelIdParseError, ReplayStart, RuntimeEvent, ToolKind,
 };
 use wyse_filesystem::{
     Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
@@ -122,10 +122,10 @@ async fn main() -> Result<(), ReplError> {
     let mut output = std::io::stdout();
     writeln!(output, "agent id: {}", session.agent_id)?;
     writeln!(output, "storage root: {}", session.storage_root.display())?;
-    restore_session(&session, args.debug, &mut output).await?;
 
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
+    restore_session(&session, &mut input, args.debug, &mut output).await?;
     let mut line = String::new();
     loop {
         write!(output, "> ")?;
@@ -137,11 +137,11 @@ async fn main() -> Result<(), ReplError> {
         if line.trim().is_empty() {
             continue;
         }
-        let input = line.trim_end_matches(['\r', '\n']);
-        if input == "/quit" {
+        let turn_input = line.trim_end_matches(['\r', '\n']);
+        if turn_input == "/quit" {
             break;
         }
-        drive_turn(&session, input, args.debug, &mut output).await?;
+        drive_turn(&session, turn_input, &mut input, args.debug, &mut output).await?;
         output.flush()?;
     }
     Ok(())
@@ -192,8 +192,9 @@ async fn compose_session(
     })
 }
 
-async fn restore_session<W: Write>(
+async fn restore_session<R: BufRead, W: Write>(
     session: &Session,
+    input: &mut R,
     debug: bool,
     output: &mut W,
 ) -> Result<(), ReplError> {
@@ -204,16 +205,17 @@ async fn restore_session<W: Write>(
             .subscribe_agent(session.agent_id, ReplayStart::New)
             .await?;
         session.agent.resume().await?;
-        consume_turn_events(&mut events, debug, output).await
+        consume_turn_events(session, &mut events, input, debug, output).await
     } else {
         session.agent.load_history().await?;
         Ok(())
     }
 }
 
-async fn drive_turn<W: Write>(
+async fn drive_turn<R: BufRead, W: Write>(
     session: &Session,
-    input: &str,
+    turn_input: &str,
+    input: &mut R,
     debug: bool,
     output: &mut W,
 ) -> Result<(), ReplError> {
@@ -221,12 +223,17 @@ async fn drive_turn<W: Write>(
         .bus
         .subscribe_agent(session.agent_id, ReplayStart::New)
         .await?;
-    session.agent.run_turn(ChatMessage::user(input)).await?;
-    consume_turn_events(&mut events, debug, output).await
+    session
+        .agent
+        .run_turn(ChatMessage::user(turn_input))
+        .await?;
+    consume_turn_events(session, &mut events, input, debug, output).await
 }
 
-async fn consume_turn_events<W: Write>(
+async fn consume_turn_events<R: BufRead, W: Write>(
+    session: &Session,
     events: &mut EventStream,
+    input: &mut R,
     debug: bool,
     output: &mut W,
 ) -> Result<(), ReplError> {
@@ -240,6 +247,23 @@ async fn consume_turn_events<W: Write>(
             continue;
         };
         match event {
+            AgentEvent::ToolApprovalRequested {
+                approval_id,
+                tool_name,
+                arguments,
+                tool_kind,
+                danger_level,
+                ..
+            } => {
+                writeln!(
+                    output,
+                    "approval {approval_id}: tool {tool_name} ({tool_kind:?}, {danger_level:?})"
+                )?;
+                output.write_all(b"arguments: ")?;
+                serde_json::to_writer(&mut *output, arguments)?;
+                output.write_all(b"\n")?;
+                resolve_approval(&session.agent, *approval_id, input, output).await?;
+            }
             AgentEvent::Message { message, .. } if message.role == ChatRole::Assistant => {
                 match &message.content {
                     ChatContent::Text(text) => output.write_all(text.as_bytes())?,
@@ -261,6 +285,31 @@ async fn consume_turn_events<W: Write>(
         }
     }
     Err(ReplError::EventStreamClosed)
+}
+
+async fn resolve_approval<R: BufRead, W: Write>(
+    agent: &Agent,
+    approval_id: ApprovalId,
+    input: &mut R,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    loop {
+        writeln!(output, "enter approve or reject")?;
+        output.flush()?;
+        let mut line = String::new();
+        let bytes_read = input.read_line(&mut line)?;
+        let decision = match line.trim() {
+            "approve" => ApprovalDecision::Approve,
+            "reject" => ApprovalDecision::Reject,
+            _ if bytes_read == 0 => ApprovalDecision::Reject,
+            _ => {
+                writeln!(output, "enter approve or reject")?;
+                continue;
+            }
+        };
+        agent.resolve_tool_approval(approval_id, decision).await?;
+        return Ok(());
+    }
 }
 
 fn approval_registry() -> Result<Arc<dyn ToolRegistry>, ReplError> {
@@ -319,7 +368,7 @@ fn select_provider(config: &Config) -> Result<Arc<dyn LlmProvider>, ReplError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{fs, io::Cursor, sync::Arc};
 
     use super::{
         Args, Config, ReplError, Session, agent_root, approval_registry, consume_turn_events,
@@ -327,7 +376,8 @@ mod tests {
     };
     use clap::Parser;
     use wyse_core::{
-        AgentEvent, AgentId, DangerLevel, RuntimeEvent, StreamEnvelope, ToolKind, ToolName,
+        AgentEvent, AgentId, CallId, ChatContent, ChatRole, DangerLevel, RuntimeEvent,
+        StreamEnvelope, ToolCallDelta, ToolKind, ToolName,
     };
     use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
     use wyse_infra::{EventStream, EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
@@ -403,6 +453,46 @@ mod tests {
         ])
     }
 
+    fn approval_provider() -> MockLlmProvider {
+        MockLlmProvider::new()
+            .with_stream_events(vec![
+                ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    call_id: Some(CallId::from("echo-1")),
+                    name: Some("echo".to_owned()),
+                    arguments_delta: r#"{"message":"hello"}"#.to_owned(),
+                }),
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::ToolCalls,
+                    usage: None,
+                },
+            ])
+            .with_stream_events(vec![
+                ChatStreamEvent::TextDelta {
+                    delta: "done".to_owned(),
+                },
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                },
+            ])
+    }
+
+    fn persisted_messages(
+        root: &std::path::Path,
+        agent_id: AgentId,
+        last_seq: u64,
+    ) -> Result<Vec<StreamEnvelope>, ReplError> {
+        (1..=last_seq)
+            .map(|seq| {
+                Ok(serde_json::from_slice(&fs::read(
+                    root.join(agent_id.to_string())
+                        .join(format!("messages/{seq}.json")),
+                )?)?)
+            })
+            .collect()
+    }
+
     fn assistant_messages(envelopes: &[StreamEnvelope]) -> Vec<StreamEnvelope> {
         envelopes
             .iter()
@@ -417,6 +507,136 @@ mod tests {
             })
             .cloned()
             .collect()
+    }
+
+    #[tokio::test]
+    async fn approval_approves_echo_and_persists_the_tool_result() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, approval_provider(), true).await?;
+        let mut input = Cursor::new(b"approve\n");
+        let mut output = Vec::new();
+
+        drive_turn(&session, "use echo", &mut input, true, &mut output).await?;
+
+        let output = String::from_utf8(output).expect("renderer writes UTF-8");
+        assert!(output.contains("approval"));
+        assert!(output.contains("done"));
+        let envelopes = output
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(serde_json::from_str::<StreamEnvelope>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(envelopes.iter().any(|envelope| matches!(
+            envelope.event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalRequested { .. },
+                ..
+            }
+        )));
+        assert!(envelopes.iter().any(|envelope| matches!(
+            envelope.event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalResolved {
+                    decision: wyse_core::ApprovalDecision::Approve,
+                    ..
+                },
+                ..
+            }
+        )));
+        let persisted = persisted_messages(&root, agent_id, 4)?;
+        assert!(matches!(
+            &persisted[2].event,
+            RuntimeEvent::Agent {
+                agent_id: persisted_agent_id,
+                event: AgentEvent::Message { message, .. },
+            } if *persisted_agent_id == agent_id
+                && message.role == ChatRole::Tool
+                && message.content == ChatContent::Json(serde_json::json!({ "message": "hello" }))
+                && message.tool_call_id == Some(CallId::from("echo-1"))
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_rejects_echo_and_persists_the_runtime_rejection() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, approval_provider(), true).await?;
+        let mut input = Cursor::new(b"reject\n");
+        let mut output = Vec::new();
+
+        drive_turn(&session, "use echo", &mut input, false, &mut output).await?;
+
+        let persisted = persisted_messages(&root, agent_id, 4)?;
+        assert!(matches!(
+            &persisted[2].event,
+            RuntimeEvent::Agent {
+                agent_id: persisted_agent_id,
+                event: AgentEvent::Message { message, .. },
+            } if *persisted_agent_id == agent_id
+                && message.role == ChatRole::Tool
+                && message.content == ChatContent::Json(serde_json::json!({
+                    "error": {
+                        "type": "approval_rejected",
+                        "message": "user rejected tool call"
+                    }
+                }))
+                && message.tool_call_id == Some(CallId::from("echo-1"))
+        ));
+        assert!(matches!(
+            &persisted[3].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Message { message, .. },
+                ..
+            } if message.role == ChatRole::Assistant && message.content == ChatContent::Text("done".to_owned())
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_rejects_echo_when_input_reaches_eof() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, approval_provider(), true).await?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        drive_turn(&session, "use echo", &mut input, false, &mut output).await?;
+
+        let persisted = persisted_messages(&root, agent_id, 4)?;
+        assert!(matches!(
+            &persisted[2].event,
+            RuntimeEvent::Agent {
+                agent_id: persisted_agent_id,
+                event: AgentEvent::Message { message, .. },
+            } if *persisted_agent_id == agent_id
+                && message.role == ChatRole::Tool
+                && message.content == ChatContent::Json(serde_json::json!({
+                    "error": {
+                        "type": "approval_rejected",
+                        "message": "user rejected tool call"
+                    }
+                }))
+                && message.tool_call_id == Some(CallId::from("echo-1"))
+        ));
+        assert!(matches!(
+            &persisted[3].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Message { message, .. },
+                ..
+            } if message.role == ChatRole::Assistant && message.content == ChatContent::Text("done".to_owned())
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[tokio::test]
@@ -446,9 +666,10 @@ mod tests {
             ]);
         let session = test_session(&root, agent_id, provider, true).await?;
         let mut output = Vec::new();
+        let mut input = Cursor::new(Vec::<u8>::new());
 
-        drive_turn(&session, "first input", false, &mut output).await?;
-        drive_turn(&session, "second input", false, &mut output).await?;
+        drive_turn(&session, "first input", &mut input, false, &mut output).await?;
+        drive_turn(&session, "second input", &mut input, false, &mut output).await?;
 
         let output = String::from_utf8(output).expect("renderer writes UTF-8");
         assert!(output.contains("first response"));
@@ -486,8 +707,9 @@ mod tests {
         fs::create_dir(&root)?;
         let session = test_session(&root, agent_id, mock_response("debug response"), true).await?;
         let mut output = Vec::new();
+        let mut input = Cursor::new(Vec::<u8>::new());
 
-        drive_turn(&session, "debug input", true, &mut output).await?;
+        drive_turn(&session, "debug input", &mut input, true, &mut output).await?;
 
         let envelopes = String::from_utf8(output)
             .expect("debug renderer writes UTF-8")
@@ -519,12 +741,20 @@ mod tests {
         let root = std::env::temp_dir().join(agent_id.to_string());
         fs::create_dir(&root)?;
         let first = test_session(&root, agent_id, mock_response("first response"), true).await?;
-        drive_turn(&first, "first input", false, &mut Vec::new()).await?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        drive_turn(&first, "first input", &mut input, false, &mut Vec::new()).await?;
 
         let restored =
             test_session(&root, agent_id, mock_response("resumed response"), false).await?;
-        restore_session(&restored, false, &mut Vec::new()).await?;
-        drive_turn(&restored, "second input", false, &mut Vec::new()).await?;
+        restore_session(&restored, &mut input, false, &mut Vec::new()).await?;
+        drive_turn(
+            &restored,
+            "second input",
+            &mut input,
+            false,
+            &mut Vec::new(),
+        )
+        .await?;
 
         let state: AgentState = serde_json::from_slice(&fs::read(
             root.join(agent_id.to_string()).join("agent.json"),
@@ -552,7 +782,15 @@ mod tests {
         let root = std::env::temp_dir().join(agent_id.to_string());
         fs::create_dir(&root)?;
         let initial = test_session(&root, agent_id, MockLlmProvider::new(), true).await?;
-        drive_turn(&initial, "interrupted input", false, &mut Vec::new()).await?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        drive_turn(
+            &initial,
+            "interrupted input",
+            &mut input,
+            false,
+            &mut Vec::new(),
+        )
+        .await?;
         let state = initial.store.load_agent().await?;
         assert_eq!(state.status, AgentStatus::Failed);
         assert_eq!(state.last_seq, 1);
@@ -573,7 +811,7 @@ mod tests {
         let restored =
             test_session(&root, agent_id, mock_response("resumed response"), false).await?;
         let mut output = Vec::new();
-        restore_session(&restored, false, &mut output).await?;
+        restore_session(&restored, &mut input, false, &mut output).await?;
 
         assert!(
             String::from_utf8(output)
@@ -591,8 +829,13 @@ mod tests {
     #[tokio::test]
     async fn consume_turn_events_rejects_stream_closure_without_terminal_event()
     -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, MockLlmProvider::new(), true).await?;
         let mut events: EventStream = Box::pin(futures_util::stream::empty());
-        let error = consume_turn_events(&mut events, false, &mut Vec::new())
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let error = consume_turn_events(&session, &mut events, &mut input, false, &mut Vec::new())
             .await
             .expect_err("stream closure before terminal event must fail");
 
@@ -600,6 +843,7 @@ mod tests {
             error.to_string(),
             "event stream closed before a terminal agent event"
         );
+        let _ = fs::remove_dir_all(root);
         Ok(())
     }
 
