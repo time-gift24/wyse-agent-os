@@ -739,6 +739,105 @@ struct CreationOperationFilesystem {
     failure: CreationOperationFailure,
 }
 
+struct AdmissionFilesystem {
+    inner: Arc<dyn Filesystem>,
+    block_next_agent_get: AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    operations: AtomicUsize,
+}
+
+impl AdmissionFilesystem {
+    fn new(inner: Arc<dyn Filesystem>) -> Self {
+        Self {
+            inner,
+            block_next_agent_get: AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            operations: AtomicUsize::new(0),
+        }
+    }
+
+    fn block_next_agent_get(&self) {
+        self.block_next_agent_get.store(true, Ordering::SeqCst);
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+
+    fn reset_operations(&self) {
+        self.operations.store(0, Ordering::SeqCst);
+    }
+
+    fn operations(&self) -> usize {
+        self.operations.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Filesystem for AdmissionFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        if path.as_str().ends_with("/agent.json")
+            && self.block_next_agent_get.swap(false, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.get(path).await
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.write_file(path, contents).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_dir(path).await
+    }
+
+    async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.metadata(path).await
+    }
+
+    async fn create_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.create_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.operations.fetch_add(1, Ordering::SeqCst);
+        self.inner.remove_dir(path).await
+    }
+}
+
 #[async_trait]
 impl Filesystem for CreationOperationFilesystem {
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
@@ -2595,6 +2694,123 @@ async fn shutdown_stops_an_active_turn_and_waits_for_its_terminal_state() {
             .status,
         AgentStatus::Cancelled
     );
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_an_admitted_request_before_snapshot_and_stop() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let filesystem = Arc::new(AdmissionFilesystem::new(Arc::clone(&fixture.filesystem)));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(PendingProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    filesystem.block_next_agent_get();
+    let app = router(Arc::clone(&host));
+    let request = tokio::spawn(async move {
+        app.oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "wait"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes")
+    });
+    timeout(Duration::from_secs(1), filesystem.entered.notified())
+        .await
+        .expect("request enters Store preamble");
+
+    let shutdown_host = Arc::clone(&host);
+    let mut shutdown = tokio::spawn(async move { shutdown_host.shutdown().await });
+    assert!(
+        timeout(Duration::from_millis(25), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown must wait for the admitted request"
+    );
+    filesystem.release();
+
+    let response = request.await.expect("request task completes");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    timeout(Duration::from_secs(1), &mut shutdown)
+        .await
+        .expect("shutdown completes after admission drains")
+        .expect("shutdown task succeeds");
+    assert_eq!(
+        host.agent(agent_id)
+            .expect("agent exists")
+            .store
+            .load_agent()
+            .await
+            .expect("state loads")
+            .status,
+        AgentStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn shutdown_rejects_new_create_message_and_resume_without_store_io() {
+    let fixture = Fixture::new().await;
+    fixture.persist_template("coding-agent", "\"echo\"");
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let filesystem = Arc::new(AdmissionFilesystem::new(Arc::clone(&fixture.filesystem)));
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    host.shutdown().await;
+    filesystem.reset_operations();
+    let app = router(host);
+
+    for request in [
+        Request::post("/v1/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"agent_name": "coding-agent", "text": "new"}).to_string(),
+            ))
+            .expect("create request builds"),
+        Request::post(format!("/v1/agents/{agent_id}/messages"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"text": "new"}).to_string()))
+            .expect("message request builds"),
+        Request::post(format!("/v1/agents/{agent_id}/resume"))
+            .body(Body::empty())
+            .expect("resume request builds"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable");
+        let body: Value = serde_json::from_slice(&body).expect("body is json");
+        assert_eq!(body["error"]["code"], "service_unavailable");
+    }
+    assert_eq!(filesystem.operations(), 0);
 }
 
 #[test]

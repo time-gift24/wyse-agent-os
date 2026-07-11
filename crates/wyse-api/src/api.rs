@@ -333,6 +333,7 @@ async fn post_message(
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
     let request = json_request(request)?;
+    let _admission = state.admit()?;
     if request.text.trim().is_empty() {
         return Err(HostError::InvalidMessage);
     }
@@ -358,6 +359,7 @@ async fn resume_agent(
 ) -> Result<(StatusCode, Json<RunAccepted>), HostError> {
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
+    let _admission = state.admit()?;
     let hosted = find_agent(&state, agent_id)?;
     let persisted = hosted.store.load_agent().await?;
     if persisted.status != AgentStatus::Running {
@@ -507,6 +509,11 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             StatusCode::CONFLICT,
             "resume_required",
             "agent has an unfinished persisted turn",
+        ),
+        HostError::HostShuttingDown => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_unavailable",
+            "service is unavailable",
         ),
         HostError::EmptyText => (
             StatusCode::BAD_REQUEST,

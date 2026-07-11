@@ -368,13 +368,19 @@ impl Agent {
     }
 
     async fn finish_background_continuation(&self, run_id: RunId, result: Result<(), AgentError>) {
-        if let Err(error) = &result {
-            tracing::error!(
+        match &result {
+            Err(AgentError::Cancelled) => tracing::debug!(
+                agent_id = %self.id,
+                run_id = %run_id,
+                "agent continuation cancelled"
+            ),
+            Err(error) => tracing::error!(
                 agent_id = %self.id,
                 run_id = %run_id,
                 error_kind = continuation_error_kind(error),
                 "agent continuation failed"
-            );
+            ),
+            Ok(()) => {}
         }
         let history = match self.store.load_agent().await {
             Ok(state) => self.load_complete_history(state.last_seq).await,
@@ -1133,6 +1139,11 @@ mod tests {
     #[test]
     fn continuation_error_logs_do_not_include_conversation_content() {
         let source = include_str!("definition.rs");
+        let cancelled_debug = ["Err(AgentError::Cancelled) => tracing::", "debug!"].concat();
+        assert!(
+            source.contains(&cancelled_debug),
+            "cancellation must be logged below error level"
+        );
         let needle = ["tracing::", "error!("].concat();
         let logs = source.split(&needle).skip(1);
         for log in logs {

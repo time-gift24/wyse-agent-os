@@ -91,6 +91,9 @@ pub enum HostError {
     /// A persisted running turn must be resumed before other run control.
     #[error("agent has an unfinished persisted turn")]
     ResumeRequired,
+    /// The host has started shutdown and no longer accepts durable work.
+    #[error("host is shutting down")]
+    HostShuttingDown,
     /// Agent creation failed and the partial state could not be fully removed.
     #[error("agent creation failed and cleanup failed: {cleanup}")]
     CreationCleanup {

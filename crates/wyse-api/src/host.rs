@@ -4,11 +4,14 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
-use tokio::time::{sleep, timeout};
+use tokio::{
+    sync::Notify,
+    time::{sleep, timeout},
+};
 use tokio_util::sync::CancellationToken;
 
 use wyse_agent::Agent;
@@ -48,6 +51,17 @@ pub struct HostState {
     )]
     config: Arc<Config>,
     shutdown: CancellationToken,
+    admission: Arc<AdmissionState>,
+}
+
+struct AdmissionState {
+    closed: AtomicBool,
+    active: AtomicUsize,
+    drained: Notify,
+}
+
+pub(crate) struct AdmissionGuard {
+    state: Arc<AdmissionState>,
 }
 
 /// One composed agent and its durable store.
@@ -84,6 +98,58 @@ impl HostedAgent {
 
     pub(crate) fn clear_needs_resume(&self) {
         self.needs_resume.store(false, Ordering::Release);
+    }
+}
+
+impl AdmissionState {
+    fn new() -> Self {
+        Self {
+            closed: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            drained: Notify::new(),
+        }
+    }
+
+    fn acquire(self: &Arc<Self>) -> Result<AdmissionGuard, HostError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostError::HostShuttingDown);
+        }
+        self.active.fetch_add(1, Ordering::AcqRel);
+        if self.closed.load(Ordering::Acquire) {
+            self.release();
+            return Err(HostError::HostShuttingDown);
+        }
+        Ok(AdmissionGuard {
+            state: Arc::clone(self),
+        })
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    async fn wait_until_drained(&self) {
+        loop {
+            let notified = self.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn release(&self) {
+        if self.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.drained.notify_waiters();
+        }
+    }
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        self.state.release();
     }
 }
 
@@ -175,6 +241,7 @@ impl HostState {
             providers: Arc::new(providers),
             config: Arc::new(config),
             shutdown: CancellationToken::new(),
+            admission: Arc::new(AdmissionState::new()),
         }))
     }
 
@@ -196,10 +263,16 @@ impl HostState {
         self.shutdown.clone()
     }
 
+    pub(crate) fn admit(&self) -> Result<AdmissionGuard, HostError> {
+        self.admission.acquire()
+    }
+
     /// Cancels HTTP streams and active turns, then waits up to the bounded grace period for
     /// terminal state persistence. A timed-out running state remains durable for explicit resume.
     pub async fn shutdown(&self) {
+        self.admission.close();
         self.shutdown.cancel();
+        self.admission.wait_until_drained().await;
         let agents = self
             .agents
             .read()
@@ -255,6 +328,7 @@ impl HostState {
         agent_name: AgentName,
         text: String,
     ) -> Result<CreatedAgent, HostError> {
+        let _admission = self.admit()?;
         if text.trim().is_empty() {
             return Err(HostError::EmptyText);
         }

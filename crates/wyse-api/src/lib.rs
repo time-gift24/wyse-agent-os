@@ -58,13 +58,20 @@ pub async fn serve(config: Config) -> Result<(), HostError> {
     let server = axum::serve(listener, router(Arc::clone(&state)))
         .with_graceful_shutdown(shutdown.cancelled_owned());
     let mut server = Box::pin(async move { server.await });
-    tokio::select! {
-        result = &mut server => result?,
+    let mut signal_result = None;
+    let server_result = tokio::select! {
+        result = &mut server => Some(result),
         signal = tokio::signal::ctrl_c() => {
-            signal?;
-            state.shutdown().await;
-            server.await?;
+            signal_result = Some(signal);
+            None
         }
+    };
+    state.shutdown().await;
+    if let Some(signal_result) = signal_result {
+        signal_result?;
+        server.await?;
+    } else if let Some(server_result) = server_result {
+        server_result?;
     }
     Ok(())
 }
