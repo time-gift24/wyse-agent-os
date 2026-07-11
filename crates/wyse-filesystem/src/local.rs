@@ -194,6 +194,9 @@ impl Filesystem for LocalFilesystem {
 
         tokio::task::spawn_blocking(move || {
             let host = host_path(&root, &path);
+            let mut records = records
+                .lock()
+                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
             let metadata = match std::fs::symlink_metadata(&host) {
                 Ok(metadata) => Some(metadata),
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
@@ -226,9 +229,6 @@ impl Filesystem for LocalFilesystem {
                 host
             };
 
-            let mut records = records
-                .lock()
-                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
             let current = if metadata.is_some() {
                 Some(match records.get(&path) {
                     Some(version) => *version,
@@ -456,6 +456,7 @@ fn file_type_from_file_type(file_type: &std::fs::FileType) -> FileType {
 mod tests {
     use super::*;
     use crate::{CasExpectation, Entry, Filesystem, VirtualPath};
+    use tokio::sync::Barrier;
 
     #[tokio::test]
     async fn reads_writes_lists_and_removes_inside_sandbox() {
@@ -537,6 +538,63 @@ mod tests {
             .expect_err("stale version is rejected");
 
         assert!(matches!(error, FilesystemError::VersionMismatch { .. }));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_absent_puts_allow_only_one_creator() {
+        let temp =
+            std::env::temp_dir().join(format!("wyse-fs-concurrent-cas-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(&temp)
+            .await
+            .expect("create temp root");
+        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let path = VirtualPath::try_from("/agent.json").expect("path is valid");
+        let barrier = Arc::new(Barrier::new(2));
+
+        let first = {
+            let filesystem = filesystem.clone();
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                filesystem
+                    .put(&path, Entry::new(b"first".to_vec()), CasExpectation::Absent)
+                    .await
+            })
+        };
+        let second = {
+            let filesystem = filesystem.clone();
+            let path = path.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                filesystem
+                    .put(
+                        &path,
+                        Entry::new(b"second".to_vec()),
+                        CasExpectation::Absent,
+                    )
+                    .await
+            })
+        };
+
+        let results = [
+            first.await.expect("first task completes"),
+            second.await.expect("second task completes"),
+        ];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(
+            results
+                .iter()
+                .any(|result| matches!(result, Err(FilesystemError::VersionMismatch { .. })))
+        );
+
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
 
