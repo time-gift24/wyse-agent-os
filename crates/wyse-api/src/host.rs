@@ -9,9 +9,9 @@ use std::{
 };
 
 use wyse_agent::Agent;
-use wyse_config::{Config, ConfigError, ResolvedAgentDefinition};
-use wyse_core::{AgentId, DangerLevel, ToolKind};
-use wyse_filesystem::{FileType, Filesystem, VirtualPath};
+use wyse_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
+use wyse_core::{AgentId, ChatMessage, DangerLevel, RunId, ToolKind};
+use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath};
 use wyse_infra::EventStreamBus;
 use wyse_llm::LlmProviderManager;
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus};
@@ -20,6 +20,7 @@ use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry
 use crate::HostError;
 
 const HISTORY_ROOT: &str = "/history";
+const TEMPLATE_ROOT: &str = "/templates";
 const DEFINITION_FILE: &str = "definition.toml";
 
 /// Shared runtime state for all recovered agents.
@@ -54,6 +55,18 @@ pub struct HostedAgent {
     /// Durable state and complete message history.
     pub store: Arc<dyn AgentStore>,
     needs_resume: AtomicBool,
+}
+
+/// Result of creating and starting a hosted agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CreatedAgent {
+    /// New agent identity.
+    pub agent_id: AgentId,
+    /// Resolved template name.
+    pub agent_name: AgentName,
+    /// Initial run identity.
+    pub run_id: RunId,
 }
 
 impl HostedAgent {
@@ -155,6 +168,120 @@ impl HostState {
             .get(&agent_id)
             .map(Arc::clone)
     }
+
+    /// Creates an agent and durably commits its initial user message before returning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError`] when the text is blank, the template cannot be resolved,
+    /// persistence or agent composition fails, or the required turn preamble cannot be
+    /// committed.
+    pub async fn create_agent(
+        &self,
+        agent_name: AgentName,
+        text: String,
+    ) -> Result<CreatedAgent, HostError> {
+        if text.trim().is_empty() {
+            return Err(HostError::EmptyText);
+        }
+
+        let template_path = template_path(&agent_name)?;
+        let template = match self.filesystem.read_file(&template_path).await {
+            Ok(template) => template,
+            Err(FilesystemError::NotFound { .. }) => {
+                return Err(HostError::TemplateNotFound { agent_name });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let template = std::str::from_utf8(&template)
+            .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
+        let definition = self.config.resolve_template(agent_name.clone(), template)?;
+        let encoded_definition = definition.encode()?.into_bytes();
+        let agent_id = AgentId::new();
+        let root = agent_root(agent_id)?;
+        let definition_path = child_path(&root, DEFINITION_FILE)?;
+        self.filesystem.create_dir(&root).await?;
+
+        let result = async {
+            self.filesystem
+                .put(
+                    &definition_path,
+                    Entry::new(encoded_definition),
+                    CasExpectation::Absent,
+                )
+                .await?;
+            let store = Arc::new(FilesystemAgentStore::new(
+                Arc::clone(&self.filesystem),
+                root.clone(),
+            ));
+            store
+                .initialize(agent_id, agent_name.as_str().to_owned())
+                .await?;
+            let store: Arc<dyn AgentStore> = store;
+            let provider = self.providers.get(&definition.model)?;
+            let registry = tool_registry(&definition)?;
+            let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
+                Arc::clone(&store),
+                Arc::clone(&self.event_bus),
+            ));
+            let agent = Agent::builder()
+                .id(agent_id)
+                .name(agent_name.as_str())
+                .system_prompt(definition.prompt)
+                .llm_provider(provider)
+                .tool_registry(registry)
+                .event_bus(agent_bus)
+                .store(Arc::clone(&store))
+                .build()?;
+            let run_id = agent.run_turn(ChatMessage::user(text)).await?;
+            let hosted = Arc::new(HostedAgent {
+                agent,
+                store,
+                needs_resume: AtomicBool::new(false),
+            });
+            self.agents
+                .write()
+                .expect("host registry lock should not be poisoned")
+                .insert(agent_id, hosted);
+            Ok(CreatedAgent {
+                agent_id,
+                agent_name,
+                run_id,
+            })
+        }
+        .await;
+
+        if result.is_err() {
+            cleanup_agent_files(self.filesystem.as_ref(), &root, &definition_path).await;
+        }
+        result
+    }
+}
+
+fn template_path(agent_name: &AgentName) -> Result<VirtualPath, HostError> {
+    let path = format!("{TEMPLATE_ROOT}/{}.toml", agent_name.as_str());
+    VirtualPath::try_from(path.as_str())
+        .map_err(|source| FilesystemError::InvalidVirtualPath { path, source }.into())
+}
+
+async fn cleanup_agent_files(
+    filesystem: &dyn Filesystem,
+    root: &VirtualPath,
+    definition_path: &VirtualPath,
+) {
+    let messages_path = child_path(root, "messages")
+        .expect("agent message path should be valid after root validation");
+    if let Ok(entries) = filesystem.list_dir(&messages_path).await {
+        for entry in entries {
+            let _ = filesystem.remove_file(&entry.path).await;
+        }
+    }
+    let _ = filesystem.remove_dir(&messages_path).await;
+    let agent_path = child_path(root, "agent.json")
+        .expect("agent state path should be valid after root validation");
+    let _ = filesystem.remove_file(&agent_path).await;
+    let _ = filesystem.remove_file(definition_path).await;
+    let _ = filesystem.remove_dir(root).await;
 }
 
 fn parse_history_entry(entry: &wyse_filesystem::DirEntry) -> Result<AgentId, HostError> {

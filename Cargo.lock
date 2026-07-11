@@ -2452,6 +2452,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

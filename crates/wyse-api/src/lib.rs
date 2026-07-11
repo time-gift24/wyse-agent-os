@@ -4,5 +4,6 @@ mod api;
 mod error;
 mod host;
 
+pub use api::{AgentCreated, router};
 pub use error::HostError;
-pub use host::{HostState, HostedAgent};
+pub use host::{CreatedAgent, HostState, HostedAgent};

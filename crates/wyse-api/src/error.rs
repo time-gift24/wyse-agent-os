@@ -43,6 +43,9 @@ pub enum HostError {
     /// An agent template does not exist.
     #[error("agent template not found: {agent_name:?}")]
     TemplateNotFound { agent_name: AgentName },
+    /// Initial user text is empty after trimming.
+    #[error("initial agent text must not be empty")]
+    EmptyText,
     /// A definition requests a tool outside the builtin catalog.
     #[error("tool is not available: {name}")]
     ToolNotAvailable { name: ToolName },
