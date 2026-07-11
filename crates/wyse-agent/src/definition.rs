@@ -102,8 +102,8 @@ impl Agent {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input message role is not `User` or another run
-    /// is active.
+    /// Returns an error if the input message role is not `User`, another run is
+    /// active, or the required turn preamble cannot be published.
     pub async fn run_turn(&self, message: ChatMessage) -> Result<RunId, AgentError> {
         if message.role != ChatRole::User {
             return Err(AgentError::InvalidInputMessageRole { role: message.role });
@@ -112,6 +112,7 @@ impl Agent {
         if self.active.swap(true, Ordering::SeqCst) {
             return Err(AgentError::RunAlreadyActive);
         }
+        let active_guard = ActiveGuard::new(&self.active);
 
         let run_id = RunId::new();
         let turn_id = TurnId::new();
@@ -127,24 +128,39 @@ impl Agent {
         *self
             .cancel
             .lock()
-            .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
+            .expect("cancel mutex should not be poisoned") = Some(cancel);
+        self.set_usage(TokenUsage::default());
+
+        let mut history = self.history_snapshot();
+        self.publish_required_agent_event(AgentEvent::Started { turn_id }, None)
+            .await?;
+        self.publish_required_agent_event(
+            AgentEvent::Message {
+                turn_id,
+                message: message.clone(),
+            },
+            None,
+        )
+        .await?;
+        history.push(message);
+
         let (command_tx, command_rx) = mpsc::channel(1);
         *self
             .turn_commands
             .lock()
             .expect("turn command mutex should not be poisoned") = Some(command_tx);
-        self.set_usage(TokenUsage::default());
         let agent = self.clone();
         let active = Arc::clone(&self.active);
         let turn_commands = Arc::clone(&self.turn_commands);
 
         tokio::spawn(async move {
-            let _ = agent.run_turn_loop(message, command_rx).await;
+            let _ = agent.continue_turn_loop(history, 0, command_rx).await;
             *turn_commands
                 .lock()
                 .expect("turn command mutex should not be poisoned") = None;
             active.store(false, Ordering::SeqCst);
         });
+        active_guard.disarm();
 
         Ok(run_id)
     }
@@ -572,7 +588,10 @@ impl AgentBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, atomic::Ordering};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use async_trait::async_trait;
     use futures_util::{StreamExt, stream};
@@ -581,7 +600,7 @@ mod tests {
         time::{Duration, timeout},
     };
     use wyse_core::{ChatMessage, HistoryPage, HistoryQuery, ModelId, ReplayStart, StreamEnvelope};
-    use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
+    use wyse_infra::event_stream_bus::{EventStream, EventStreamBusError, InMemoryEventStreamBus};
     use wyse_llm::{
         ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError,
         LlmProvider, MockLlmProvider,
@@ -652,6 +671,82 @@ mod tests {
             .expect("agent should build")
     }
 
+    fn test_agent_with_bus(event_bus: Arc<dyn EventStreamBus>) -> Agent {
+        Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(Arc::new(MockLlmProvider::new()))
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(event_bus)
+            .store(test_store())
+            .build()
+            .expect("agent should build")
+    }
+
+    #[derive(Default)]
+    struct RecordingBus {
+        agent_event_types: Mutex<Vec<&'static str>>,
+    }
+
+    impl RecordingBus {
+        fn agent_event_types(&self) -> Vec<&'static str> {
+            self.agent_event_types
+                .lock()
+                .expect("recording bus mutex should not be poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl EventStreamBus for RecordingBus {
+        async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+            let RuntimeEvent::Agent { event, .. } = envelope.event else {
+                return Ok(());
+            };
+            let event_type = match event {
+                AgentEvent::Started { .. } => "started",
+                AgentEvent::Message { .. } => "message",
+                _ => return Ok(()),
+            };
+            self.agent_event_types
+                .lock()
+                .expect("recording bus mutex should not be poisoned")
+                .push(event_type);
+            Ok(())
+        }
+
+        async fn subscribe_agent(
+            &self,
+            _agent_id: AgentId,
+            _replay_start: ReplayStart,
+        ) -> Result<EventStream, EventStreamBusError> {
+            Err(EventStreamBusError::MissingAgentScope)
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingSecondPublishBus {
+        publish_count: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl EventStreamBus for FailingSecondPublishBus {
+        async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+            if self.publish_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(EventStreamBusError::MissingAgentScope);
+            }
+            Ok(())
+        }
+
+        async fn subscribe_agent(
+            &self,
+            _agent_id: AgentId,
+            _replay_start: ReplayStart,
+        ) -> Result<EventStream, EventStreamBusError> {
+            Err(EventStreamBusError::MissingAgentScope)
+        }
+    }
+
     #[test]
     fn builder_uses_provider_model() {
         let agent = Agent::builder()
@@ -708,6 +803,34 @@ mod tests {
         assert_eq!(agent.current_run(), Some(run_id));
         assert!(agent.current_turn().is_some());
         agent.stop();
+    }
+
+    #[tokio::test]
+    async fn run_turn_returns_after_required_preamble_is_published() {
+        let bus = Arc::new(RecordingBus::default());
+        let agent = test_agent_with_bus(bus.clone());
+
+        agent
+            .run_turn(ChatMessage::user("hello"))
+            .await
+            .expect("run starts");
+
+        assert_eq!(bus.agent_event_types(), vec!["started", "message"]);
+    }
+
+    #[tokio::test]
+    async fn run_turn_releases_active_when_preamble_fails() {
+        let agent = test_agent_with_bus(Arc::new(FailingSecondPublishBus::default()));
+
+        assert!(agent.run_turn(ChatMessage::user("hello")).await.is_err());
+        assert!(!agent.active.load(Ordering::SeqCst));
+        assert!(
+            agent
+                .turn_commands
+                .lock()
+                .expect("turn command mutex should not be poisoned")
+                .is_none()
+        );
     }
 
     #[tokio::test]

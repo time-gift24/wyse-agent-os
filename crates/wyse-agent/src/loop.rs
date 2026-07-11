@@ -138,28 +138,6 @@ fn validate_active_turn(active_turn: &[ChatMessage]) -> Result<ActiveTurnSummary
 }
 
 impl Agent {
-    pub(crate) async fn run_turn_loop(
-        self,
-        input: ChatMessage,
-        commands: mpsc::Receiver<TurnCommand>,
-    ) -> Result<(), AgentError> {
-        let mut history = self.history_snapshot();
-        let turn_id = self.current_turn().expect("turn id should be set");
-        self.publish_required_agent_event(AgentEvent::Started { turn_id }, None)
-            .await?;
-        self.publish_required_agent_event(
-            AgentEvent::Message {
-                turn_id,
-                message: input.clone(),
-            },
-            None,
-        )
-        .await?;
-        history.push(input);
-
-        self.continue_turn_loop(history, 0, commands).await
-    }
-
     pub(crate) async fn continue_turn_loop(
         self,
         mut history: Vec<ChatMessage>,
@@ -495,7 +473,7 @@ impl Agent {
         total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
     }
 
-    fn history_snapshot(&self) -> Vec<ChatMessage> {
+    pub(crate) fn history_snapshot(&self) -> Vec<ChatMessage> {
         self.history
             .lock()
             .expect("agent history mutex should not be poisoned")
@@ -532,7 +510,7 @@ impl Agent {
             .await
     }
 
-    async fn publish_required_agent_event(
+    pub(crate) async fn publish_required_agent_event(
         &self,
         event: AgentEvent,
         extra_metadata: Option<BTreeMap<String, Value>>,
