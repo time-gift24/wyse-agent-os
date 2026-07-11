@@ -9,6 +9,10 @@ import {
 import { useTranslation } from "react-i18next"
 
 import { AgentApprovalCard } from "~/components/agent-approval-card"
+import {
+  finishApprovalSubmission,
+  startApprovalSubmission,
+} from "~/components/agent-approval-submissions"
 import { AgentMessageList } from "~/components/agent-message-list"
 import GlassSurface from "~/components/GlassSurface"
 import { Button } from "~/components/ui/button"
@@ -38,9 +42,9 @@ export function ChatWorkspace() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false)
   const [composerText, setComposerText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
-  const [submittingApprovalId, setSubmittingApprovalId] = useState<
-    string | null
-  >(null)
+  const [submittingApprovalIds, setSubmittingApprovalIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const { state } = conversation
 
@@ -62,12 +66,14 @@ export function ChatWorkspace() {
     approvalId: string,
     decision: "approve" | "reject"
   ) => {
-    setSubmittingApprovalId(approvalId)
+    setSubmittingApprovalIds((approvalIds) =>
+      startApprovalSubmission(approvalIds, approvalId)
+    )
     try {
       await conversation.resolveApproval(approvalId, decision)
     } finally {
-      setSubmittingApprovalId((current) =>
-        current === approvalId ? null : current
+      setSubmittingApprovalIds((approvalIds) =>
+        finishApprovalSubmission(approvalIds, approvalId)
       )
     }
   }
@@ -225,9 +231,9 @@ export function ChatWorkspace() {
                     >
                       <AgentApprovalCard
                         approval={approval}
-                        submitting={
-                          submittingApprovalId === approval.approvalId
-                        }
+                        submitting={submittingApprovalIds.has(
+                          approval.approvalId
+                        )}
                         onDecision={(decision) => {
                           void resolveApproval(approval.approvalId, decision)
                         }}
