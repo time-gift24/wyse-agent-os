@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     future::pending,
     sync::{
         Arc, Mutex,
@@ -10,14 +10,16 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
 use tokio::time::{sleep, timeout};
 use wyse_agent::{Agent, AgentConfig, AgentError};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalDecision, ApprovalId, CallId, ChatContent, ChatMessage, ChatRole,
-    DangerLevel, LlmCallRole, LlmEvent, ModelId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
-    TokenUsage, ToolCallDelta, ToolKind, ToolName, ToolSpec,
+    DangerLevel, EventSource, HistoryPage, HistoryQuery, LlmCallRole, LlmEvent, ModelId,
+    ReplayStart, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCallDelta, ToolKind,
+    ToolName, ToolSpec, TurnId,
 };
 use wyse_infra::event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
@@ -25,6 +27,7 @@ use wyse_infra::event_stream_bus::{
 use wyse_llm::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
 };
+use wyse_store::{AgentState, AgentStatus, AgentStore, StoreError};
 use wyse_tools::{
     BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
     ToolRegistry,
@@ -34,6 +37,7 @@ use wyse_tools::{
 enum ProviderResponse {
     Events(Vec<ChatStreamEvent>),
     StreamResults(Vec<Result<ChatStreamEvent, LlmError>>),
+    Pending,
 }
 
 #[derive(Debug)]
@@ -85,8 +89,411 @@ impl LlmProvider for RecordingProvider {
                 Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
             }
             ProviderResponse::StreamResults(results) => Ok(Box::pin(stream::iter(results))),
+            ProviderResponse::Pending => Ok(Box::pin(stream::pending())),
         }
     }
+}
+
+struct TestStore {
+    state: Mutex<AgentState>,
+    history: Mutex<Vec<StreamEnvelope>>,
+    completed: Mutex<Vec<(RunId, TurnId, u64, TokenUsage)>>,
+}
+
+impl TestStore {
+    fn idle(agent_id: AgentId) -> Self {
+        Self {
+            state: Mutex::new(AgentState::new(agent_id, "test-agent".to_owned())),
+            history: Mutex::new(Vec::new()),
+            completed: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_state(state: AgentState, history: Vec<StreamEnvelope>) -> Self {
+        Self {
+            state: Mutex::new(state),
+            history: Mutex::new(history),
+            completed: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentStore for TestStore {
+    async fn load_agent(&self) -> Result<AgentState, StoreError> {
+        Ok(self.state.lock().expect("state mutex").clone())
+    }
+
+    async fn update_state(
+        &self,
+        status: AgentStatus,
+        run_id: Option<RunId>,
+        turn_id: Option<TurnId>,
+        usage: TokenUsage,
+    ) -> Result<AgentState, StoreError> {
+        let mut state = self.state.lock().expect("state mutex");
+        state.status = status;
+        state.run_id = run_id;
+        state.turn_id = turn_id;
+        state.usage = usage;
+        Ok(state.clone())
+    }
+
+    async fn complete_iteration(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        iteration: u64,
+        usage: TokenUsage,
+    ) -> Result<AgentState, StoreError> {
+        self.completed
+            .lock()
+            .expect("completed mutex")
+            .push((run_id, turn_id, iteration, usage));
+        let mut state = self.state.lock().expect("state mutex");
+        state.next_iteration = iteration
+            .checked_add(1)
+            .ok_or(StoreError::IterationOverflow)?;
+        state.usage = usage;
+        Ok(state.clone())
+    }
+
+    async fn append_message(
+        &self,
+        mut envelope: StreamEnvelope,
+    ) -> Result<StreamEnvelope, StoreError> {
+        let mut history = self.history.lock().expect("history mutex");
+        let seq = u64::try_from(history.len())
+            .expect("test history length fits u64")
+            .checked_add(1)
+            .ok_or(StoreError::SequenceOverflow)?;
+        envelope.business_seq = Some(seq);
+        history.push(envelope.clone());
+        Ok(envelope)
+    }
+
+    async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage, StoreError> {
+        let history = self.history.lock().expect("history mutex");
+        let through_seq = query.through_seq.unwrap_or_else(|| {
+            history
+                .last()
+                .and_then(StreamEnvelope::business_seq)
+                .unwrap_or_default()
+        });
+        let events = history
+            .iter()
+            .filter(|event| {
+                event
+                    .business_seq()
+                    .is_some_and(|seq| seq > query.after_seq && seq <= through_seq)
+            })
+            .take(query.limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        let next_front_seq = events
+            .last()
+            .and_then(StreamEnvelope::business_seq)
+            .unwrap_or(query.after_seq);
+        Ok(HistoryPage {
+            through_seq,
+            events,
+            next_front_seq,
+            has_more: next_front_seq < through_seq,
+        })
+    }
+}
+
+fn test_store() -> Arc<dyn AgentStore> {
+    Arc::new(TestStore::idle(test_agent_id()))
+}
+
+fn persisted_message(
+    seq: u64,
+    run_id: RunId,
+    turn_id: TurnId,
+    message: ChatMessage,
+) -> StreamEnvelope {
+    StreamEnvelope {
+        business_seq: Some(seq),
+        run_id,
+        timestamp: Utc::now(),
+        source: EventSource::Run,
+        event: RuntimeEvent::Agent {
+            agent_id: test_agent_id(),
+            event: AgentEvent::Message { turn_id, message },
+        },
+        metadata: BTreeMap::new(),
+    }
+}
+
+fn agent_with_store(
+    provider: Arc<RecordingProvider>,
+    event_bus: Arc<dyn EventStreamBus>,
+    store: Arc<dyn AgentStore>,
+) -> Agent {
+    Agent::builder()
+        .id(test_agent_id())
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .event_bus(event_bus)
+        .store(store)
+        .build()
+        .expect("agent should build")
+}
+
+#[tokio::test]
+async fn resume_rejects_second_active_operation() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.last_seq = 1;
+    let store = Arc::new(TestStore::with_state(
+        state,
+        vec![persisted_message(
+            1,
+            run_id,
+            turn_id,
+            ChatMessage::user("continue"),
+        )],
+    ));
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
+    let agent = agent_with_store(provider, Arc::new(InMemoryEventStreamBus::default()), store);
+
+    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::RunAlreadyActive)
+    ));
+    agent.stop();
+}
+
+#[tokio::test]
+async fn resume_rejects_non_running_state() {
+    let state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    let store = Arc::new(TestStore::with_state(state, Vec::new()));
+    let agent = agent_with_store(
+        Arc::new(RecordingProvider::new(Vec::new())),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::ResumeNotRunning {
+            actual: AgentStatus::Idle
+        })
+    ));
+}
+
+#[tokio::test]
+async fn resume_rejects_missing_run_identity() {
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.turn_id = Some(TurnId::new());
+    let store = Arc::new(TestStore::with_state(state, Vec::new()));
+    let agent = agent_with_store(
+        Arc::new(RecordingProvider::new(Vec::new())),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::ResumeRunMissing)
+    ));
+}
+
+#[tokio::test]
+async fn resume_rejects_missing_turn_identity() {
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(RunId::new());
+    let store = Arc::new(TestStore::with_state(state, Vec::new()));
+    let agent = agent_with_store(
+        Arc::new(RecordingProvider::new(Vec::new())),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::ResumeTurnMissing)
+    ));
+}
+
+#[tokio::test]
+async fn resume_rejects_persisted_agent_mismatch() {
+    let actual = AgentId::new();
+    let mut state = AgentState::new(actual, "other-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(RunId::new());
+    state.turn_id = Some(TurnId::new());
+    let store = Arc::new(TestStore::with_state(state, Vec::new()));
+    let agent = agent_with_store(
+        Arc::new(RecordingProvider::new(Vec::new())),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::ResumeAgentMismatch { expected, actual: found })
+            if expected == test_agent_id() && found == actual
+    ));
+}
+
+#[tokio::test]
+async fn resume_rejects_non_message_history_and_releases_active_guard() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.last_seq = 1;
+    let history = vec![StreamEnvelope {
+        business_seq: Some(1),
+        run_id,
+        timestamp: Utc::now(),
+        source: EventSource::Run,
+        event: RuntimeEvent::Agent {
+            agent_id: test_agent_id(),
+            event: AgentEvent::Started { turn_id },
+        },
+        metadata: BTreeMap::new(),
+    }];
+    let store = Arc::new(TestStore::with_state(state, history));
+    let agent = agent_with_store(
+        Arc::new(RecordingProvider::new(Vec::new())),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::InvalidResumeHistory)
+    ));
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::InvalidResumeHistory)
+    ));
+}
+
+#[tokio::test]
+async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_input_events() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let prior_usage = TokenUsage {
+        input_tokens: 10,
+        output_tokens: 5,
+        total_tokens: 15,
+    };
+    let resumed_usage = TokenUsage {
+        input_tokens: 3,
+        output_tokens: 2,
+        total_tokens: 5,
+    };
+    let input = ChatMessage::user("persisted input");
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.next_iteration = 3;
+    state.usage = prior_usage;
+    state.last_seq = 1;
+    let store = Arc::new(TestStore::with_state(
+        state,
+        vec![persisted_message(1, run_id, turn_id, input.clone())],
+    ));
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![
+            ChatStreamEvent::TextDelta {
+                delta: "resumed".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: Some(resumed_usage),
+            },
+        ],
+    )]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = agent_with_store(provider.clone(), bus.clone(), store.clone());
+
+    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    assert_eq!(agent.current_run(), Some(run_id));
+    assert_eq!(agent.current_turn(), Some(turn_id));
+    let requests = wait_for_request_count(&provider, 1).await;
+    assert!(requests[0].messages.iter().any(|message| message == &input));
+
+    let mut events = bus
+        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .await
+        .expect("subscribe succeeds");
+    let mut saw_iteration = false;
+    timeout(Duration::from_secs(1), async {
+        while let Some(record) = events.next().await {
+            let envelope = record.expect("event is valid").envelope;
+            if envelope.metadata.get("turn_index") == Some(&json!(3)) {
+                saw_iteration = true;
+            }
+            match envelope.event {
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Started { .. },
+                    ..
+                } => panic!("resume must not publish another started event"),
+                RuntimeEvent::Agent {
+                    event:
+                        AgentEvent::Message {
+                            message:
+                                ChatMessage {
+                                    role: ChatRole::User,
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => panic!("resume must not publish another user message"),
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Finished { usage, .. },
+                    ..
+                } => {
+                    assert_eq!(
+                        usage,
+                        TokenUsage {
+                            input_tokens: 13,
+                            output_tokens: 7,
+                            total_tokens: 20,
+                        }
+                    );
+                    return;
+                }
+                _ => {}
+            }
+        }
+        panic!("expected finished event");
+    })
+    .await
+    .expect("resume finishes");
+
+    assert!(saw_iteration);
+    assert_eq!(
+        *store.completed.lock().expect("completed mutex"),
+        vec![(
+            run_id,
+            turn_id,
+            3,
+            TokenUsage {
+                input_tokens: 13,
+                output_tokens: 7,
+                total_tokens: 20,
+            },
+        )]
+    );
 }
 
 #[derive(Debug)]
@@ -341,6 +748,7 @@ fn approval_agent(
         .llm_provider(provider)
         .tool_registry(Arc::new(registry))
         .event_bus(event_bus)
+        .store(test_store())
         .build()
         .expect("agent builds")
 }
@@ -595,6 +1003,7 @@ async fn stream_runs_tool_and_continues_with_tool_result() {
         .llm_provider(provider.clone())
         .tool_registry(Arc::new(registry))
         .event_bus(bus)
+        .store(test_store())
         .build()
         .expect("agent should build");
 
@@ -690,6 +1099,7 @@ async fn stream_publishes_complete_turn_messages_in_order_without_business_seque
         .llm_provider(provider)
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .store(test_store())
         .build()
         .expect("agent should build");
     let input = ChatMessage::user("hello");
@@ -764,6 +1174,7 @@ async fn failed_turn_does_not_commit_history_for_next_run() {
         .llm_provider(provider.clone())
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .store(test_store())
         .build()
         .expect("agent should build");
 
@@ -830,6 +1241,7 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
         .llm_provider(provider)
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
+        .store(test_store())
         .config(AgentConfig {
             max_turns: 0,
             max_tool_calls_per_turn: 16,
@@ -888,6 +1300,7 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
         .llm_provider(provider)
         .tool_registry(Arc::new(BlockingToolRegistry::new(Arc::clone(&entered))))
         .event_bus(bus)
+        .store(test_store())
         .build()
         .expect("agent should build");
 
@@ -963,6 +1376,7 @@ async fn stream_publishes_tool_failure_and_retries_with_tool_error_message() {
         .llm_provider(provider.clone())
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(bus)
+        .store(test_store())
         .build()
         .expect("agent should build");
 

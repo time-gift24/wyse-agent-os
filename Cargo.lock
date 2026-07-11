@@ -2040,6 +2040,7 @@ dependencies = [
  "wyse-core",
  "wyse-infra",
  "wyse-llm",
+ "wyse-store",
  "wyse-tools",
 ]
 
@@ -2051,6 +2052,7 @@ dependencies = [
  "wyse-core",
  "wyse-infra",
  "wyse-llm",
+ "wyse-store",
  "wyse-tools",
 ]
 

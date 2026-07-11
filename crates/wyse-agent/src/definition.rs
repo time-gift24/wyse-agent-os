@@ -8,10 +8,12 @@ use std::sync::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use wyse_core::{
-    AgentId, ApprovalDecision, ApprovalId, ChatMessage, ChatRole, RunId, TokenUsage, TurnId,
+    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatMessage, ChatRole, HistoryQuery, RunId,
+    RuntimeEvent, TokenUsage, TurnId,
 };
 use wyse_infra::event_stream_bus::EventStreamBus;
 use wyse_llm::LlmProvider;
+use wyse_store::{AgentStatus, AgentStore, MAX_HISTORY_PAGE_SIZE};
 use wyse_tools::ToolRegistry;
 
 use crate::{AgentError, command::TurnCommand};
@@ -43,6 +45,7 @@ pub struct Agent {
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
     pub(crate) tool_registry: Arc<dyn ToolRegistry>,
     pub(crate) event_bus: Arc<dyn EventStreamBus>,
+    pub(crate) store: Arc<dyn AgentStore>,
     pub(crate) config: AgentConfig,
     pub(crate) history: Arc<Mutex<Vec<ChatMessage>>>,
     pub(crate) usage: Arc<Mutex<TokenUsage>>,
@@ -109,6 +112,145 @@ impl Agent {
         });
 
         Ok(run_id)
+    }
+
+    /// Resumes the persisted running turn at its last durable iteration boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when another operation is active, persisted state is not
+    /// resumable, history is invalid, or the store cannot be read.
+    pub async fn resume(&self) -> Result<RunId, AgentError> {
+        if self.active.swap(true, Ordering::SeqCst) {
+            return Err(AgentError::RunAlreadyActive);
+        }
+
+        let initialized = self.initialize_resume().await;
+        let (run_id, turn_id, next_iteration, usage, history) = match initialized {
+            Ok(initialized) => initialized,
+            Err(error) => {
+                self.active.store(false, Ordering::SeqCst);
+                return Err(error);
+            }
+        };
+
+        let cancel = CancellationToken::new();
+        *self
+            .current_run_id
+            .lock()
+            .expect("current run mutex should not be poisoned") = Some(run_id);
+        *self
+            .current_turn_id
+            .lock()
+            .expect("current turn mutex should not be poisoned") = Some(turn_id);
+        *self
+            .cancel
+            .lock()
+            .expect("cancel mutex should not be poisoned") = Some(cancel);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        *self
+            .turn_commands
+            .lock()
+            .expect("turn command mutex should not be poisoned") = Some(command_tx);
+        self.set_usage(usage);
+        self.commit_history(history.clone());
+
+        let agent = self.clone();
+        let active = Arc::clone(&self.active);
+        let turn_commands = Arc::clone(&self.turn_commands);
+        tokio::spawn(async move {
+            let _ = agent
+                .continue_turn_loop(history, next_iteration, command_rx)
+                .await;
+            *turn_commands
+                .lock()
+                .expect("turn command mutex should not be poisoned") = None;
+            active.store(false, Ordering::SeqCst);
+        });
+
+        Ok(run_id)
+    }
+
+    async fn initialize_resume(
+        &self,
+    ) -> Result<(RunId, TurnId, u64, TokenUsage, Vec<ChatMessage>), AgentError> {
+        let state = self.store.load_agent().await?;
+        if state.status != AgentStatus::Running {
+            return Err(AgentError::ResumeNotRunning {
+                actual: state.status,
+            });
+        }
+        if state.agent_id != self.id {
+            return Err(AgentError::ResumeAgentMismatch {
+                expected: self.id,
+                actual: state.agent_id,
+            });
+        }
+        let run_id = state.run_id.ok_or(AgentError::ResumeRunMissing)?;
+        let turn_id = state.turn_id.ok_or(AgentError::ResumeTurnMissing)?;
+
+        let mut history = Vec::new();
+        let mut after_seq = 0;
+        let mut has_active_user_message = false;
+        while after_seq < state.last_seq {
+            let page = self
+                .store
+                .history_page(HistoryQuery {
+                    after_seq,
+                    through_seq: Some(state.last_seq),
+                    limit: MAX_HISTORY_PAGE_SIZE,
+                })
+                .await?;
+            if page.through_seq != state.last_seq
+                || page.events.is_empty()
+                || page.next_front_seq <= after_seq
+                || page.next_front_seq > state.last_seq
+            {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+
+            let mut expected_seq = after_seq;
+            for envelope in page.events {
+                expected_seq = expected_seq
+                    .checked_add(1)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                if envelope.business_seq != Some(expected_seq) {
+                    return Err(AgentError::InvalidResumeHistory);
+                }
+                let RuntimeEvent::Agent { agent_id, event } = envelope.event else {
+                    return Err(AgentError::InvalidResumeHistory);
+                };
+                if agent_id != self.id {
+                    return Err(AgentError::ResumeAgentMismatch {
+                        expected: self.id,
+                        actual: agent_id,
+                    });
+                }
+                let AgentEvent::Message {
+                    turn_id: message_turn_id,
+                    message,
+                } = event
+                else {
+                    return Err(AgentError::InvalidResumeHistory);
+                };
+                if message_turn_id == turn_id && message.role == ChatRole::User {
+                    has_active_user_message = true;
+                }
+                history.push(message);
+            }
+            if expected_seq != page.next_front_seq
+                || page.has_more != (page.next_front_seq < state.last_seq)
+            {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+            after_seq = page.next_front_seq;
+        }
+
+        if !has_active_user_message {
+            return Err(AgentError::InvalidResumeHistory);
+        }
+
+        Ok((run_id, turn_id, state.next_iteration, state.usage, history))
     }
 
     /// Cancels the current run, if any.
@@ -179,6 +321,13 @@ impl Agent {
             .lock()
             .expect("usage mutex should not be poisoned") = usage;
     }
+
+    pub(crate) fn commit_history(&self, history: Vec<ChatMessage>) {
+        *self
+            .history
+            .lock()
+            .expect("agent history mutex should not be poisoned") = history;
+    }
 }
 
 /// Builder for [`Agent`].
@@ -190,6 +339,7 @@ pub struct AgentBuilder {
     llm_provider: Option<Arc<dyn LlmProvider>>,
     tool_registry: Option<Arc<dyn ToolRegistry>>,
     event_bus: Option<Arc<dyn EventStreamBus>>,
+    store: Option<Arc<dyn AgentStore>>,
     config: Option<AgentConfig>,
 }
 
@@ -236,6 +386,13 @@ impl AgentBuilder {
         self
     }
 
+    /// Sets the durable agent store.
+    #[must_use]
+    pub fn store(mut self, store: Arc<dyn AgentStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
     /// Sets runtime config.
     #[must_use]
     pub fn config(mut self, config: AgentConfig) -> Self {
@@ -266,6 +423,9 @@ impl AgentBuilder {
             event_bus: self
                 .event_bus
                 .ok_or(AgentError::MissingBuilderField { field: "event_bus" })?,
+            store: self
+                .store
+                .ok_or(AgentError::MissingBuilderField { field: "store" })?,
             config: self.config.unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
@@ -288,15 +448,65 @@ mod tests {
         sync::watch,
         time::{Duration, timeout},
     };
-    use wyse_core::{ChatMessage, ModelId, ReplayStart, StreamEnvelope};
+    use wyse_core::{ChatMessage, HistoryPage, HistoryQuery, ModelId, ReplayStart, StreamEnvelope};
     use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
     use wyse_llm::{
         ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError,
         LlmProvider, MockLlmProvider,
     };
+    use wyse_store::{AgentState, AgentStatus, AgentStore, StoreError};
     use wyse_tools::BuiltinToolRegistry;
 
     use super::*;
+
+    struct UnitTestStore;
+
+    #[async_trait]
+    impl AgentStore for UnitTestStore {
+        async fn load_agent(&self) -> Result<AgentState, StoreError> {
+            Err(StoreError::AgentMissing)
+        }
+
+        async fn update_state(
+            &self,
+            _status: AgentStatus,
+            _run_id: Option<RunId>,
+            _turn_id: Option<TurnId>,
+            _usage: TokenUsage,
+        ) -> Result<AgentState, StoreError> {
+            Err(StoreError::AgentMissing)
+        }
+
+        async fn complete_iteration(
+            &self,
+            _run_id: RunId,
+            _turn_id: TurnId,
+            iteration: u64,
+            usage: TokenUsage,
+        ) -> Result<AgentState, StoreError> {
+            let mut state = AgentState::new(AgentId::new(), "test-agent".to_owned());
+            state.next_iteration = iteration
+                .checked_add(1)
+                .ok_or(StoreError::IterationOverflow)?;
+            state.usage = usage;
+            Ok(state)
+        }
+
+        async fn append_message(
+            &self,
+            _envelope: StreamEnvelope,
+        ) -> Result<StreamEnvelope, StoreError> {
+            Err(StoreError::AgentMissing)
+        }
+
+        async fn history_page(&self, _query: HistoryQuery) -> Result<HistoryPage, StoreError> {
+            Err(StoreError::AgentMissing)
+        }
+    }
+
+    fn test_store() -> Arc<dyn AgentStore> {
+        Arc::new(UnitTestStore)
+    }
 
     fn test_agent() -> Agent {
         Agent::builder()
@@ -305,6 +515,7 @@ mod tests {
             .llm_provider(Arc::new(MockLlmProvider::new()))
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .store(test_store())
             .build()
             .expect("agent should build")
     }
@@ -317,9 +528,30 @@ mod tests {
             .llm_provider(Arc::new(MockLlmProvider::new()))
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .store(test_store())
             .build();
 
         assert!(agent.is_ok());
+    }
+
+    #[test]
+    fn builder_reports_missing_store() {
+        let result = Agent::builder()
+            .name("test-agent")
+            .system_prompt("be helpful")
+            .llm_provider(Arc::new(MockLlmProvider::new()))
+            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+            .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .build();
+        let error = match result {
+            Ok(_) => panic!("store should be required"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            AgentError::MissingBuilderField { field: "store" }
+        ));
     }
 
     #[tokio::test]
@@ -332,6 +564,7 @@ mod tests {
             .llm_provider(provider.clone())
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(bus)
+            .store(test_store())
             .build()
             .expect("agent should build");
 
@@ -429,6 +662,7 @@ mod tests {
             .llm_provider(provider.clone())
             .tool_registry(Arc::new(BuiltinToolRegistry::default()))
             .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+            .store(test_store())
             .build()
             .expect("agent should build");
 

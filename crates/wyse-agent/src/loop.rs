@@ -24,7 +24,7 @@ impl Agent {
     pub(crate) async fn run_turn_loop(
         self,
         input: ChatMessage,
-        mut commands: mpsc::Receiver<TurnCommand>,
+        commands: mpsc::Receiver<TurnCommand>,
     ) -> Result<(), AgentError> {
         let mut history = self.history_snapshot();
         let turn_id = self.current_turn().expect("turn id should be set");
@@ -40,7 +40,23 @@ impl Agent {
         .await?;
         history.push(input);
 
-        for turn_index in 0..self.config.max_turns {
+        self.continue_turn_loop(history, 0, commands).await
+    }
+
+    pub(crate) async fn continue_turn_loop(
+        self,
+        mut history: Vec<ChatMessage>,
+        mut iteration: u64,
+        mut commands: mpsc::Receiver<TurnCommand>,
+    ) -> Result<(), AgentError> {
+        let turn_id = self.current_turn().expect("turn id should be set");
+        loop {
+            let turn_index = usize::try_from(iteration)
+                .map_err(|_| AgentError::IterationOutOfRange { iteration })?;
+            if turn_index >= self.config.max_turns {
+                break;
+            }
+
             if self
                 .cancel_token()
                 .expect("cancel token should be set")
@@ -148,8 +164,14 @@ impl Agent {
                     .await?;
                     history.push(tool_message);
                 }
+                self.complete_iteration(iteration).await?;
+                iteration = iteration
+                    .checked_add(1)
+                    .ok_or(AgentError::IterationOutOfRange { iteration })?;
                 continue;
             }
+
+            self.complete_iteration(iteration).await?;
 
             self.publish_required_agent_event(
                 AgentEvent::Finished {
@@ -168,6 +190,18 @@ impl Agent {
         };
         self.publish_failed(&error).await?;
         Err(error)
+    }
+
+    async fn complete_iteration(&self, iteration: u64) -> Result<(), AgentError> {
+        self.store
+            .complete_iteration(
+                self.current_run().expect("run id should be set"),
+                self.current_turn().expect("turn id should be set"),
+                iteration,
+                self.current_usage(),
+            )
+            .await?;
+        Ok(())
     }
 
     fn cancel_token(&self) -> Option<CancellationToken> {
@@ -199,13 +233,6 @@ impl Agent {
             .lock()
             .expect("agent history mutex should not be poisoned")
             .clone()
-    }
-
-    fn commit_history(&self, history: Vec<ChatMessage>) {
-        *self
-            .history
-            .lock()
-            .expect("agent history mutex should not be poisoned") = history;
     }
 
     async fn publish_cancelled(&self) -> Result<(), AgentError> {

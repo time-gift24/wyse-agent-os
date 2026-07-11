@@ -1,9 +1,10 @@
 //! Error types for agent runtime operations.
 
 use thiserror::Error;
-use wyse_core::{CallId, ChatRole};
+use wyse_core::{AgentId, CallId, ChatRole};
 use wyse_infra::event_stream_bus::EventStreamBusError;
 use wyse_llm::LlmError;
+use wyse_store::{AgentStatus, StoreError};
 
 /// Error returned by agent operations.
 #[derive(Debug, Error)]
@@ -47,6 +48,42 @@ pub enum AgentError {
         #[source]
         source: EventStreamBusError,
     },
+    /// Agent store operation failed.
+    #[error("agent store operation failed")]
+    Store {
+        /// Underlying store error.
+        #[source]
+        source: StoreError,
+    },
+    /// Persisted state cannot be resumed because it is not running.
+    #[error("persisted agent is not running: {actual:?}")]
+    ResumeNotRunning {
+        /// Persisted status.
+        actual: AgentStatus,
+    },
+    /// Persisted running state has no run identity.
+    #[error("persisted running agent has no run id")]
+    ResumeRunMissing,
+    /// Persisted running state has no turn identity.
+    #[error("persisted running agent has no turn id")]
+    ResumeTurnMissing,
+    /// Persisted state belongs to another agent.
+    #[error("resume agent mismatch: expected {expected}, actual {actual}")]
+    ResumeAgentMismatch {
+        /// Built agent identity.
+        expected: AgentId,
+        /// Persisted agent identity.
+        actual: AgentId,
+    },
+    /// Persisted message history cannot form a resumable conversation.
+    #[error("invalid resume history")]
+    InvalidResumeHistory,
+    /// A persisted iteration cannot be represented by the loop implementation.
+    #[error("iteration cannot be represented: {iteration}")]
+    IterationOutOfRange {
+        /// Persisted iteration.
+        iteration: u64,
+    },
     /// A required builder field was not provided.
     #[error("missing builder field: {field}")]
     MissingBuilderField {
@@ -85,5 +122,11 @@ impl From<LlmError> for AgentError {
 impl From<EventStreamBusError> for AgentError {
     fn from(source: EventStreamBusError) -> Self {
         Self::EventBus { source }
+    }
+}
+
+impl From<StoreError> for AgentError {
+    fn from(source: StoreError) -> Self {
+        Self::Store { source }
     }
 }
