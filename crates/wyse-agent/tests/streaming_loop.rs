@@ -18,8 +18,8 @@ use wyse_agent::{Agent, AgentConfig, AgentError};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalDecision, ApprovalId, CallId, ChatContent, ChatMessage, ChatRole,
     DangerLevel, EventSource, HistoryPage, HistoryQuery, LlmCallRole, LlmEvent, ModelId,
-    ReplayStart, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCallDelta, ToolKind,
-    ToolName, ToolSpec, TurnId,
+    ReplayStart, RunId, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolCallDelta,
+    ToolKind, ToolName, ToolSpec, TurnId,
 };
 use wyse_infra::event_stream_bus::{
     EventStream, EventStreamBus, EventStreamBusError, InMemoryEventStreamBus,
@@ -240,6 +240,14 @@ fn persisted_message(
     }
 }
 
+fn assistant_tool_call(call_id: &str, arguments: serde_json::Value) -> ChatMessage {
+    ChatMessage::assistant("").with_tool_calls(vec![ToolCall {
+        call_id: CallId::from(call_id),
+        name: "counting".to_owned(),
+        arguments,
+    }])
+}
+
 fn agent_with_store(
     provider: Arc<RecordingProvider>,
     event_bus: Arc<dyn EventStreamBus>,
@@ -430,6 +438,204 @@ async fn resume_rejects_non_message_history_and_releases_active_guard() {
 }
 
 #[tokio::test]
+async fn resume_advances_committed_terminal_assistant_and_finishes_without_llm_request() {
+    let run_id = RunId::new();
+    let previous_turn_id = TurnId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.last_seq = 4;
+    let store = Arc::new(TestStore::with_state(
+        state,
+        vec![
+            persisted_message(
+                1,
+                run_id,
+                previous_turn_id,
+                ChatMessage::user("previous turn"),
+            ),
+            persisted_message(
+                2,
+                run_id,
+                previous_turn_id,
+                ChatMessage::assistant("previous answer"),
+            ),
+            persisted_message(3, run_id, turn_id, ChatMessage::user("active turn")),
+            persisted_message(4, run_id, turn_id, ChatMessage::assistant("done")),
+        ],
+    ));
+    let provider = Arc::new(RecordingProvider::new(Vec::new()));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = agent_with_store(provider.clone(), bus.clone(), store.clone());
+
+    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    let mut events = bus
+        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .await
+        .expect("subscribe succeeds");
+    timeout(Duration::from_secs(1), async {
+        while let Some(record) = events.next().await {
+            if let RuntimeEvent::Agent {
+                event: AgentEvent::Finished { finish_reason, .. },
+                ..
+            } = record.expect("event is valid").envelope.event
+            {
+                assert_eq!(finish_reason, "unknown");
+                return;
+            }
+        }
+        panic!("expected finished event");
+    })
+    .await
+    .expect("resume finishes");
+
+    assert!(provider.requests().is_empty());
+    assert_eq!(
+        *store.completed.lock().expect("completed mutex"),
+        vec![(run_id, turn_id, 0, TokenUsage::default())]
+    );
+}
+
+#[tokio::test]
+async fn resume_finishes_advanced_terminal_assistant_without_another_advance_or_llm_request() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.next_iteration = 1;
+    state.last_seq = 2;
+    let store = Arc::new(TestStore::with_state(
+        state,
+        vec![
+            persisted_message(1, run_id, turn_id, ChatMessage::user("active turn")),
+            persisted_message(2, run_id, turn_id, ChatMessage::assistant("done")),
+        ],
+    ));
+    let provider = Arc::new(RecordingProvider::new(Vec::new()));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = agent_with_store(provider.clone(), bus.clone(), store.clone());
+
+    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    let mut events = bus
+        .subscribe_agent(test_agent_id(), ReplayStart::All)
+        .await
+        .expect("subscribe succeeds");
+    wait_for_agent_finish(&mut events).await;
+
+    assert!(provider.requests().is_empty());
+    assert!(store.completed.lock().expect("completed mutex").is_empty());
+}
+
+#[tokio::test]
+async fn resume_executes_only_missing_tool_calls_then_advances_once_and_continues() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.last_seq = 3;
+    let assistant = ChatMessage::assistant("").with_tool_calls(vec![
+        ToolCall {
+            call_id: CallId::from("call-1"),
+            name: "counting".to_owned(),
+            arguments: json!({"value": 1}),
+        },
+        ToolCall {
+            call_id: CallId::from("call-2"),
+            name: "counting".to_owned(),
+            arguments: json!({"value": 2}),
+        },
+    ]);
+    let store = Arc::new(TestStore::with_state(
+        state,
+        vec![
+            persisted_message(1, run_id, turn_id, ChatMessage::user("use tools")),
+            persisted_message(2, run_id, turn_id, assistant),
+            persisted_message(
+                3,
+                run_id,
+                turn_id,
+                ChatMessage::tool(CallId::from("call-1"), json!({"value": 1})),
+            ),
+        ],
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::Allow);
+    registry
+        .register(
+            Arc::new(CountingTool::new(Arc::clone(&calls))),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("tool registers");
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = Agent::builder()
+        .id(test_agent_id())
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider.clone())
+        .tool_registry(Arc::new(registry))
+        .event_bus(bus)
+        .store(store.clone())
+        .build()
+        .expect("agent should build");
+
+    assert_eq!(agent.resume().await.expect("resume starts"), run_id);
+    let requests = wait_for_request_count(&provider, 1).await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == ChatRole::Tool && message.tool_call_id == Some(CallId::from("call-1"))
+    }));
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == ChatRole::Tool && message.tool_call_id == Some(CallId::from("call-2"))
+    }));
+    assert_eq!(
+        *store.completed.lock().expect("completed mutex"),
+        vec![(run_id, turn_id, 0, TokenUsage::default())]
+    );
+    agent.stop();
+}
+
+#[tokio::test]
+async fn resume_rejects_active_turn_assistant_count_more_than_one_past_frontier() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    state.run_id = Some(run_id);
+    state.turn_id = Some(turn_id);
+    state.last_seq = 3;
+    let store = Arc::new(TestStore::with_state(
+        state,
+        vec![
+            persisted_message(1, run_id, turn_id, ChatMessage::user("active turn")),
+            persisted_message(2, run_id, turn_id, ChatMessage::assistant("first")),
+            persisted_message(3, run_id, turn_id, ChatMessage::assistant("second")),
+        ],
+    ));
+    let provider = Arc::new(RecordingProvider::new(Vec::new()));
+    let agent = agent_with_store(
+        provider.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store.clone(),
+    );
+
+    assert!(matches!(
+        agent.resume().await,
+        Err(AgentError::InvalidResumeHistory)
+    ));
+    assert!(provider.requests().is_empty());
+    assert!(store.completed.lock().expect("completed mutex").is_empty());
+}
+
+#[tokio::test]
 async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_input_events() {
     let run_id = RunId::new();
     let turn_id = TurnId::new();
@@ -450,10 +656,48 @@ async fn resume_restores_history_usage_ids_and_next_iteration_without_duplicate_
     state.turn_id = Some(turn_id);
     state.next_iteration = 3;
     state.usage = prior_usage;
-    state.last_seq = 1;
+    state.last_seq = 7;
     let store = Arc::new(TestStore::with_state(
         state,
-        vec![persisted_message(1, run_id, turn_id, input.clone())],
+        vec![
+            persisted_message(1, run_id, turn_id, input.clone()),
+            persisted_message(
+                2,
+                run_id,
+                turn_id,
+                assistant_tool_call("prior-call-1", json!({"iteration": 0})),
+            ),
+            persisted_message(
+                3,
+                run_id,
+                turn_id,
+                ChatMessage::tool("prior-call-1", json!({"iteration": 0})),
+            ),
+            persisted_message(
+                4,
+                run_id,
+                turn_id,
+                assistant_tool_call("prior-call-2", json!({"iteration": 1})),
+            ),
+            persisted_message(
+                5,
+                run_id,
+                turn_id,
+                ChatMessage::tool("prior-call-2", json!({"iteration": 1})),
+            ),
+            persisted_message(
+                6,
+                run_id,
+                turn_id,
+                assistant_tool_call("prior-call-3", json!({"iteration": 2})),
+            ),
+            persisted_message(
+                7,
+                run_id,
+                turn_id,
+                ChatMessage::tool("prior-call-3", json!({"iteration": 2})),
+            ),
+        ],
     ));
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
         vec![

@@ -1,6 +1,9 @@
 //! Internal streaming loop implementation.
 
-use std::collections::BTreeMap;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashSet},
+};
 
 use chrono::Utc;
 use futures_util::StreamExt;
@@ -19,6 +22,29 @@ use crate::{
     Agent, AgentError,
     command::{TurnCommand, reject_inactive_command},
 };
+
+pub(crate) struct ResumeContinuation {
+    history: Vec<ChatMessage>,
+    iteration: u64,
+    boundary: ResumeBoundary,
+}
+
+impl ResumeContinuation {
+    pub(crate) fn history(&self) -> &[ChatMessage] {
+        &self.history
+    }
+}
+
+enum ResumeBoundary {
+    Continue,
+    Finish {
+        advance_iteration: bool,
+    },
+    ReconcileTools {
+        assistant_index: usize,
+        committed_call_ids: HashSet<CallId>,
+    },
+}
 
 impl Agent {
     pub(crate) async fn run_turn_loop(
@@ -190,6 +216,183 @@ impl Agent {
         };
         self.publish_failed(&error).await?;
         Err(error)
+    }
+
+    pub(crate) fn prepare_resume_continuation(
+        &self,
+        history: Vec<ChatMessage>,
+        active_turn_start: usize,
+        next_iteration: u64,
+    ) -> Result<ResumeContinuation, AgentError> {
+        let active_turn = history
+            .get(active_turn_start..)
+            .ok_or(AgentError::InvalidResumeHistory)?;
+        let assistant_count = u64::try_from(
+            active_turn
+                .iter()
+                .filter(|message| message.role == wyse_core::ChatRole::Assistant)
+                .count(),
+        )
+        .map_err(|_| AgentError::InvalidResumeHistory)?;
+
+        let boundary = match assistant_count.cmp(&next_iteration) {
+            Ordering::Equal => {
+                if active_turn.last().is_some_and(|message| {
+                    message.role == wyse_core::ChatRole::Assistant && message.tool_calls.is_empty()
+                }) {
+                    ResumeBoundary::Finish {
+                        advance_iteration: false,
+                    }
+                } else {
+                    ResumeBoundary::Continue
+                }
+            }
+            Ordering::Greater if next_iteration.checked_add(1) == Some(assistant_count) => {
+                let relative_index = active_turn
+                    .iter()
+                    .rposition(|message| message.role == wyse_core::ChatRole::Assistant)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                let assistant_index = active_turn_start
+                    .checked_add(relative_index)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                let assistant = history
+                    .get(assistant_index)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                if assistant.tool_calls.is_empty() {
+                    if assistant_index.checked_add(1) != Some(history.len()) {
+                        return Err(AgentError::InvalidResumeHistory);
+                    }
+                    ResumeBoundary::Finish {
+                        advance_iteration: true,
+                    }
+                } else {
+                    let committed_call_ids = history
+                        .get(
+                            assistant_index
+                                .checked_add(1)
+                                .ok_or(AgentError::InvalidResumeHistory)?..,
+                        )
+                        .ok_or(AgentError::InvalidResumeHistory)?
+                        .iter()
+                        .map(|message| {
+                            if message.role != wyse_core::ChatRole::Tool {
+                                return Err(AgentError::InvalidResumeHistory);
+                            }
+                            message
+                                .tool_call_id
+                                .clone()
+                                .ok_or(AgentError::InvalidResumeHistory)
+                        })
+                        .collect::<Result<HashSet<_>, _>>()?;
+                    ResumeBoundary::ReconcileTools {
+                        assistant_index,
+                        committed_call_ids,
+                    }
+                }
+            }
+            Ordering::Less | Ordering::Greater => {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+        };
+
+        Ok(ResumeContinuation {
+            history,
+            iteration: next_iteration,
+            boundary,
+        })
+    }
+
+    pub(crate) async fn continue_resumed_turn_loop(
+        self,
+        mut continuation: ResumeContinuation,
+        mut commands: mpsc::Receiver<TurnCommand>,
+    ) -> Result<(), AgentError> {
+        match continuation.boundary {
+            ResumeBoundary::Continue => {
+                self.continue_turn_loop(continuation.history, continuation.iteration, commands)
+                    .await
+            }
+            ResumeBoundary::Finish { advance_iteration } => {
+                if advance_iteration {
+                    self.complete_iteration(continuation.iteration).await?;
+                }
+                self.publish_required_agent_event(
+                    AgentEvent::Finished {
+                        finish_reason: finish_reason_name(FinishReason::Unknown).to_owned(),
+                        usage: self.current_usage(),
+                    },
+                    None,
+                )
+                .await?;
+                self.commit_history(continuation.history);
+                Ok(())
+            }
+            ResumeBoundary::ReconcileTools {
+                assistant_index,
+                committed_call_ids,
+            } => {
+                let tool_calls = continuation
+                    .history
+                    .get(assistant_index)
+                    .ok_or(AgentError::InvalidResumeHistory)?
+                    .tool_calls
+                    .clone();
+                if tool_calls.len() > self.config.max_tool_calls_per_turn {
+                    let error = AgentError::ToolCallLimitExceeded {
+                        limit: self.config.max_tool_calls_per_turn,
+                    };
+                    self.publish_failed(&error).await?;
+                    return Err(error);
+                }
+                let turn_index = usize::try_from(continuation.iteration).map_err(|_| {
+                    AgentError::IterationOutOfRange {
+                        iteration: continuation.iteration,
+                    }
+                })?;
+                let turn_id = self.current_turn().expect("turn id should be set");
+                for tool_call in tool_calls
+                    .iter()
+                    .filter(|tool_call| !committed_call_ids.contains(&tool_call.call_id))
+                {
+                    if self
+                        .cancel_token()
+                        .expect("cancel token should be set")
+                        .is_cancelled()
+                    {
+                        self.publish_cancelled().await?;
+                        return Err(AgentError::Cancelled);
+                    }
+                    let tool_message = match self
+                        .execute_tool_call(turn_index, tool_call, &mut commands)
+                        .await
+                    {
+                        Ok(message) => message,
+                        Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                        Err(error) => {
+                            self.publish_failed(&error).await?;
+                            return Err(error);
+                        }
+                    };
+                    self.publish_required_agent_event(
+                        AgentEvent::Message {
+                            turn_id,
+                            message: tool_message.clone(),
+                        },
+                        None,
+                    )
+                    .await?;
+                    continuation.history.push(tool_message);
+                }
+                self.complete_iteration(continuation.iteration).await?;
+                continuation.iteration = continuation.iteration.checked_add(1).ok_or(
+                    AgentError::IterationOutOfRange {
+                        iteration: continuation.iteration,
+                    },
+                )?;
+                self.continue_turn_loop(continuation.history, continuation.iteration, commands)
+                    .await
+            }
+        }
     }
 
     async fn complete_iteration(&self, iteration: u64) -> Result<(), AgentError> {

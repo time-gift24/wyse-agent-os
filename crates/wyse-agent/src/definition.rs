@@ -61,6 +61,15 @@ struct ActiveGuard<'a> {
     armed: bool,
 }
 
+struct ResumeState {
+    run_id: RunId,
+    turn_id: TurnId,
+    next_iteration: u64,
+    usage: TokenUsage,
+    history: Vec<ChatMessage>,
+    active_turn_start: usize,
+}
+
 impl<'a> ActiveGuard<'a> {
     fn new(active: &'a AtomicBool) -> Self {
         Self {
@@ -152,17 +161,22 @@ impl Agent {
         }
         let active_guard = ActiveGuard::new(&self.active);
 
-        let (run_id, turn_id, next_iteration, usage, history) = self.initialize_resume().await?;
+        let resumed = self.initialize_resume().await?;
+        let continuation = self.prepare_resume_continuation(
+            resumed.history,
+            resumed.active_turn_start,
+            resumed.next_iteration,
+        )?;
 
         let cancel = CancellationToken::new();
         *self
             .current_run_id
             .lock()
-            .expect("current run mutex should not be poisoned") = Some(run_id);
+            .expect("current run mutex should not be poisoned") = Some(resumed.run_id);
         *self
             .current_turn_id
             .lock()
-            .expect("current turn mutex should not be poisoned") = Some(turn_id);
+            .expect("current turn mutex should not be poisoned") = Some(resumed.turn_id);
         *self
             .cancel
             .lock()
@@ -172,15 +186,15 @@ impl Agent {
             .turn_commands
             .lock()
             .expect("turn command mutex should not be poisoned") = Some(command_tx);
-        self.set_usage(usage);
-        self.commit_history(history.clone());
+        self.set_usage(resumed.usage);
+        self.commit_history(continuation.history().to_vec());
 
         let agent = self.clone();
         let active = Arc::clone(&self.active);
         let turn_commands = Arc::clone(&self.turn_commands);
         tokio::spawn(async move {
             let _ = agent
-                .continue_turn_loop(history, next_iteration, command_rx)
+                .continue_resumed_turn_loop(continuation, command_rx)
                 .await;
             *turn_commands
                 .lock()
@@ -189,12 +203,10 @@ impl Agent {
         });
         active_guard.disarm();
 
-        Ok(run_id)
+        Ok(resumed.run_id)
     }
 
-    async fn initialize_resume(
-        &self,
-    ) -> Result<(RunId, TurnId, u64, TokenUsage, Vec<ChatMessage>), AgentError> {
+    async fn initialize_resume(&self) -> Result<ResumeState, AgentError> {
         let state = self.store.load_agent().await?;
         if state.status != AgentStatus::Running {
             return Err(AgentError::ResumeNotRunning {
@@ -213,6 +225,7 @@ impl Agent {
         let mut history = Vec::new();
         let mut after_seq = 0;
         let mut has_active_user_message = false;
+        let mut active_turn_start = None;
         while after_seq < state.last_seq {
             let page = self
                 .store
@@ -254,8 +267,15 @@ impl Agent {
                 else {
                     return Err(AgentError::InvalidResumeHistory);
                 };
-                if message_turn_id == turn_id && message.role == ChatRole::User {
-                    has_active_user_message = true;
+                if message_turn_id == turn_id {
+                    if active_turn_start.is_none() {
+                        active_turn_start = Some(history.len());
+                    }
+                    if message.role == ChatRole::User {
+                        has_active_user_message = true;
+                    }
+                } else if active_turn_start.is_some() {
+                    return Err(AgentError::InvalidResumeHistory);
                 }
                 history.push(message);
             }
@@ -271,7 +291,14 @@ impl Agent {
             return Err(AgentError::InvalidResumeHistory);
         }
 
-        Ok((run_id, turn_id, state.next_iteration, state.usage, history))
+        Ok(ResumeState {
+            run_id,
+            turn_id,
+            next_iteration: state.next_iteration,
+            usage: state.usage,
+            history,
+            active_turn_start: active_turn_start.ok_or(AgentError::InvalidResumeHistory)?,
+        })
     }
 
     /// Cancels the current run, if any.
