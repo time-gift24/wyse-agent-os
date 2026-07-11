@@ -23,8 +23,8 @@ export type AgentConversation = {
   state: ConversationState
   recentAgents: readonly RecentAgent[]
   selectAgent(agentId: string | null): void
-  createConversation(text: string): Promise<void>
-  sendMessage(text: string): Promise<void>
+  createConversation(text: string): Promise<boolean>
+  sendMessage(text: string): Promise<boolean>
   resume(): Promise<void>
   cancel(): Promise<void>
   resolveApproval(
@@ -51,12 +51,42 @@ export function useAgentConversation(): AgentConversation {
     if (storage) setRecentAgents(loadRecentAgents(storage))
   }, [])
 
-  const selectAgent = useCallback((agentId: string | null) => {
-    selectionGeneration.current += 1
-    selectedAgentRef.current = agentId
-    setSelectedAgentId(agentId)
-    dispatch({ type: "agent_selected", agentId })
+  const refreshRecentAgent = useCallback((agentId: string) => {
+    const lastOpenedAt = new Date().toISOString()
+    const storage = browserStorage()
+
+    if (storage) {
+      const existing = loadRecentAgents(storage).find(
+        (agent) => agent.agentId === agentId
+      )
+      if (!existing) return
+
+      rememberRecentAgent(storage, { ...existing, lastOpenedAt })
+      setRecentAgents(loadRecentAgents(storage))
+      return
+    }
+
+    setRecentAgents((agents) => {
+      const existing = agents.find((agent) => agent.agentId === agentId)
+      return existing
+        ? [
+            { ...existing, lastOpenedAt },
+            ...agents.filter((agent) => agent.agentId !== agentId),
+          ]
+        : agents
+    })
   }, [])
+
+  const selectAgent = useCallback(
+    (agentId: string | null) => {
+      if (agentId !== null) refreshRecentAgent(agentId)
+      selectionGeneration.current += 1
+      selectedAgentRef.current = agentId
+      setSelectedAgentId(agentId)
+      dispatch({ type: "agent_selected", agentId })
+    },
+    [refreshRecentAgent]
+  )
 
   useEffect(() => {
     if (selectedAgentId === null) return
@@ -111,7 +141,12 @@ export function useAgentConversation(): AgentConversation {
   }, [reconnectVersion, selectedAgentId])
 
   const reportError = useCallback((error: unknown) => {
-    dispatch({ type: "connection_error", error: toApiError(error) })
+    const apiError = toApiError(error)
+    dispatch(
+      apiError.status === 404
+        ? { type: "missing", error: apiError }
+        : { type: "connection_error", error: apiError }
+    )
   }, [])
 
   const reconnect = useCallback(() => {
@@ -125,13 +160,13 @@ export function useAgentConversation(): AgentConversation {
       const prompt = text.trim()
       if (prompt === "") {
         reportError(new ApiError("invalid_input", 400, "message is required"))
-        return
+        return false
       }
 
       const configuration = apiConfiguration()
       if (configuration instanceof ApiError) {
         reportError(configuration)
-        return
+        return false
       }
 
       const generation = selectionGeneration.current
@@ -139,7 +174,7 @@ export function useAgentConversation(): AgentConversation {
         const created = await createWyseApi({
           baseUrl: configuration.baseUrl,
         }).createAgent({ agentName: configuration.agentName, text: prompt })
-        if (generation !== selectionGeneration.current) return
+        if (generation !== selectionGeneration.current) return false
 
         const recentAgent: RecentAgent = {
           agentId: created.agent_id,
@@ -158,8 +193,10 @@ export function useAgentConversation(): AgentConversation {
           ])
         }
         selectAgent(created.agent_id)
+        return true
       } catch (error) {
         if (generation === selectionGeneration.current) reportError(error)
+        return false
       }
     },
     [reportError, selectAgent]
@@ -192,20 +229,28 @@ export function useAgentConversation(): AgentConversation {
       const message = text.trim()
       if (message === "") {
         reportError(new ApiError("invalid_input", 400, "message is required"))
-        return
+        return false
       }
 
+      if (state.phase === "recovering" || state.view?.status === "running")
+        return false
+
       const client = selectedClient()
-      if (!client) return
+      if (!client) return false
 
       try {
         await client.api.sendMessage(client.agentId, message)
+        return true
       } catch (error) {
-        if (client.generation === selectionGeneration.current)
+        if (
+          client.generation === selectionGeneration.current &&
+          !isApiErrorCode(error, "agent_busy")
+        )
           reportError(error)
+        return false
       }
     },
-    [reportError, selectedClient]
+    [reportError, selectedClient, state.phase, state.view?.status]
   )
 
   const resume = useCallback(async () => {

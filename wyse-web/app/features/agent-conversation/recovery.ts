@@ -34,10 +34,12 @@ export async function recoverConversation(
         continue
       }
 
-      dependencies.dispatch({
-        type: "connection_error",
-        error: connectionError(error),
-      })
+      const connection = connectionError(error)
+      dependencies.dispatch(
+        connection.status === 404
+          ? { type: "missing", error: connection }
+          : { type: "connection_error", error: connection }
+      )
       return
     }
   }
@@ -61,7 +63,11 @@ async function recoverOnce(
       dependencies.saveCursor(input.agentId, bufferedEnvelope.cursor)
   }
 
-  dependencies.dispatch({ type: "recovery_started", agentId: input.agentId })
+  dependencies.dispatch({
+    type: "recovery_started",
+    agentId: input.agentId,
+    preserveTransient: afterCursor !== undefined,
+  })
   const subscription = dependencies.subscribe({
     // The hook binds the configured base URL before this reaches fetch.
     baseUrl: "",

@@ -47,16 +47,20 @@ export function ChatWorkspace() {
   >(() => new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const { state } = conversation
+  const isAgentBusy =
+    state.phase === "recovering" || state.view?.status === "running"
 
   const submitMessage = async () => {
     const text = composerText.trim()
-    if (text === "" || isSubmitting) return
+    if (text === "" || isSubmitting || isAgentBusy) return
 
     setIsSubmitting(true)
     try {
-      if (state.agentId === null) await conversation.createConversation(text)
-      else await conversation.sendMessage(text)
-      setComposerText("")
+      const sent =
+        state.agentId === null
+          ? await conversation.createConversation(text)
+          : await conversation.sendMessage(text)
+      if (sent) setComposerText("")
     } finally {
       setIsSubmitting(false)
     }
@@ -266,7 +270,7 @@ export function ChatWorkspace() {
                 placeholder={t("chat.composer.placeholder")}
                 rows={2}
                 value={composerText}
-                disabled={isSubmitting}
+                disabled={isSubmitting || isAgentBusy}
                 onChange={(event) => setComposerText(event.target.value)}
               />
             </CardContent>
@@ -284,9 +288,7 @@ export function ChatWorkspace() {
                   >
                     {t("chat.reconnect")}
                   </Button>
-                ) : state.agentId !== null &&
-                  (state.phase === "recovering" ||
-                    state.view?.status === "running") ? (
+                ) : state.agentId !== null && isAgentBusy ? (
                   <Button
                     type="button"
                     variant="outline"
@@ -306,7 +308,9 @@ export function ChatWorkspace() {
                 <Button
                   type="button"
                   size="lg"
-                  disabled={composerText.trim() === "" || isSubmitting}
+                  disabled={
+                    composerText.trim() === "" || isSubmitting || isAgentBusy
+                  }
                   onClick={() => void submitMessage()}
                 >
                   {t("chat.composer.send")}

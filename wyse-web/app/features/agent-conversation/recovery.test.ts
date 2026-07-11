@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { ConversationAction } from "~/features/agent-conversation/types"
 import {
+  conversationReducer,
+  initialConversationState,
+} from "~/features/agent-conversation/reducer"
+import {
   recoverConversation,
   type RecoveryDependencies,
 } from "~/features/agent-conversation/recovery"
@@ -247,5 +251,113 @@ describe("recoverConversation", () => {
       envelope: messageEnvelope("agent-1", 1, "selected"),
     })
     expect(saveCursor).toHaveBeenCalledExactlyOnceWith("agent-1", "11")
+  })
+
+  it("keeps same-Agent transient projections when reconnecting after a cursor", async () => {
+    let state = conversationReducer(initialConversationState, {
+      type: "recovery_started",
+      agentId: "agent-1",
+    })
+    state = conversationReducer(state, {
+      type: "envelope_received",
+      envelope: {
+        ...messageEnvelope("agent-1", 1, "stored"),
+        event: {
+          type: "agent",
+          data: {
+            agent_id: "agent-1",
+            event: {
+              type: "llm",
+              data: {
+                llm_call_id: "llm-1",
+                event: {
+                  type: "text_delta",
+                  data: { role: "assistant", delta: "draft" },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    state = conversationReducer(state, {
+      type: "envelope_received",
+      envelope: {
+        ...messageEnvelope("agent-1", 1, "stored"),
+        event: {
+          type: "agent",
+          data: {
+            agent_id: "agent-1",
+            event: {
+              type: "llm",
+              data: {
+                llm_call_id: "llm-1",
+                event: {
+                  type: "tool_call_started",
+                  data: { call_id: "call-1", name: "read_file" },
+                },
+              },
+            },
+          },
+        },
+      },
+    })
+    state = conversationReducer(state, {
+      type: "envelope_received",
+      envelope: {
+        ...messageEnvelope("agent-1", 1, "stored"),
+        event: {
+          type: "agent",
+          data: {
+            agent_id: "agent-1",
+            event: {
+              type: "tool_approval_requested",
+              data: {
+                approval_id: "approval-1",
+                agent_name: "coding-agent",
+                call_id: "call-1",
+                tool_name: "read_file",
+                arguments: {},
+                tool_kind: "read",
+                danger_level: "low",
+              },
+            },
+          },
+        },
+      },
+    })
+
+    const recovery = createRecoveryHarness({
+      loadCursor: () => "11",
+      dispatch: (action) => {
+        state = conversationReducer(state, action)
+      },
+    })
+
+    await recovery.recover("agent-1")
+
+    expect(state.drafts["llm-1"]).toEqual({ text: "draft", reasoning: "" })
+    expect(state.tools["call-1"]?.status).toBe("streaming")
+    expect(state.approvals["approval-1"]?.toolName).toBe("read_file")
+  })
+
+  it("marks a missing Agent when recovery receives a 404", async () => {
+    const dispatched: ConversationAction[] = []
+    const recovery = createRecoveryHarness({
+      api: {
+        getAgent: async () => {
+          throw new ApiError("agent_not_found", 404, "agent is missing")
+        },
+        getHistory: async () => historyPage([], 0, false),
+      },
+      dispatch: (action) => dispatched.push(action),
+    })
+
+    await recovery.recover("agent-1")
+
+    expect(dispatched).toContainEqual({
+      type: "missing",
+      error: expect.objectContaining({ status: 404 }),
+    })
   })
 })

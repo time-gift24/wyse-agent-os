@@ -43,7 +43,7 @@ export type ConversationState = {
 
 export type ConversationAction =
   | { type: "agent_selected"; agentId: string | null }
-  | { type: "recovery_started"; agentId: string }
+  | { type: "recovery_started"; agentId: string; preserveTransient?: boolean }
   | { type: "view_loaded"; view: AgentView }
   | { type: "history_loaded"; events: readonly StreamEnvelope[] }
   | { type: "envelope_received"; envelope: StreamEnvelope }

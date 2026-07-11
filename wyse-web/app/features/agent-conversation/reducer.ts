@@ -32,6 +32,8 @@ export function conversationReducer(
             phase: "recovering",
           }
     case "recovery_started":
+      if (action.preserveTransient && state.agentId === action.agentId)
+        return { ...state, phase: "recovering", error: null }
       return {
         ...initialConversationState,
         agentId: action.agentId,
