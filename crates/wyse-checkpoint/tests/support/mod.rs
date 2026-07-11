@@ -20,6 +20,8 @@ pub(super) struct MemoryCasFilesystem {
     read_counts: Mutex<BTreeMap<VirtualPath, u64>>,
     list_count: AtomicUsize,
     next_version: AtomicUsize,
+    fail_absent_writes: AtomicBool,
+    absent_write_attempts: AtomicUsize,
     fail_next_version_write: AtomicBool,
     pause_next_version_write: AtomicBool,
     version_write_paused: Notify,
@@ -72,6 +74,14 @@ impl MemoryCasFilesystem {
 
     pub(super) fn fail_next_version_write(&self) {
         self.fail_next_version_write.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn fail_absent_writes(&self) {
+        self.fail_absent_writes.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn absent_write_attempts(&self) -> usize {
+        self.absent_write_attempts.load(Ordering::SeqCst)
     }
 
     pub(super) fn version_write_failure_pending(&self) -> bool {
@@ -164,6 +174,11 @@ impl Filesystem for MemoryCasFilesystem {
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
+        if matches!(cas, CasExpectation::Absent) && self.fail_absent_writes.load(Ordering::SeqCst) {
+            self.absent_write_attempts.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            return Err(FilesystemError::VersionMismatch { path: path.clone() });
+        }
         if matches!(cas, CasExpectation::Version(_))
             && self.pause_next_version_write.swap(false, Ordering::SeqCst)
         {

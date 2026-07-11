@@ -11,7 +11,7 @@ use wyse_core::{
     AgentEvent, AgentId, ChatMessage, ChatRole, EventSource, HistoryQuery, RunId, RuntimeEvent,
     StreamEnvelope, TokenUsage, TurnId,
 };
-use wyse_filesystem::{Entry, VirtualPath};
+use wyse_filesystem::{Entry, FILESYSTEM_CAS_RETRIES, VirtualPath};
 
 fn message_envelope(agent_id: AgentId, run_id: RunId, turn_id: TurnId) -> StreamEnvelope {
     StreamEnvelope {
@@ -155,6 +155,84 @@ async fn append_rejects_a_system_message_before_writing() {
     ));
     assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
     assert!(!filesystem.exists("/agents/a/messages/1.json"));
+}
+
+#[tokio::test]
+async fn load_rejects_a_committed_system_message() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let mut state = checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    state.last_seq = 1;
+    filesystem.insert_entry("/agents/a/agent.json", json_entry(&state));
+    let mut envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let RuntimeEvent::Agent {
+        event: AgentEvent::Message { message, .. },
+        ..
+    } = &mut envelope.event
+    else {
+        panic!("message fixture");
+    };
+    *message = ChatMessage::system("system prompt");
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
+
+    let error = checkpoint
+        .load_agent()
+        .await
+        .expect_err("committed system message role");
+
+    assert!(matches!(
+        error,
+        CheckpointError::InvalidMessageRole {
+            role: ChatRole::System
+        }
+    ));
+}
+
+#[tokio::test]
+async fn load_rejects_an_uncommitted_system_frontier_without_advancing_state() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let mut envelope = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
+    let RuntimeEvent::Agent {
+        event: AgentEvent::Message { message, .. },
+        ..
+    } = &mut envelope.event
+    else {
+        panic!("message fixture");
+    };
+    *message = ChatMessage::system("system prompt");
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
+
+    let error = checkpoint
+        .load_agent()
+        .await
+        .expect_err("uncommitted system frontier role");
+
+    assert!(matches!(
+        error,
+        CheckpointError::InvalidMessageRole {
+            role: ChatRole::System
+        }
+    ));
+    let persisted: AgentState = serde_json::from_slice(
+        filesystem
+            .entry("/agents/a/agent.json")
+            .expect("agent entry")
+            .contents(),
+    )
+    .expect("agent state");
+    assert_eq!(persisted.last_seq, 0);
 }
 
 #[tokio::test]
@@ -601,6 +679,61 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
 }
 
 #[tokio::test]
+async fn state_update_reconciles_the_previous_run_frontier_before_replacing_identity() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    let old_run_id = RunId::new();
+    let old_turn_id = TurnId::new();
+    checkpoint
+        .update_state(
+            AgentStatus::Running,
+            Some(old_run_id),
+            Some(old_turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("store old identity");
+    let old_frontier = sequenced_message_envelope(agent_id, old_run_id, old_turn_id, 1);
+    filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&old_frontier));
+    let new_run_id = RunId::new();
+    let new_turn_id = TurnId::new();
+
+    let updated = checkpoint
+        .update_state(
+            AgentStatus::Running,
+            Some(new_run_id),
+            Some(new_turn_id),
+            TokenUsage::default(),
+        )
+        .await
+        .expect("store new identity after reconciliation");
+
+    assert_eq!(updated.last_seq, 1);
+    assert_eq!(updated.run_id, Some(new_run_id));
+    assert_eq!(updated.turn_id, Some(new_turn_id));
+    let page = checkpoint
+        .history_page(HistoryQuery {
+            after_seq: 0,
+            through_seq: Some(1),
+            limit: 1,
+        })
+        .await
+        .expect("old frontier is committed and loadable");
+    assert_eq!(page.events, [old_frontier]);
+    let appended = checkpoint
+        .append_message(message_envelope(agent_id, new_run_id, new_turn_id))
+        .await
+        .expect("append new-run message");
+    assert_eq!(appended.business_seq(), Some(2));
+}
+
+#[tokio::test]
 async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
@@ -876,6 +1009,30 @@ async fn append_reads_only_state_and_the_constant_size_frontier() {
     }
     assert_eq!(filesystem.read_count("/agents/a/messages/11.json"), 1);
     assert_eq!(filesystem.read_count("/agents/a/messages/12.json"), 1);
+}
+
+#[tokio::test]
+async fn append_stops_after_the_filesystem_cas_retry_limit() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    checkpoint
+        .initialize(agent_id, "a".to_owned())
+        .await
+        .expect("initialize");
+    filesystem.fail_absent_writes();
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        checkpoint.append_message(message_envelope(agent_id, RunId::new(), TurnId::new())),
+    )
+    .await
+    .expect("append terminates")
+    .expect_err("append retry exhaustion");
+
+    assert!(matches!(error, CheckpointError::CasRetriesExhausted));
+    assert_eq!(filesystem.absent_write_attempts(), FILESYSTEM_CAS_RETRIES);
 }
 
 #[tokio::test]

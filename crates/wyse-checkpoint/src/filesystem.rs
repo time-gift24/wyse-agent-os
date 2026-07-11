@@ -17,8 +17,8 @@ use wyse_core::{
     StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{
-    CasExpectation, CasUpdateError, Entry, FileType, Filesystem, FilesystemError, VirtualPath,
-    cas_update,
+    CasExpectation, CasUpdateError, Entry, FILESYSTEM_CAS_RETRIES, FileType, Filesystem,
+    FilesystemError, VirtualPath, cas_update,
 };
 
 use crate::{
@@ -275,6 +275,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         turn_id: Option<TurnId>,
         usage: TokenUsage,
     ) -> Result<AgentState, CheckpointError> {
+        self.load_agent().await?;
         let updated_at = Utc::now();
         let attempts = AtomicUsize::new(0);
         let result = cas_update(
@@ -313,18 +314,11 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         else {
             return Err(CheckpointError::UnexpectedMessageEvent);
         };
-        if !matches!(
-            message.role,
-            ChatRole::User | ChatRole::Assistant | ChatRole::Tool
-        ) {
-            return Err(CheckpointError::InvalidMessageRole { role: message.role });
-        }
+        validate_message_role(message.role)?;
         let input_agent_id = *agent_id;
         let run_id = envelope.run_id;
         let turn_id = *turn_id;
-        let mut append_attempt = 0_u64;
-        loop {
-            append_attempt = append_attempt.saturating_add(1);
+        for append_attempt in 1..=FILESYSTEM_CAS_RETRIES {
             let state = self.read_state().await?;
             if input_agent_id != state.agent_id {
                 return Err(CheckpointError::AgentMismatch {
@@ -392,6 +386,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                 Err(error) => return Err(error.into()),
             }
         }
+        Err(CheckpointError::CasRetriesExhausted)
     }
 
     async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage, CheckpointError> {
@@ -534,9 +529,10 @@ fn validate_message(
             actual: *agent_id,
         });
     }
-    let AgentEvent::Message { turn_id, .. } = event else {
+    let AgentEvent::Message { turn_id, message } = event else {
         return Err(CheckpointError::UnexpectedMessageEvent);
     };
+    validate_message_role(message.role)?;
     if envelope.business_seq != Some(path_seq) {
         return Err(CheckpointError::MessageSequenceMismatch {
             path_seq,
@@ -552,6 +548,13 @@ fn validate_message(
         });
     }
     Ok(())
+}
+
+fn validate_message_role(role: ChatRole) -> Result<(), CheckpointError> {
+    match role {
+        ChatRole::User | ChatRole::Assistant | ChatRole::Tool => Ok(()),
+        role => Err(CheckpointError::InvalidMessageRole { role }),
+    }
 }
 
 fn validate_strict_message_json(value: &Value) -> Result<(), serde_json::Error> {
