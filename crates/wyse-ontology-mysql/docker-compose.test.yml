@@ -1,0 +1,17 @@
+name: wyse-ontology-mysql-test
+
+services:
+  mysql:
+    image: mysql:8
+    ports:
+      - "33067:3306"
+    environment:
+      MYSQL_DATABASE: wyse_ontology
+      MYSQL_USER: ontology
+      MYSQL_PASSWORD: ontology
+      MYSQL_ROOT_PASSWORD: root
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-proot"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

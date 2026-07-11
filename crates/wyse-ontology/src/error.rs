@@ -75,10 +75,28 @@ pub enum OntologyError {
         /// Identity of the missing object.
         id: ObjectId,
     },
+    /// An object changed since the caller's expected version.
+    #[error("object {id} changed concurrently")]
+    ObjectVersionConflict {
+        /// Identity of the concurrently changed object.
+        id: ObjectId,
+    },
+    /// An object cannot be deleted while links still reference it.
+    #[error("object {id} is still referenced by links")]
+    ObjectReferenced {
+        /// Identity of the referenced object.
+        id: ObjectId,
+    },
     /// A link instance does not exist.
     #[error("link {id} does not exist")]
     LinkMissing {
         /// Identity of the missing link.
+        id: LinkId,
+    },
+    /// A link changed since the caller's expected version.
+    #[error("link {id} changed concurrently")]
+    LinkVersionConflict {
+        /// Identity of the concurrently changed link.
         id: LinkId,
     },
     /// A repository operation failed.

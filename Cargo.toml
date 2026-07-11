@@ -11,6 +11,7 @@ members = [
     "crates/stratum-llm",
     "crates/stratum-tools",
     "crates/wyse-ontology",
+    "crates/wyse-ontology-mysql",
 ]
 resolver = "3"
 
@@ -53,6 +54,7 @@ stratum-infra = { path = "crates/stratum-infra" }
 stratum-llm = { path = "crates/stratum-llm" }
 stratum-tools = { path = "crates/stratum-tools" }
 stratum-api = { path = "crates/stratum-api" }
+wyse-filesystem = { package = "stratum-filesystem", path = "crates/stratum-filesystem" }
 wyse-ontology = { path = "crates/wyse-ontology" }
 
 [workspace.lints.clippy]
