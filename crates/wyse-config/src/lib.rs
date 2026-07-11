@@ -12,6 +12,7 @@ use wyse_infra::NatsEventStreamBusConfig;
 /// Top-level Wyse configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct Config {
     /// Agent filesystem configuration.
     pub agent: AgentConfig,
@@ -28,6 +29,7 @@ pub struct Config {
 /// Agent filesystem configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct AgentConfig {
     /// Root directory for persisted agent state.
     pub storage_root: PathBuf,
@@ -36,6 +38,7 @@ pub struct AgentConfig {
 /// HTTP API configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ApiConfig {
     /// Socket address on which the API listens.
     pub bind: SocketAddr,
@@ -47,6 +50,7 @@ pub struct ApiConfig {
 /// NATS event stream bus configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct NatsConfig {
     /// NATS server URL.
     pub url: String,
@@ -80,21 +84,19 @@ impl AgentName {
 impl FromStr for AgentName {
     type Err = ConfigError;
 
-    /// Parses a lowercase kebab-case agent name of at most 64 bytes.
+    /// Parses an ASCII agent name matching `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::InvalidAgentName`] if the value is empty, too long, or not
-    /// lowercase ASCII kebab-case.
+    /// the documented ASCII pattern.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let valid = !value.is_empty()
-            && value.len() <= 64
-            && value.split('-').all(|segment| {
-                !segment.is_empty()
-                    && segment
-                        .bytes()
-                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-            });
+        let mut bytes = value.bytes();
+        let valid = value.len() <= 64
+            && bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
         if !valid {
             return Err(ConfigError::InvalidAgentName {
                 value: value.to_owned(),
@@ -121,6 +123,7 @@ impl From<AgentName> for String {
 /// LLM defaults and supported providers.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct LlmConfig {
     /// Model used when an agent template does not override it.
     pub default: ModelId,
@@ -135,6 +138,7 @@ pub struct LlmConfig {
 /// Credentials and allowed models for one LLM provider.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ProviderConfig {
     /// Provider API key.
     pub api_key: String,
@@ -145,6 +149,7 @@ pub struct ProviderConfig {
 /// Validated, self-contained agent definition without provider credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ResolvedAgentDefinition {
     /// Agent name.
     pub agent_name: AgentName,
@@ -370,6 +375,8 @@ fn validate_tools(tools: &[ToolName]) -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as StdError;
+
     use super::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
     use wyse_infra::NatsEventStreamBusConfig;
 
@@ -420,6 +427,24 @@ prompt = "  You are a coding agent.  "
     fn rejects_unknown_config_field() {
         let input = VALID_CONFIG.replace("[agent]", "[agent]\nunknown = true");
         assert!(matches!(Config::parse(&input), Err(ConfigError::Toml(_))));
+    }
+
+    #[test]
+    fn malformed_toml_error_redacts_input_from_entire_source_chain() {
+        let secret = "malformed-secret-key";
+        let input = format!("[agent]\nstorage_root = \"{secret}");
+        let error = Config::parse(&input).expect_err("malformed TOML is rejected");
+
+        assert_error_chain_redacts(&error, secret);
+    }
+
+    #[test]
+    fn unknown_field_error_redacts_input_from_entire_source_chain() {
+        let secret = "secret-key";
+        let input = VALID_CONFIG.replace("[agent]", "[agent]\nunknown = true");
+        let error = Config::parse(&input).expect_err("unknown field is rejected");
+
+        assert_error_chain_redacts(&error, secret);
     }
 
     #[test]
@@ -483,15 +508,16 @@ prompt = "  You are a coding agent.  "
     }
 
     #[test]
+    fn agent_name_accepts_uppercase_underscore_and_flexible_hyphens() {
+        for value in ["CodingAgent", "coding_agent", "a--b", "coding-"] {
+            let name: AgentName = value.parse().expect("name parses");
+            assert_eq!(name.as_str(), value);
+        }
+    }
+
+    #[test]
     fn rejects_invalid_agent_names() {
-        for value in [
-            "",
-            "Coding-Agent",
-            "coding_agent",
-            "-coding",
-            "coding-",
-            "a--b",
-        ] {
+        for value in ["", "éagent", "_coding", "-coding"] {
             assert!(matches!(
                 value.parse::<AgentName>(),
                 Err(ConfigError::InvalidAgentName { .. })
@@ -666,5 +692,17 @@ prompt = "Use tools."
 
         assert!(!format!("{error:?}").contains("secret-key"));
         assert!(!error.to_string().contains("secret-key"));
+    }
+
+    fn assert_error_chain_redacts(error: &ConfigError, secret: &str) {
+        assert!(!format!("{error:?}").contains(secret));
+        assert!(!error.to_string().contains(secret));
+
+        let mut source = StdError::source(error);
+        while let Some(error) = source {
+            assert!(!format!("{error:?}").contains(secret));
+            assert!(!error.to_string().contains(secret));
+            source = error.source();
+        }
     }
 }

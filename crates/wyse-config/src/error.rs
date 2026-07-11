@@ -13,7 +13,7 @@ pub enum ConfigError {
     /// A resolved definition could not be encoded as TOML.
     #[error("could not encode TOML definition")]
     TomlEncode(#[source] toml::ser::Error),
-    /// An agent name was not a lowercase kebab-case name.
+    /// An agent name did not match the required ASCII pattern.
     #[error("invalid agent name `{value}`")]
     InvalidAgentName { value: String },
     /// The agent storage root was empty.
@@ -26,7 +26,7 @@ pub enum ConfigError {
     #[error("duplicate tool `{tool}`")]
     DuplicateTool { tool: String },
     /// A provider API key was empty.
-    #[error("API key for provider `{provider}` must not be empty")]
+    #[error("api key for provider `{provider}` must not be empty")]
     EmptyApiKey { provider: &'static str },
     /// A provider had no configured models.
     #[error("provider `{provider}` must configure at least one model")]
@@ -44,12 +44,13 @@ pub enum ConfigError {
     #[error("missing required configuration section `{section}`")]
     MissingSection { section: &'static str },
     /// A NATS field was not valid for the event stream bus.
-    #[error("invalid NATS configuration field `{field}`")]
+    #[error("invalid nats configuration field `{field}`")]
     InvalidNatsConfig { field: &'static str },
 }
 
 impl From<toml::de::Error> for ConfigError {
-    fn from(source: toml::de::Error) -> Self {
+    fn from(mut source: toml::de::Error) -> Self {
+        source.set_input(None);
         Self::Toml(source)
     }
 }
