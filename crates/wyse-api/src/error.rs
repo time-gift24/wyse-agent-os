@@ -16,6 +16,9 @@ use wyse_tools::ToolError;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AgentCleanupError {
+    /// Cleanup did not finish within the shutdown bound.
+    #[error("agent cleanup timed out")]
+    Timeout,
     /// The messages directory could not be listed.
     #[error("could not list agent messages during cleanup")]
     ListMessages(#[source] FilesystemError),

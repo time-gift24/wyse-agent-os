@@ -394,6 +394,37 @@ struct TestEventStreamBus {
     subscription: Mutex<Option<Result<EventStream, EventStreamBusError>>>,
 }
 
+struct PendingPublishBus {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl PendingPublishBus {
+    fn new() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl EventStreamBus for PendingPublishBus {
+    async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(())
+    }
+
+    async fn subscribe_agent(
+        &self,
+        _agent_id: AgentId,
+        _replay_start: ReplayStart,
+    ) -> Result<EventStream, EventStreamBusError> {
+        Ok(Box::pin(stream::pending()))
+    }
+}
+
 impl TestEventStreamBus {
     fn with_events(events: Vec<Result<EventRecord, EventStreamBusError>>) -> Self {
         Self {
@@ -725,6 +756,64 @@ struct FailTerminalStateFilesystem {
     inner: Arc<dyn Filesystem>,
     failing: AtomicBool,
     failed_writes: AtomicUsize,
+}
+
+struct FailNextMessageFilesystem {
+    inner: Arc<dyn Filesystem>,
+    fail_next_message: AtomicBool,
+}
+
+#[async_trait]
+impl Filesystem for FailNextMessageFilesystem {
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if path.as_str().contains("/messages/")
+            && self.fail_next_message.swap(false, Ordering::SeqCst)
+        {
+            return Err(FilesystemError::PermissionDenied { path: path.clone() });
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+        self.inner.read_file(path).await
+    }
+
+    async fn write_file(
+        &self,
+        path: &VirtualPath,
+        contents: Vec<u8>,
+    ) -> Result<(), FilesystemError> {
+        self.inner.write_file(path, contents).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn metadata(&self, path: &VirtualPath) -> Result<FileMetadata, FilesystemError> {
+        self.inner.metadata(path).await
+    }
+
+    async fn create_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.create_dir(path).await
+    }
+
+    async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.remove_file(path).await
+    }
+
+    async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.remove_dir(path).await
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1865,6 +1954,177 @@ async fn resume_accepts_a_persisted_running_turn_and_clears_marker() {
 }
 
 #[tokio::test]
+async fn resume_reconciles_started_only_state_after_message_write_failure() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let filesystem = Arc::new(FailNextMessageFilesystem {
+        inner: Arc::clone(&fixture.filesystem),
+        fail_next_message: AtomicBool::new(true),
+    });
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        filesystem as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let app = router(Arc::clone(&host));
+    let before = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .history_page(wyse_core::HistoryQuery {
+            after_seq: 0,
+            through_seq: None,
+            limit: 100,
+        })
+        .await
+        .expect("old history loads");
+
+    let failed = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "lost preamble"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let started_only = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(started_only.status, AgentStatus::Running);
+    assert_eq!(started_only.last_seq, before.through_seq);
+
+    let reconciled = app
+        .clone()
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/resume"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(reconciled.status(), StatusCode::CONFLICT);
+    let body = to_bytes(reconciled.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    let body: Value = serde_json::from_slice(&body).expect("body is json");
+    assert_eq!(body["error"]["code"], "resume_not_running");
+    let terminal = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(terminal.status, AgentStatus::Failed);
+    assert_eq!(terminal.run_id, started_only.run_id);
+    assert_eq!(terminal.turn_id, started_only.turn_id);
+    assert_eq!(terminal.last_seq, started_only.last_seq);
+    assert!(!host.agent(agent_id).expect("agent exists").needs_resume());
+
+    let accepted = app
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"text": "new message"}).to_string()))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    let after = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .history_page(wyse_core::HistoryQuery {
+            after_seq: 0,
+            through_seq: None,
+            limit: 100,
+        })
+        .await
+        .expect("new history loads");
+    assert_eq!(after.events[0], before.events[0]);
+    assert_eq!(after.events.len(), before.events.len() + 1);
+}
+
+#[tokio::test]
+async fn resume_does_not_reconcile_a_current_turn_with_any_durable_invalid_message() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let store = FilesystemAgentStore::new(
+        Arc::clone(&fixture.filesystem),
+        format!("/history/{agent_id}").parse().expect("root parses"),
+    );
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    store
+        .append_message(StreamEnvelope {
+            business_seq: None,
+            run_id,
+            timestamp: Utc::now(),
+            source: EventSource::Run,
+            event: RuntimeEvent::Agent {
+                agent_id,
+                event: AgentEvent::Message {
+                    turn_id,
+                    message: ChatMessage::assistant("invalid without user"),
+                },
+            },
+            metadata: BTreeMap::new(),
+        })
+        .await
+        .expect("invalid resume fixture message persists");
+    store
+        .update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            Default::default(),
+        )
+        .await
+        .expect("running state persists");
+    let host = fixture.restore_host().await.expect("host restores");
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/resume"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        host.agent(agent_id)
+            .expect("agent exists")
+            .store
+            .load_agent()
+            .await
+            .expect("state loads")
+            .status,
+        AgentStatus::Running
+    );
+}
+
+#[tokio::test]
 async fn message_preamble_failure_marks_existing_agent_for_resume() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
@@ -2697,7 +2957,7 @@ async fn shutdown_stops_an_active_turn_and_waits_for_its_terminal_state() {
 }
 
 #[tokio::test]
-async fn shutdown_waits_for_an_admitted_request_before_snapshot_and_stop() {
+async fn shutdown_cancels_a_pending_admitted_store_operation_within_the_drain_bound() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
         .persist_agent("coding-agent", AgentStatus::Idle)
@@ -2733,20 +2993,14 @@ async fn shutdown_waits_for_an_admitted_request_before_snapshot_and_stop() {
 
     let shutdown_host = Arc::clone(&host);
     let mut shutdown = tokio::spawn(async move { shutdown_host.shutdown().await });
-    assert!(
-        timeout(Duration::from_millis(25), &mut shutdown)
-            .await
-            .is_err(),
-        "shutdown must wait for the admitted request"
-    );
-    filesystem.release();
-
-    let response = request.await.expect("request task completes");
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    timeout(Duration::from_secs(1), &mut shutdown)
+    timeout(Duration::from_secs(2), &mut shutdown)
         .await
-        .expect("shutdown completes after admission drains")
+        .expect("shutdown is bounded while Store is pending")
         .expect("shutdown task succeeds");
+    let response = request.await.expect("request task completes");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    filesystem.release();
+    tokio::task::yield_now().await;
     assert_eq!(
         host.agent(agent_id)
             .expect("agent exists")
@@ -2755,7 +3009,7 @@ async fn shutdown_waits_for_an_admitted_request_before_snapshot_and_stop() {
             .await
             .expect("state loads")
             .status,
-        AgentStatus::Cancelled
+        AgentStatus::Idle
     );
 }
 
@@ -2811,6 +3065,57 @@ async fn shutdown_rejects_new_create_message_and_resume_without_store_io() {
         assert_eq!(body["error"]["code"], "service_unavailable");
     }
     assert_eq!(filesystem.operations(), 0);
+}
+
+#[tokio::test]
+async fn shutdown_cancels_pending_create_event_publish_and_never_registers_late() {
+    let fixture = Fixture::new().await;
+    fixture.persist_template("coding-agent", "\"echo\"");
+    let bus = Arc::new(PendingPublishBus::new());
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::clone(&bus) as Arc<dyn EventStreamBus>,
+        providers,
+    )
+    .await
+    .expect("host restores");
+    let app = router(Arc::clone(&host));
+    let request = tokio::spawn(async move {
+        app.oneshot(
+            Request::post("/v1/agents")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"agent_name": "coding-agent", "text": "new"}).to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes")
+    });
+    timeout(Duration::from_secs(1), bus.entered.notified())
+        .await
+        .expect("create reaches pending event publish");
+
+    timeout(Duration::from_secs(2), host.shutdown())
+        .await
+        .expect("shutdown is bounded while event publish is pending");
+    let response = request.await.expect("request task completes");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    bus.release.notify_one();
+    tokio::task::yield_now().await;
+
+    assert!(
+        fs::read_dir(fixture.root.join("history"))
+            .expect("history is readable")
+            .next()
+            .is_none(),
+        "cancelled create must clean its unaccepted directory"
+    );
 }
 
 #[test]

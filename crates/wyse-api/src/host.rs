@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -28,6 +28,8 @@ use crate::{AgentCleanupError, HostError};
 const HISTORY_ROOT: &str = "/history";
 const TEMPLATE_ROOT: &str = "/templates";
 const DEFINITION_FILE: &str = "definition.toml";
+const ADMISSION_DRAIN_GRACE: Duration = Duration::from_secs(1);
+const CREATION_CLEANUP_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -126,6 +128,10 @@ impl AdmissionState {
 
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     async fn wait_until_drained(&self) {
@@ -267,12 +273,24 @@ impl HostState {
         self.admission.acquire()
     }
 
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.admission.is_closed()
+    }
+
     /// Cancels HTTP streams and active turns, then waits up to the bounded grace period for
     /// terminal state persistence. A timed-out running state remains durable for explicit resume.
     pub async fn shutdown(&self) {
         self.admission.close();
         self.shutdown.cancel();
-        self.admission.wait_until_drained().await;
+        if timeout(ADMISSION_DRAIN_GRACE, self.admission.wait_until_drained())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                grace_millis = ADMISSION_DRAIN_GRACE.as_millis(),
+                "agent admission drain grace elapsed"
+            );
+        }
         let agents = self
             .agents
             .read()
@@ -333,26 +351,32 @@ impl HostState {
             return Err(HostError::EmptyText);
         }
 
-        let template_path = template_path(&agent_name)?;
-        let template = match self.filesystem.read_file(&template_path).await {
-            Ok(template) => template,
-            Err(FilesystemError::NotFound { .. }) => {
-                return Err(HostError::TemplateNotFound { agent_name });
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let template = std::str::from_utf8(&template)
-            .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
-        let definition = self.config.resolve_template(agent_name.clone(), template)?;
-        let encoded_definition = definition.encode()?.into_bytes();
-        let provider = self.providers.get(&definition.model)?;
-        let registry = tool_registry(&definition)?;
         let agent_id = AgentId::new();
         let root = agent_root(agent_id)?;
         let definition_path = child_path(&root, DEFINITION_FILE)?;
-        self.filesystem.create_dir(&root).await?;
-
-        let result = async {
+        let root_may_exist = AtomicBool::new(false);
+        let durable_accepted = AtomicBool::new(false);
+        let created_agent = Arc::new(Mutex::new(None::<Agent>));
+        let shutdown = self.shutdown.clone();
+        let template_path = template_path(&agent_name)?;
+        let operation = async {
+            let template = match self.filesystem.read_file(&template_path).await {
+                Ok(template) => template,
+                Err(FilesystemError::NotFound { .. }) => {
+                    return Err(HostError::TemplateNotFound {
+                        agent_name: agent_name.clone(),
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let template = std::str::from_utf8(&template)
+                .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
+            let definition = self.config.resolve_template(agent_name.clone(), template)?;
+            let encoded_definition = definition.encode()?.into_bytes();
+            let provider = self.providers.get(&definition.model)?;
+            let registry = tool_registry(&definition)?;
+            self.filesystem.create_dir(&root).await?;
+            root_may_exist.store(true, Ordering::Release);
             self.filesystem
                 .put(
                     &definition_path,
@@ -381,28 +405,53 @@ impl HostState {
                 .event_bus(agent_bus)
                 .store(Arc::clone(&store))
                 .build()?;
+            *created_agent
+                .lock()
+                .expect("created agent lock should not be poisoned") = Some(agent.clone());
             let run_id = agent.run_turn(ChatMessage::user(text)).await?;
+            durable_accepted.store(true, Ordering::Release);
             let hosted = Arc::new(HostedAgent {
                 agent,
                 store,
                 needs_resume: AtomicBool::new(false),
             });
-            self.agents
+            let mut agents = self
+                .agents
                 .write()
-                .expect("host registry lock should not be poisoned")
-                .insert(agent_id, hosted);
+                .expect("host registry lock should not be poisoned");
+            if self.is_shutting_down() {
+                hosted.agent.stop();
+                return Err(HostError::HostShuttingDown);
+            }
+            agents.insert(agent_id, hosted);
             Ok(CreatedAgent {
                 agent_id,
                 agent_name,
                 run_id,
             })
+        };
+        let result = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => Err(HostError::HostShuttingDown),
+            result = operation => result,
+        };
+
+        if let Some(agent) = created_agent
+            .lock()
+            .expect("created agent lock should not be poisoned")
+            .as_ref()
+            && self.is_shutting_down()
+        {
+            agent.stop();
         }
-        .await;
 
         match result {
             Ok(created) => Ok(created),
-            Err(creation) => {
-                match cleanup_agent_files(self.filesystem.as_ref(), &root, &definition_path).await {
+            Err(creation) if durable_accepted.load(Ordering::Acquire) => Err(creation),
+            Err(creation) if root_may_exist.load(Ordering::Acquire) => {
+                match cleanup_agent_files_bounded(self.filesystem.as_ref(), &root, &definition_path)
+                    .await
+                {
                     Ok(()) => Err(creation),
                     Err(cleanup) => Err(HostError::CreationCleanup {
                         creation: Box::new(creation),
@@ -410,8 +459,22 @@ impl HostState {
                     }),
                 }
             }
+            Err(creation) => Err(creation),
         }
     }
+}
+
+async fn cleanup_agent_files_bounded(
+    filesystem: &dyn Filesystem,
+    root: &VirtualPath,
+    definition_path: &VirtualPath,
+) -> Result<(), AgentCleanupError> {
+    timeout(
+        CREATION_CLEANUP_GRACE,
+        cleanup_agent_files(filesystem, root, definition_path),
+    )
+    .await
+    .map_err(|_| AgentCleanupError::Timeout)?
 }
 
 async fn ensure_directory(

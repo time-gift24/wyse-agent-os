@@ -27,11 +27,11 @@ use tracing::{Span, field, info_span};
 use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
 use wyse_core::{
-    AgentId, ApprovalDecision, ApprovalId, ChatMessage, EventCursor, EventRecord, HistoryPage,
-    HistoryQuery, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
+    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatMessage, EventCursor, EventRecord,
+    HistoryPage, HistoryQuery, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
 };
 use wyse_infra::EventStreamBusError;
-use wyse_store::{AgentState, AgentStatus, StoreError};
+use wyse_store::{AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE, StoreError};
 
 use crate::{HostError, HostState};
 
@@ -341,7 +341,18 @@ async fn post_message(
     if hosted.needs_resume() {
         return Err(HostError::ResumeRequired);
     }
-    let run_id = match hosted.agent.run_turn(ChatMessage::user(request.text)).await {
+    let shutdown = state.shutdown_token();
+    let run = hosted.agent.run_turn(ChatMessage::user(request.text));
+    let result = tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {
+            hosted.mark_needs_resume();
+            hosted.agent.stop();
+            return Err(HostError::HostShuttingDown);
+        }
+        result = run => result,
+    };
+    let run_id = match result {
         Ok(run_id) => run_id,
         Err(error @ AgentError::RunAlreadyActive) => return Err(error.into()),
         Err(error) => {
@@ -349,6 +360,10 @@ async fn post_message(
             return Err(error.into());
         }
     };
+    if state.is_shutting_down() {
+        hosted.agent.stop();
+        return Err(HostError::HostShuttingDown);
+    }
     Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
 }
@@ -361,25 +376,97 @@ async fn resume_agent(
     record_agent_id(agent_id);
     let _admission = state.admit()?;
     let hosted = find_agent(&state, agent_id)?;
-    let persisted = hosted.store.load_agent().await?;
-    if persisted.status != AgentStatus::Running {
-        hosted.clear_needs_resume();
-        return Err(AgentError::ResumeNotRunning {
-            actual: persisted.status,
-        }
-        .into());
-    }
-    let run_id = match hosted.agent.resume().await {
-        Ok(run_id) => run_id,
-        Err(error @ AgentError::ResumeNotRunning { .. }) => {
+    let operation = async {
+        let persisted = hosted.store.load_agent().await?;
+        if persisted.status != AgentStatus::Running {
             hosted.clear_needs_resume();
-            return Err(error.into());
+            return Err(AgentError::ResumeNotRunning {
+                actual: persisted.status,
+            }
+            .into());
         }
-        Err(error) => return Err(error.into()),
+        reconcile_started_only(&hosted, &persisted).await?;
+        hosted.agent.resume().await.map_err(HostError::from)
     };
+    let shutdown = state.shutdown_token();
+    let result = tokio::select! {
+        biased;
+        () = shutdown.cancelled() => {
+            hosted.agent.stop();
+            return Err(HostError::HostShuttingDown);
+        }
+        result = operation => result,
+    };
+    let run_id = match result {
+        Ok(run_id) => run_id,
+        Err(error @ HostError::Agent(AgentError::ResumeNotRunning { .. })) => {
+            hosted.clear_needs_resume();
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
+    if state.is_shutting_down() {
+        hosted.agent.stop();
+        return Err(HostError::HostShuttingDown);
+    }
     hosted.clear_needs_resume();
     Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
+}
+
+async fn reconcile_started_only(
+    hosted: &crate::HostedAgent,
+    persisted: &AgentState,
+) -> Result<(), HostError> {
+    let Some(current_turn_id) = persisted.turn_id else {
+        return Ok(());
+    };
+    let mut after_seq = 0;
+    while after_seq < persisted.last_seq {
+        let page = hosted
+            .store
+            .history_page(HistoryQuery {
+                after_seq,
+                through_seq: Some(persisted.last_seq),
+                limit: MAX_HISTORY_PAGE_SIZE,
+            })
+            .await?;
+        if page.through_seq != persisted.last_seq
+            || page.events.is_empty()
+            || page.next_front_seq <= after_seq
+            || page.next_front_seq > persisted.last_seq
+        {
+            return Err(AgentError::InvalidResumeHistory.into());
+        }
+        let next_front_seq = page.next_front_seq;
+        for envelope in page.events {
+            if matches!(
+                envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Message { turn_id, .. },
+                    ..
+                } if turn_id == current_turn_id
+            ) {
+                return Ok(());
+            }
+        }
+        after_seq = next_front_seq;
+    }
+
+    hosted
+        .store
+        .update_state(
+            AgentStatus::Failed,
+            persisted.run_id,
+            persisted.turn_id,
+            persisted.usage,
+        )
+        .await?;
+    hosted.clear_needs_resume();
+    Err(AgentError::ResumeNotRunning {
+        actual: AgentStatus::Failed,
+    }
+    .into())
 }
 
 async fn cancel_agent(
