@@ -29,5 +29,6 @@ describe("PromptInput", () => {
     expect(html).toContain('data-slot="prompt-input-tools"')
     expect(html).toContain('type="submit"')
     expect(html).toContain('aria-label="发送"')
+    expect(html).not.toMatch(/(?:^|\s)border-t(?:\s|")/)
   })
 })

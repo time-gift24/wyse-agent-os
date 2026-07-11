@@ -50,6 +50,7 @@ describe("ChatWorkspace", () => {
     expect(html).toContain('id="longzhong" class="h-[100dvh]')
     expect(html).toContain("2xl:h-[100dvh]")
     expect(html).not.toContain("min-h-[36rem]")
+    expect(html).not.toContain("scroll-mt-20")
     expect(html.indexOf('data-slot="message-scroller"')).toBeLessThan(
       html.lastIndexOf('data-slot="card"')
     )

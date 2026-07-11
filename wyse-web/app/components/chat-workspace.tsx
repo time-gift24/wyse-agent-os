@@ -110,7 +110,7 @@ export function ChatWorkspace() {
   return (
     <section
       id="longzhong"
-      className="h-[100dvh] scroll-mt-20 overflow-hidden px-4 pt-4 pb-8 md:px-8 md:pb-10"
+      className="h-[100dvh] overflow-hidden px-4 pt-4 pb-8 md:px-8 md:pb-10"
     >
       <div className="relative mx-auto flex h-full w-full max-w-5xl flex-col 2xl:block">
         <Card
