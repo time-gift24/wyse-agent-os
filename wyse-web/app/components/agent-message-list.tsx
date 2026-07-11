@@ -75,10 +75,6 @@ export function AgentMessageList({
             <AiMessageHeader>
               {t("chat.assistant")} {t("chat.streamStatus")}
             </AiMessageHeader>
-            <AiMessageContent from="assistant">
-              <AiStreamingMark label={t("chat.streamStatus")} />
-              {draft.text}
-            </AiMessageContent>
             {draft.reasoning ? (
               <AiReasoning
                 streaming
@@ -88,6 +84,10 @@ export function AgentMessageList({
                 {draft.reasoning}
               </AiReasoning>
             ) : null}
+            <AiMessageContent from="assistant">
+              <AiStreamingMark label={t("chat.streamStatus")} />
+              {draft.text}
+            </AiMessageContent>
           </AiMessage>
         </MessageScrollerItem>
       ))}

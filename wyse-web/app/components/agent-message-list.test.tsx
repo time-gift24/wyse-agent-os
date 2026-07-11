@@ -8,6 +8,7 @@ vi.mock("react-i18next", () => ({
       ({
         "chat.assistant": "隆中对",
         "chat.reasoningComplete": "推理完成",
+        "chat.thinking": "正在思考",
         "chat.toolStatus.streaming": "正在执行",
         "chat.streamStatus": "流式输出中",
       })[key] ?? key,
@@ -77,13 +78,13 @@ describe("AgentMessageList", () => {
     expect(html).not.toContain(">streaming<")
   })
 
-  it("localizes the streaming marker for assistive technology", () => {
+  it("places localized streaming reasoning before partial assistant text", () => {
     const html = renderToStaticMarkup(
       <MessageScrollerProvider>
         <MessageScroller>
           <AgentMessageList
             messages={[]}
-            drafts={{ "llm-1": { text: "partial", reasoning: "" } }}
+            drafts={{ "llm-1": { text: "partial", reasoning: "analyzing" } }}
             tools={{}}
           />
         </MessageScroller>
@@ -91,5 +92,6 @@ describe("AgentMessageList", () => {
     )
 
     expect(html).toContain('aria-label="流式输出中"')
+    expect(html.indexOf("正在思考")).toBeLessThan(html.indexOf("partial"))
   })
 })
