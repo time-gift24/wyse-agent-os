@@ -16,6 +16,7 @@ import {
   ToolHeader,
   type ToolStatus,
 } from "~/components/ai-elements/tool"
+import { CodeBlock } from "~/components/ai-elements/code-block"
 import { MessageScrollerItem } from "~/components/ui/message-scroller"
 import type {
   StableMessage,
@@ -131,14 +132,13 @@ export function AgentMessageList({
                 />
                 <ToolContent>
                   {tool.argumentsText ? (
-                    <pre className="overflow-x-auto rounded-md bg-muted/50 p-3 text-xs">
-                      {tool.argumentsText}
-                    </pre>
+                    <CodeBlock code={tool.argumentsText} language="json" />
                   ) : null}
                   {tool.result ? (
-                    <pre className="overflow-x-auto rounded-md bg-muted/50 p-3 text-xs">
-                      {JSON.stringify(tool.result, null, 2)}
-                    </pre>
+                    <CodeBlock
+                      code={JSON.stringify(tool.result, null, 2)}
+                      language="json"
+                    />
                   ) : null}
                   {tool.errorText ? <p>{tool.errorText}</p> : null}
                 </ToolContent>

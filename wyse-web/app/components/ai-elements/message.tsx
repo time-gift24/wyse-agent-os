@@ -4,7 +4,7 @@ import { cjk } from "@streamdown/cjk"
 import { code } from "@streamdown/code"
 import { math } from "@streamdown/math"
 import { mermaid } from "@streamdown/mermaid"
-import type { HTMLAttributes } from "react"
+import type { ComponentProps, HTMLAttributes } from "react"
 import { memo } from "react"
 import { Streamdown } from "streamdown"
 
@@ -47,19 +47,24 @@ export const MessageContent = ({
   </div>
 )
 
-export type MessageResponseProps = {
-  children: string
-  className?: string
-}
+export type MessageResponseProps = ComponentProps<typeof Streamdown>
 
 const streamdownPlugins = { cjk, code, math, mermaid }
 
 export const MessageResponse = memo(
-  ({ children, className }: MessageResponseProps) => (
-    <Streamdown className={className} plugins={streamdownPlugins}>
-      {children}
-    </Streamdown>
-  )
+  ({ className, ...props }: MessageResponseProps) => (
+    <Streamdown
+      className={cn(
+        "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        className
+      )}
+      plugins={streamdownPlugins}
+      {...props}
+    />
+  ),
+  (previousProps, nextProps) =>
+    previousProps.children === nextProps.children &&
+    previousProps.isAnimating === nextProps.isAnimating
 )
 
 Message.displayName = "Message"
