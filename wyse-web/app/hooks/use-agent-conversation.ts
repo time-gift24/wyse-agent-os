@@ -134,10 +134,13 @@ export function useAgentConversation(): AgentConversation {
         return
       }
 
+      const generation = selectionGeneration.current
       try {
         const created = await createWyseApi({
           baseUrl: configuration.baseUrl,
         }).createAgent({ agentName: configuration.agentName, text: prompt })
+        if (generation !== selectionGeneration.current) return
+
         const recentAgent: RecentAgent = {
           agentId: created.agent_id,
           agentName: created.agent_name,
@@ -156,7 +159,7 @@ export function useAgentConversation(): AgentConversation {
         }
         selectAgent(created.agent_id)
       } catch (error) {
-        reportError(error)
+        if (generation === selectionGeneration.current) reportError(error)
       }
     },
     [reportError, selectAgent]

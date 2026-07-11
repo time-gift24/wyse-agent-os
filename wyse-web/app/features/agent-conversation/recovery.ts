@@ -27,7 +27,7 @@ export async function recoverConversation(
     } catch (error) {
       if (input.signal.aborted) return
 
-      if (!retriedExpiredCursor && isExpiredCursor(error)) {
+      if (!retriedExpiredCursor && isExpiredStreamCursor(error)) {
         dependencies.clearCursor(input.agentId)
         afterCursor = undefined
         retriedExpiredCursor = true
@@ -50,7 +50,7 @@ async function recoverOnce(
 ): Promise<void> {
   const buffered: BufferedEnvelope[] = []
   let ready = false
-  let streamError: unknown
+  let streamCompletion: StreamCompletion | undefined
 
   const accept = (bufferedEnvelope: BufferedEnvelope) => {
     dependencies.dispatch({
@@ -78,21 +78,36 @@ async function recoverOnce(
     },
   })
 
-  void subscription.done.catch((error: unknown) => {
-    if (input.signal.aborted) return
-    if (ready) {
-      dependencies.dispatch({
-        type: "connection_error",
-        error: connectionError(error),
-      })
-    } else {
-      streamError = error
+  void subscription.done.then(
+    () => {
+      const completion: StreamCompletion = { type: "stream_ended" }
+      if (input.signal.aborted) return
+      if (ready) {
+        dependencies.dispatch({
+          type: "connection_error",
+          error: connectionError(completion),
+        })
+      } else {
+        streamCompletion = completion
+      }
+    },
+    (error: unknown) => {
+      const completion: StreamCompletion = { type: "stream_failed", error }
+      if (input.signal.aborted) return
+      if (ready) {
+        dependencies.dispatch({
+          type: "connection_error",
+          error: connectionError(completion),
+        })
+      } else {
+        streamCompletion = completion
+      }
     }
-  })
+  )
 
   const view = await dependencies.api.getAgent(input.agentId)
   throwIfAborted(input.signal)
-  throwIfStreamFailed(streamError)
+  throwIfStreamCompleted(streamCompletion)
   dependencies.dispatch({ type: "view_loaded", view })
 
   let afterSeq = 0
@@ -104,7 +119,7 @@ async function recoverOnce(
       limit: HISTORY_PAGE_LIMIT,
     })
     throwIfAborted(input.signal)
-    throwIfStreamFailed(streamError)
+    throwIfStreamCompleted(streamCompletion)
     dependencies.dispatch({ type: "history_loaded", events: page.events })
     afterSeq = page.next_front_seq
     hasMore = page.has_more
@@ -119,11 +134,15 @@ async function recoverOnce(
     accept(received)
   }
 
+  throwIfStreamCompleted(streamCompletion)
   ready = true
   dependencies.dispatch({ type: "recovery_ready" })
 }
 
 type BufferedEnvelope = { envelope: StreamEnvelope; cursor: string | null }
+type StreamCompletion =
+  | { type: "stream_ended" }
+  | { type: "stream_failed"; error: unknown }
 
 function parseEnvelope(event: SseEvent): StreamEnvelope | undefined {
   try {
@@ -156,20 +175,41 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException("recovery aborted", "AbortError")
 }
 
-function throwIfStreamFailed(error: unknown): void {
-  if (error !== undefined) throw error
+function throwIfStreamCompleted(
+  completion: StreamCompletion | undefined
+): void {
+  if (completion) throw completion
 }
 
-function isExpiredCursor(error: unknown): boolean {
-  return error instanceof ApiError && error.code === "cursor_expired"
+function isExpiredStreamCursor(error: unknown): boolean {
+  return (
+    isStreamCompletion(error) &&
+    error.type === "stream_failed" &&
+    error.error instanceof ApiError &&
+    error.error.code === "cursor_expired"
+  )
 }
 
 function connectionError(error: unknown): ApiError {
-  if (error instanceof ApiError && error.code !== "cursor_expired") return error
+  const sourceError =
+    isStreamCompletion(error) && error.type === "stream_failed"
+      ? error.error
+      : error
+  if (sourceError instanceof ApiError && sourceError.code !== "cursor_expired")
+    return sourceError
 
   return new ApiError(
     "connection_error",
-    error instanceof ApiError ? error.status : 0,
-    error instanceof Error ? error.message : "connection failed"
+    sourceError instanceof ApiError ? sourceError.status : 0,
+    sourceError instanceof Error ? sourceError.message : "connection failed"
+  )
+}
+
+function isStreamCompletion(value: unknown): value is StreamCompletion {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    ((value as { type?: unknown }).type === "stream_ended" ||
+      (value as { type?: unknown }).type === "stream_failed")
   )
 }

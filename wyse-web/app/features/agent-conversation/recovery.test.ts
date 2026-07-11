@@ -159,6 +159,74 @@ describe("recoverConversation", () => {
     expect(afterCursors).toEqual(["99", undefined])
   })
 
+  it("does not mark recovery ready when the stream closes during history loading", async () => {
+    const dispatched: ConversationAction[] = []
+    const recovery = createRecoveryHarness({
+      subscribe: () => ({ done: Promise.resolve() }),
+      dispatch: (action) => dispatched.push(action),
+    })
+
+    await recovery.recover("agent-1")
+
+    expect(dispatched.map((action) => action.type)).toEqual([
+      "recovery_started",
+      "connection_error",
+    ])
+  })
+
+  it("transitions to a connection error after a ready stream closes", async () => {
+    let closeStream: () => void = () => {}
+    const dispatched: ConversationAction[] = []
+    const recovery = createRecoveryHarness({
+      subscribe: () => ({
+        done: new Promise<void>((resolve) => {
+          closeStream = resolve
+        }),
+      }),
+      dispatch: (action) => dispatched.push(action),
+    })
+
+    await recovery.recover("agent-1")
+    closeStream()
+    await Promise.resolve()
+
+    expect(dispatched.map((action) => action.type)).toEqual([
+      "recovery_started",
+      "view_loaded",
+      "history_loaded",
+      "recovery_ready",
+      "connection_error",
+    ])
+  })
+
+  it.each(["getAgent", "getHistory"] as const)(
+    "does not retry a cursor_expired error from %s",
+    async (failingRequest) => {
+      const clearCursor = vi.fn()
+      const subscribe = vi.fn(() => ({ done: new Promise<void>(() => {}) }))
+      const expired = new ApiError("cursor_expired", 410, "not an SSE error")
+      const recovery = createRecoveryHarness({
+        subscribe,
+        clearCursor,
+        api: {
+          getAgent: async () => {
+            if (failingRequest === "getAgent") throw expired
+            return agentView()
+          },
+          getHistory: async () => {
+            if (failingRequest === "getHistory") throw expired
+            return historyPage([], 0, false)
+          },
+        },
+      })
+
+      await recovery.recover("agent-1")
+
+      expect(subscribe).toHaveBeenCalledOnce()
+      expect(clearCursor).not.toHaveBeenCalled()
+    }
+  )
+
   it("persists a cursor only after accepting an envelope for the selected Agent", async () => {
     const dispatched: ConversationAction[] = []
     const saveCursor = vi.fn()
