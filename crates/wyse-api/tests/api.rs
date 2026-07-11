@@ -9,11 +9,12 @@ use async_trait::async_trait;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header::LOCATION},
+    response::IntoResponse,
 };
 use chrono::Utc;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use wyse_api::{AgentCreated, HostError, HostState, router};
+use wyse_api::{AgentCleanupError, AgentCreated, HostError, HostState, router};
 use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
 use wyse_core::{
     AgentEvent, AgentId, ChatMessage, EventSource, ModelId, RunId, RuntimeEvent, StreamEnvelope,
@@ -202,6 +203,13 @@ impl LlmProvider for TestProvider {
 struct FailFirstMessageFilesystem {
     inner: Arc<dyn Filesystem>,
     created_root: Mutex<Option<VirtualPath>>,
+    cleanup_failure: Option<CleanupFailure>,
+}
+
+#[derive(Clone, Copy)]
+enum CleanupFailure {
+    ListMessages,
+    RemoveMessagesDirectory,
 }
 
 impl FailFirstMessageFilesystem {
@@ -209,6 +217,15 @@ impl FailFirstMessageFilesystem {
         Self {
             inner,
             created_root: Mutex::new(None),
+            cleanup_failure: None,
+        }
+    }
+
+    fn failing_cleanup(inner: Arc<dyn Filesystem>, cleanup_failure: CleanupFailure) -> Self {
+        Self {
+            inner,
+            created_root: Mutex::new(None),
+            cleanup_failure: Some(cleanup_failure),
         }
     }
 
@@ -258,6 +275,11 @@ impl Filesystem for FailFirstMessageFilesystem {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        if matches!(self.cleanup_failure, Some(CleanupFailure::ListMessages))
+            && path.as_str().ends_with("/messages")
+        {
+            return Err(FilesystemError::PermissionDenied { path: path.clone() });
+        }
         self.inner.list_dir(path).await
     }
 
@@ -280,6 +302,13 @@ impl Filesystem for FailFirstMessageFilesystem {
     }
 
     async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if matches!(
+            self.cleanup_failure,
+            Some(CleanupFailure::RemoveMessagesDirectory)
+        ) && path.as_str().ends_with("/messages")
+        {
+            return Err(FilesystemError::PermissionDenied { path: path.clone() });
+        }
         self.inner.remove_dir(path).await
     }
 }
@@ -528,4 +557,88 @@ async fn create_agent_cleans_preamble_failure_without_registering_agent() {
             .join(agent_id.to_string())
             .exists()
     );
+}
+
+#[tokio::test]
+async fn create_agent_exposes_cleanup_list_and_remove_failures() {
+    for failure in [
+        CleanupFailure::ListMessages,
+        CleanupFailure::RemoveMessagesDirectory,
+    ] {
+        let fixture = Fixture::new().await;
+        fixture.persist_template("coding-agent", "\"echo\"");
+        let filesystem = Arc::new(FailFirstMessageFilesystem::failing_cleanup(
+            Arc::clone(&fixture.filesystem),
+            failure,
+        ));
+        let mut providers = LlmProviderManager::new();
+        providers
+            .register(Arc::new(TestProvider(fixture.model.clone())))
+            .expect("provider registers");
+        let host = HostState::restore(
+            fixture.config.clone(),
+            Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+            Arc::new(InMemoryEventStreamBus::default()),
+            providers,
+        )
+        .await
+        .expect("host restores");
+        let name: AgentName = "coding-agent".parse().expect("name parses");
+
+        let error = host
+            .create_agent(name, "hello".to_owned())
+            .await
+            .expect_err("creation and cleanup should fail");
+
+        let HostError::CreationCleanup { creation, cleanup } = &error else {
+            panic!("cleanup failure should be explicit");
+        };
+        assert!(matches!(creation.as_ref(), HostError::Agent(_)));
+        assert!(matches!(
+            (failure, cleanup),
+            (
+                CleanupFailure::ListMessages,
+                AgentCleanupError::ListMessages(_)
+            ) | (
+                CleanupFailure::RemoveMessagesDirectory,
+                AgentCleanupError::RemoveMessagesDirectory(_),
+            )
+        ));
+        assert_eq!(
+            std::error::Error::source(&error)
+                .expect("creation failure is retained")
+                .to_string(),
+            "agent operation failed"
+        );
+        let agent_id = filesystem.created_agent_id();
+        assert!(host.agent(agent_id).is_none());
+        assert!(
+            fixture
+                .root
+                .join("history")
+                .join(agent_id.to_string())
+                .exists()
+        );
+    }
+}
+
+#[tokio::test]
+async fn creation_cleanup_http_response_does_not_expose_error_details() {
+    let secret_path: VirtualPath = "/history/secret/messages"
+        .parse()
+        .expect("virtual path parses");
+    let error = HostError::CreationCleanup {
+        creation: Box::new(HostError::EmptyText),
+        cleanup: AgentCleanupError::ListMessages(FilesystemError::PermissionDenied {
+            path: secret_path,
+        }),
+    };
+
+    let response = error.into_response();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body is readable");
+    assert!(body.is_empty());
 }

@@ -17,7 +17,7 @@ use wyse_llm::LlmProviderManager;
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus};
 use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 
-use crate::HostError;
+use crate::{AgentCleanupError, HostError};
 
 const HISTORY_ROOT: &str = "/history";
 const TEMPLATE_ROOT: &str = "/templates";
@@ -251,10 +251,18 @@ impl HostState {
         }
         .await;
 
-        if result.is_err() {
-            cleanup_agent_files(self.filesystem.as_ref(), &root, &definition_path).await;
+        match result {
+            Ok(created) => Ok(created),
+            Err(creation) => {
+                match cleanup_agent_files(self.filesystem.as_ref(), &root, &definition_path).await {
+                    Ok(()) => Err(creation),
+                    Err(cleanup) => Err(HostError::CreationCleanup {
+                        creation: Box::new(creation),
+                        cleanup,
+                    }),
+                }
+            }
         }
-        result
     }
 }
 
@@ -268,20 +276,36 @@ async fn cleanup_agent_files(
     filesystem: &dyn Filesystem,
     root: &VirtualPath,
     definition_path: &VirtualPath,
-) {
+) -> Result<(), AgentCleanupError> {
     let messages_path = child_path(root, "messages")
         .expect("agent message path should be valid after root validation");
-    if let Ok(entries) = filesystem.list_dir(&messages_path).await {
-        for entry in entries {
-            let _ = filesystem.remove_file(&entry.path).await;
-        }
+    let entries = match filesystem.list_dir(&messages_path).await {
+        Ok(entries) => entries,
+        Err(FilesystemError::NotFound { .. }) => Vec::new(),
+        Err(source) => return Err(AgentCleanupError::ListMessages(source)),
+    };
+    for entry in entries {
+        ignore_not_found(filesystem.remove_file(&entry.path).await)
+            .map_err(AgentCleanupError::RemoveMessage)?;
     }
-    let _ = filesystem.remove_dir(&messages_path).await;
+    ignore_not_found(filesystem.remove_dir(&messages_path).await)
+        .map_err(AgentCleanupError::RemoveMessagesDirectory)?;
     let agent_path = child_path(root, "agent.json")
         .expect("agent state path should be valid after root validation");
-    let _ = filesystem.remove_file(&agent_path).await;
-    let _ = filesystem.remove_file(definition_path).await;
-    let _ = filesystem.remove_dir(root).await;
+    ignore_not_found(filesystem.remove_file(&agent_path).await)
+        .map_err(AgentCleanupError::RemoveAgentState)?;
+    ignore_not_found(filesystem.remove_file(definition_path).await)
+        .map_err(AgentCleanupError::RemoveDefinition)?;
+    ignore_not_found(filesystem.remove_dir(root).await)
+        .map_err(AgentCleanupError::RemoveAgentDirectory)?;
+    Ok(())
+}
+
+fn ignore_not_found(result: Result<(), FilesystemError>) -> Result<(), FilesystemError> {
+    match result {
+        Ok(()) | Err(FilesystemError::NotFound { .. }) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn parse_history_entry(entry: &wyse_filesystem::DirEntry) -> Result<AgentId, HostError> {

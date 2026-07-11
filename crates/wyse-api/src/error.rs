@@ -12,6 +12,30 @@ use wyse_llm::LlmError;
 use wyse_store::StoreError;
 use wyse_tools::ToolError;
 
+/// Failure encountered while removing a partially created agent.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum AgentCleanupError {
+    /// The messages directory could not be listed.
+    #[error("could not list agent messages during cleanup")]
+    ListMessages(#[source] FilesystemError),
+    /// A message file could not be removed.
+    #[error("could not remove agent message during cleanup")]
+    RemoveMessage(#[source] FilesystemError),
+    /// The messages directory could not be removed.
+    #[error("could not remove agent messages directory during cleanup")]
+    RemoveMessagesDirectory(#[source] FilesystemError),
+    /// The agent state file could not be removed.
+    #[error("could not remove agent state during cleanup")]
+    RemoveAgentState(#[source] FilesystemError),
+    /// The resolved definition could not be removed.
+    #[error("could not remove agent definition during cleanup")]
+    RemoveDefinition(#[source] FilesystemError),
+    /// The agent history directory could not be removed.
+    #[error("could not remove agent directory during cleanup")]
+    RemoveAgentDirectory(#[source] FilesystemError),
+}
+
 /// Error returned while composing or accessing the API host.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -46,6 +70,15 @@ pub enum HostError {
     /// Initial user text is empty after trimming.
     #[error("initial agent text must not be empty")]
     EmptyText,
+    /// Agent creation failed and the partial state could not be fully removed.
+    #[error("agent creation failed and cleanup failed: {cleanup}")]
+    CreationCleanup {
+        /// Original agent creation failure.
+        #[source]
+        creation: Box<HostError>,
+        /// Cleanup operation that failed.
+        cleanup: AgentCleanupError,
+    },
     /// A definition requests a tool outside the builtin catalog.
     #[error("tool is not available: {name}")]
     ToolNotAvailable { name: ToolName },
