@@ -35,6 +35,7 @@
       "description": "Describe the goal, constraints, or options you are weighing.",
       "label": "Message",
       "placeholder": "Ask Longzhong…",
+      "shortcut": "Enter to send",
       "send": "Send"
     },
     "empty": "Start a new conversation to begin.",

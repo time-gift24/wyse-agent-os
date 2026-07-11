@@ -35,6 +35,7 @@
       "description": "描述目标、限制或你正在权衡的方案。",
       "label": "输入消息",
       "placeholder": "向隆中对提问……",
+      "shortcut": "Enter 发送",
       "send": "发送"
     },
     "empty": "开始一段新对话。",

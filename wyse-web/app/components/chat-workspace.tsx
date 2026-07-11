@@ -262,6 +262,7 @@ export function ChatWorkspace() {
                   state.agentId === null ? "chat.empty" : "chat.composer.description"
                 )}
                 placeholder={t("chat.composer.placeholder")}
+                shortcutHint={t("chat.composer.shortcut")}
                 onChange={setComposerText}
                 onSubmit={() => void submitMessage()}
                 footer={

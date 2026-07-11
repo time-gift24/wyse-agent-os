@@ -59,6 +59,18 @@ describe("ChatWorkspace", () => {
     expect(html).not.toContain("chat.messages.assistantIntro")
   })
 
+  it("uses the composed AI Elements prompt shell without moving the chat canvas", async () => {
+    const { ChatWorkspace } = await import("~/components/chat-workspace")
+    const html = renderToStaticMarkup(<ChatWorkspace />)
+
+    expect(html).toContain('data-slot="prompt-input"')
+    expect(html).toContain('data-slot="prompt-input-body"')
+    expect(html).toContain('data-slot="prompt-input-tools"')
+    expect(html.indexOf('data-slot="chat-main"')).toBeLessThan(
+      html.indexOf('data-slot="prompt-input"')
+    )
+  })
+
   it("keeps each approval card disabled until its own decision settles", async () => {
     const first = deferred<void>()
     const second = deferred<void>()
