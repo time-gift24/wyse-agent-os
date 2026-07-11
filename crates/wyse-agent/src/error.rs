@@ -61,6 +61,9 @@ pub enum AgentError {
         /// Persisted status.
         actual: AgentStatus,
     },
+    /// Persisted state has a resumable turn that must use `Agent::resume`.
+    #[error("cannot load history from a persisted running agent")]
+    LoadHistoryRunning,
     /// Persisted running state has no run identity.
     #[error("persisted running agent has no run id")]
     ResumeRunMissing,

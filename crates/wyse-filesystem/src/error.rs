@@ -25,6 +25,9 @@ pub enum FilesystemError {
         /// Virtual path whose version overflowed.
         path: VirtualPath,
     },
+    /// The local compare-and-swap record state lock was poisoned.
+    #[error("local filesystem record state lock poisoned")]
+    RecordStatePoisoned,
     /// A virtual path failed validation.
     #[error("invalid virtual path {path}")]
     InvalidVirtualPath {

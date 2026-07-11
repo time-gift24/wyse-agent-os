@@ -5,11 +5,11 @@ use wyse_core::AgentId;
 use wyse_infra::EventStreamBus;
 use wyse_llm::LlmProvider;
 use wyse_store::AgentStore;
-use wyse_tools::BuiltinToolRegistry;
+use wyse_tools::ToolRegistry;
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 
-/// Builds the no-tool default agent with an injected provider.
+/// Builds the default agent with injected runtime dependencies.
 ///
 /// # Errors
 ///
@@ -19,13 +19,14 @@ pub fn build_default_agent(
     store: Arc<dyn AgentStore>,
     event_bus: Arc<dyn EventStreamBus>,
     llm_provider: Arc<dyn LlmProvider>,
+    tool_registry: Arc<dyn ToolRegistry>,
 ) -> Result<Agent, AgentError> {
     Agent::builder()
         .id(agent_id)
         .name("default-agent")
         .system_prompt(DEFAULT_SYSTEM_PROMPT)
         .llm_provider(llm_provider)
-        .tool_registry(Arc::new(BuiltinToolRegistry::default()))
+        .tool_registry(tool_registry)
         .event_bus(event_bus)
         .store(store)
         .build()
@@ -40,6 +41,7 @@ mod tests {
         Arc<dyn AgentStore>,
         Arc<dyn EventStreamBus>,
         Arc<dyn LlmProvider>,
+        Arc<dyn ToolRegistry>,
     ) -> Result<Agent, AgentError>;
 
     #[test]

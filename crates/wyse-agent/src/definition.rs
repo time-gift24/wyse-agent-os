@@ -206,6 +206,90 @@ impl Agent {
         Ok(resumed.run_id)
     }
 
+    /// Loads the durable complete message history into this inactive agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an operation is active, the persisted turn must be resumed,
+    /// the store identity differs, or the persisted history cannot be read as contiguous
+    /// agent messages.
+    pub async fn load_history(&self) -> Result<(), AgentError> {
+        if self
+            .active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(AgentError::RunAlreadyActive);
+        }
+        let _active_guard = ActiveGuard::new(&self.active);
+        let state = self.store.load_agent().await?;
+        if state.status == AgentStatus::Running {
+            return Err(AgentError::LoadHistoryRunning);
+        }
+        if state.agent_id != self.id {
+            return Err(AgentError::ResumeAgentMismatch {
+                expected: self.id,
+                actual: state.agent_id,
+            });
+        }
+        let history = self.load_complete_history(state.last_seq).await?;
+        self.commit_history(history);
+        Ok(())
+    }
+
+    async fn load_complete_history(&self, last_seq: u64) -> Result<Vec<ChatMessage>, AgentError> {
+        let mut history = Vec::new();
+        let mut after_seq = 0;
+        while after_seq < last_seq {
+            let page = self
+                .store
+                .history_page(HistoryQuery {
+                    after_seq,
+                    through_seq: Some(last_seq),
+                    limit: MAX_HISTORY_PAGE_SIZE,
+                })
+                .await?;
+            if page.through_seq != last_seq
+                || page.events.is_empty()
+                || page.next_front_seq <= after_seq
+                || page.next_front_seq > last_seq
+            {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+
+            let mut expected_seq = after_seq;
+            for envelope in page.events {
+                expected_seq = expected_seq
+                    .checked_add(1)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                if envelope.business_seq != Some(expected_seq) {
+                    return Err(AgentError::InvalidResumeHistory);
+                }
+                let RuntimeEvent::Agent { agent_id, event } = envelope.event else {
+                    return Err(AgentError::InvalidResumeHistory);
+                };
+                if agent_id != self.id {
+                    return Err(AgentError::ResumeAgentMismatch {
+                        expected: self.id,
+                        actual: agent_id,
+                    });
+                }
+                let AgentEvent::Message { message, .. } = event else {
+                    return Err(AgentError::InvalidResumeHistory);
+                };
+                history.push(message);
+            }
+            if expected_seq != page.next_front_seq
+                || page.has_more != (page.next_front_seq < last_seq)
+            {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+            after_seq = page.next_front_seq;
+        }
+
+        Ok(history)
+    }
+
     async fn initialize_resume(&self) -> Result<ResumeState, AgentError> {
         let state = self.store.load_agent().await?;
         if state.status != AgentStatus::Running {

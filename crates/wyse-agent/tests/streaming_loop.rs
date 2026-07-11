@@ -624,6 +624,139 @@ async fn resume_finishes_advanced_terminal_assistant_without_another_advance_or_
 }
 
 #[tokio::test]
+async fn load_history_restores_finished_conversation_for_next_turn() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Finished;
+    state.last_seq = 2;
+    let store = Arc::new(TestStore::with_state(
+        state,
+        vec![
+            persisted_message(1, run_id, turn_id, ChatMessage::user("first question")),
+            persisted_message(2, run_id, turn_id, ChatMessage::assistant("first answer")),
+        ],
+    ));
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![
+            ChatStreamEvent::TextDelta {
+                delta: "second answer".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ],
+    )]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = agent_with_store(provider.clone(), bus.clone(), store);
+
+    agent.load_history().await.expect("history should load");
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("second question")).await;
+    wait_for_agent_finish(&mut events).await;
+
+    assert_eq!(
+        provider.requests()[0].messages,
+        vec![
+            ChatMessage::system("be helpful"),
+            ChatMessage::user("first question"),
+            ChatMessage::assistant("first answer"),
+            ChatMessage::user("second question"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn load_history_rejects_running_store_before_request() {
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Running;
+    let store = Arc::new(TestStore::with_state(state, Vec::new()));
+    let provider = Arc::new(RecordingProvider::new(Vec::new()));
+    let agent = agent_with_store(
+        provider.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.load_history().await,
+        Err(AgentError::LoadHistoryRunning)
+    ));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn load_history_rejects_persisted_agent_mismatch_before_request() {
+    let actual = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Finished;
+    state.last_seq = 1;
+    let mut persisted =
+        persisted_message(1, run_id, turn_id, ChatMessage::user("persisted question"));
+    persisted.event = RuntimeEvent::Agent {
+        agent_id: actual,
+        event: AgentEvent::Message {
+            turn_id,
+            message: ChatMessage::user("persisted question"),
+        },
+    };
+    let store = Arc::new(TestStore::with_state(state, vec![persisted]));
+    let provider = Arc::new(RecordingProvider::new(Vec::new()));
+    let agent = agent_with_store(
+        provider.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+        store,
+    );
+
+    assert!(matches!(
+        agent.load_history().await,
+        Err(AgentError::ResumeAgentMismatch { expected, actual: found })
+            if expected == test_agent_id() && found == actual
+    ));
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn load_history_rejects_invalid_history_without_committing_partial_history() {
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let mut state = AgentState::new(test_agent_id(), "test-agent".to_owned());
+    state.status = AgentStatus::Finished;
+    state.last_seq = 1;
+    let mut malformed =
+        persisted_message(1, run_id, turn_id, ChatMessage::user("persisted question"));
+    malformed.business_seq = Some(2);
+    let store = Arc::new(TestStore::with_state(state, vec![malformed]));
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![ChatStreamEvent::Finished {
+            finish_reason: FinishReason::Stop,
+            usage: None,
+        }],
+    )]));
+    let bus = Arc::new(InMemoryEventStreamBus::default());
+    let agent = agent_with_store(provider.clone(), bus.clone(), store);
+
+    assert!(matches!(
+        agent.load_history().await,
+        Err(AgentError::InvalidResumeHistory)
+    ));
+    let (_run_id, mut events) =
+        run_turn_and_subscribe(&agent, ChatMessage::user("new input")).await;
+    wait_for_agent_finish(&mut events).await;
+
+    assert_eq!(
+        provider.requests()[0].messages,
+        vec![
+            ChatMessage::system("be helpful"),
+            ChatMessage::user("new input"),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn resume_rejects_duplicate_assistant_tool_call_ids() {
     assert_invalid_active_turn_history(
         "duplicate assistant call ids",
