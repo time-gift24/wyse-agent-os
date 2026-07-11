@@ -100,6 +100,8 @@ enum ReplError {
     Llm(#[from] LlmError),
     #[error("json encoding failed")]
     Json(#[from] serde_json::Error),
+    #[error("event stream closed before a terminal agent event")]
+    EventStreamClosed,
     #[error("unsupported provider: {provider}")]
     UnsupportedProvider { provider: String },
     #[error("unsupported model: {model}")]
@@ -254,7 +256,7 @@ async fn consume_turn_events<W: Write>(
             _ => {}
         }
     }
-    Ok(())
+    Err(ReplError::EventStreamClosed)
 }
 
 fn agent_root(agent_id: AgentId) -> Result<VirtualPath, ReplError> {
@@ -312,12 +314,15 @@ mod tests {
     use clap::Parser;
     use wyse_core::{AgentEvent, AgentId, RuntimeEvent, StreamEnvelope};
     use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
-    use wyse_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
+    use wyse_infra::{EventStream, EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
     use wyse_llm::{ChatStreamEvent, FinishReason, MockLlmProvider};
-    use wyse_store::{AgentState, AgentStore, FilesystemAgentStore, StoreEventStreamBus};
+    use wyse_store::{
+        AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus,
+    };
 
     use super::{
-        Args, Config, ReplError, Session, agent_root, drive_turn, restore_session, select_provider,
+        Args, Config, ReplError, Session, agent_root, consume_turn_events, drive_turn,
+        restore_session, select_provider,
     };
 
     async fn test_session(
@@ -510,6 +515,64 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_session_resumes_running_turn_to_terminal_completion() -> Result<(), ReplError>
+    {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let initial = test_session(&root, agent_id, MockLlmProvider::new(), true).await?;
+        drive_turn(&initial, "interrupted input", false, &mut Vec::new()).await?;
+        let state = initial.store.load_agent().await?;
+        assert_eq!(state.status, AgentStatus::Failed);
+        assert_eq!(state.last_seq, 1);
+        initial
+            .store
+            .update_state(
+                AgentStatus::Running,
+                state.run_id,
+                state.turn_id,
+                state.usage,
+            )
+            .await?;
+        assert_eq!(
+            initial.store.load_agent().await?.status,
+            AgentStatus::Running
+        );
+
+        let restored =
+            test_session(&root, agent_id, mock_response("resumed response"), false).await?;
+        let mut output = Vec::new();
+        restore_session(&restored, false, &mut output).await?;
+
+        assert!(
+            String::from_utf8(output)
+                .expect("renderer writes UTF-8")
+                .contains("resumed response")
+        );
+        let state = restored.store.load_agent().await?;
+        assert_eq!(state.status, AgentStatus::Finished);
+        assert_eq!(state.last_seq, 2);
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consume_turn_events_rejects_stream_closure_without_terminal_event()
+    -> Result<(), ReplError> {
+        let mut events: EventStream = Box::pin(futures_util::stream::empty());
+        let error = consume_turn_events(&mut events, false, &mut Vec::new())
+            .await
+            .expect_err("stream closure before terminal event must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "event stream closed before a terminal agent event"
+        );
         Ok(())
     }
 

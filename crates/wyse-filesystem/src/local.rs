@@ -91,32 +91,6 @@ impl LocalFilesystem {
         Ok(host)
     }
 
-    async fn ensure_write_target_inside_root(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<PathBuf, FilesystemError> {
-        let host = self.host_path(path);
-        if let Ok(metadata) = fs::symlink_metadata(&host).await
-            && metadata.file_type().is_symlink()
-        {
-            return Err(FilesystemError::PathEscapesSandbox { path: path.clone() });
-        }
-        if fs::try_exists(&host)
-            .await
-            .map_err(|source| FilesystemError::local_io("try_exists", path.clone(), source))?
-        {
-            let canonical = fs::canonicalize(&host).await.map_err(|source| {
-                FilesystemError::local_io("canonicalize", path.clone(), source)
-            })?;
-            if !canonical.starts_with(&self.root) {
-                return Err(FilesystemError::PathEscapesSandbox { path: path.clone() });
-            }
-            Ok(canonical)
-        } else {
-            self.ensure_parent_inside_root(path).await
-        }
-    }
-
     async fn ensure_existing_inside_root(
         &self,
         path: &VirtualPath,
@@ -174,7 +148,7 @@ impl Filesystem for LocalFilesystem {
 
             let mut records = records
                 .lock()
-                .expect("local filesystem record mutex should not be poisoned");
+                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
             let contents = std::fs::read(&canonical)
                 .map_err(|source| FilesystemError::local_io("read", path.clone(), source))?;
             let version = match records.get(&path) {
@@ -254,7 +228,7 @@ impl Filesystem for LocalFilesystem {
 
             let mut records = records
                 .lock()
-                .expect("local filesystem record mutex should not be poisoned");
+                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
             let current = if metadata.is_some() {
                 Some(match records.get(&path) {
                     Some(version) => *version,
@@ -323,13 +297,9 @@ impl Filesystem for LocalFilesystem {
         path: &VirtualPath,
         contents: Vec<u8>,
     ) -> Result<(), FilesystemError> {
-        let len = u64::try_from(contents.len())
-            .map_err(|_| FilesystemError::ContentTooLarge { path: path.clone() })?;
-        self.check_len(path, len)?;
-        let host = self.ensure_write_target_inside_root(path).await?;
-        fs::write(&host, contents)
+        self.put(path, Entry::new(contents), CasExpectation::Any)
             .await
-            .map_err(|source| FilesystemError::local_io("write", path.clone(), source))
+            .map(|_| ())
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -386,16 +356,44 @@ impl Filesystem for LocalFilesystem {
     }
 
     async fn remove_file(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        let host = self.ensure_parent_inside_root(path).await?;
-        let metadata = fs::symlink_metadata(&host)
-            .await
-            .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
-        if !metadata.is_file() && !metadata.file_type().is_symlink() {
-            return Err(FilesystemError::NotAFile { path: path.clone() });
-        }
-        fs::remove_file(&host)
-            .await
-            .map_err(|source| FilesystemError::local_io("remove_file", path.clone(), source))
+        let root = self.root.clone();
+        let path = path.clone();
+        let error_path = path.clone();
+        let records = Arc::clone(&self.records);
+        let next_record_version = Arc::clone(&self.next_record_version);
+
+        tokio::task::spawn_blocking(move || {
+            let host = host_path(&root, &path);
+            let parent = host.parent().unwrap_or(&root);
+            let canonical_parent = std::fs::canonicalize(parent).map_err(|source| {
+                FilesystemError::local_io("canonicalize_parent", path.clone(), source)
+            })?;
+            if !canonical_parent.starts_with(&root) {
+                return Err(FilesystemError::PathEscapesSandbox { path });
+            }
+            let metadata = std::fs::symlink_metadata(&host)
+                .map_err(|source| FilesystemError::local_io("metadata", path.clone(), source))?;
+            if !metadata.is_file() && !metadata.file_type().is_symlink() {
+                return Err(FilesystemError::NotAFile { path });
+            }
+
+            let mut records = records
+                .lock()
+                .map_err(|_| FilesystemError::RecordStatePoisoned)?;
+            std::fs::remove_file(&host)
+                .map_err(|source| FilesystemError::local_io("remove_file", path.clone(), source))?;
+            let value = next_record_version
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_add(1)
+                })
+                .map_err(|_| FilesystemError::VersionOverflow { path: path.clone() })?;
+            records.insert(path, RecordVersion::from_backend(value));
+            Ok(())
+        })
+        .await
+        .map_err(|error| {
+            FilesystemError::local_io("remove_file", error_path, std::io::Error::other(error))
+        })?
     }
 
     async fn remove_dir(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -539,6 +537,73 @@ mod tests {
             .expect_err("stale version is rejected");
 
         assert!(matches!(error, FilesystemError::VersionMismatch { .. }));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_mutations_invalidate_observed_cas_versions() {
+        let temp =
+            std::env::temp_dir().join(format!("wyse-fs-cas-mutations-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&temp).await;
+        tokio::fs::create_dir_all(&temp)
+            .await
+            .expect("create temp root");
+        let filesystem = LocalFilesystem::new(LocalFilesystemConfig {
+            root: temp.clone(),
+            max_file_bytes: Some(1024),
+        })
+        .expect("filesystem is valid");
+        let path = VirtualPath::try_from("/agent.json").expect("valid path");
+
+        filesystem
+            .put(&path, Entry::new(b"one".to_vec()), CasExpectation::Absent)
+            .await
+            .expect("create record");
+        let before_write = filesystem
+            .get(&path)
+            .await
+            .expect("read record")
+            .expect("record exists");
+
+        filesystem
+            .write_file(&path, b"two".to_vec())
+            .await
+            .expect("ordinary write");
+        let write_error = filesystem
+            .put(
+                &path,
+                Entry::new(b"stale write".to_vec()),
+                CasExpectation::Version(before_write.version),
+            )
+            .await
+            .expect_err("write invalidates observed version");
+        assert!(matches!(
+            write_error,
+            FilesystemError::VersionMismatch { .. }
+        ));
+
+        let before_remove = filesystem
+            .get(&path)
+            .await
+            .expect("read record")
+            .expect("record exists");
+        filesystem
+            .remove_file(&path)
+            .await
+            .expect("ordinary remove");
+        let remove_error = filesystem
+            .put(
+                &path,
+                Entry::new(b"stale remove".to_vec()),
+                CasExpectation::Version(before_remove.version),
+            )
+            .await
+            .expect_err("remove invalidates observed version");
+        assert!(matches!(
+            remove_error,
+            FilesystemError::VersionMismatch { .. }
+        ));
+
         let _ = tokio::fs::remove_dir_all(&temp).await;
     }
 
