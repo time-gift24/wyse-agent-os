@@ -1,7 +1,6 @@
 //! Error types for agent runtime operations.
 
 use thiserror::Error;
-use wyse_checkpoint::CheckpointError;
 use wyse_core::{CallId, ChatRole};
 use wyse_infra::event_stream_bus::EventStreamBusError;
 use wyse_llm::LlmError;
@@ -48,24 +47,6 @@ pub enum AgentError {
         #[source]
         source: EventStreamBusError,
     },
-    /// Checkpoint persistence failed.
-    #[error("checkpoint operation failed")]
-    Checkpoint {
-        /// Underlying checkpoint error.
-        #[source]
-        source: CheckpointError,
-    },
-    /// The requested checkpoint cannot be resumed.
-    #[error("agent checkpoint is not waiting for retry")]
-    CheckpointNotRetryable,
-    /// The checkpoint belongs to a different agent.
-    #[error("checkpoint agent mismatch: expected {expected}, actual {actual}")]
-    CheckpointAgentMismatch {
-        /// Expected agent id.
-        expected: wyse_core::AgentId,
-        /// Actual agent id stored in the checkpoint.
-        actual: wyse_core::AgentId,
-    },
     /// A required builder field was not provided.
     #[error("missing builder field: {field}")]
     MissingBuilderField {
@@ -104,11 +85,5 @@ impl From<LlmError> for AgentError {
 impl From<EventStreamBusError> for AgentError {
     fn from(source: EventStreamBusError) -> Self {
         Self::EventBus { source }
-    }
-}
-
-impl From<CheckpointError> for AgentError {
-    fn from(source: CheckpointError) -> Self {
-        Self::Checkpoint { source }
     }
 }

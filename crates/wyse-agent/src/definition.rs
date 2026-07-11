@@ -2,12 +2,11 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use wyse_checkpoint::{CheckpointKind, CheckpointStatus, CheckpointStore};
 use wyse_core::{
     AgentId, ApprovalDecision, ApprovalId, ChatMessage, ChatRole, RunId, TokenUsage, TurnId,
 };
@@ -15,7 +14,7 @@ use wyse_infra::event_stream_bus::EventStreamBus;
 use wyse_llm::LlmProvider;
 use wyse_tools::ToolRegistry;
 
-use crate::{AgentError, checkpoint::decode_checkpoint_payload, command::TurnCommand};
+use crate::{AgentError, command::TurnCommand};
 
 /// Runtime tuning for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,13 +43,10 @@ pub struct Agent {
     pub(crate) llm_provider: Arc<dyn LlmProvider>,
     pub(crate) tool_registry: Arc<dyn ToolRegistry>,
     pub(crate) event_bus: Arc<dyn EventStreamBus>,
-    pub(crate) checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     pub(crate) config: AgentConfig,
     pub(crate) history: Arc<Mutex<Vec<ChatMessage>>>,
-    pub(crate) seq: Arc<AtomicU64>,
     pub(crate) usage: Arc<Mutex<TokenUsage>>,
     pub(crate) active: Arc<AtomicBool>,
-    resumable: Arc<AtomicBool>,
     current_run_id: Arc<Mutex<Option<RunId>>>,
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
     pub(crate) cancel: Arc<Mutex<Option<CancellationToken>>>,
@@ -74,8 +70,6 @@ impl Agent {
         if message.role != ChatRole::User {
             return Err(AgentError::InvalidInputMessageRole { role: message.role });
         }
-
-        self.resumable.store(false, Ordering::SeqCst);
 
         if self.active.swap(true, Ordering::SeqCst) {
             return Err(AgentError::RunAlreadyActive);
@@ -101,14 +95,13 @@ impl Agent {
             .turn_commands
             .lock()
             .expect("turn command mutex should not be poisoned") = Some(command_tx);
-        self.set_next_seq(1);
         self.set_usage(TokenUsage::default());
         let agent = self.clone();
         let active = Arc::clone(&self.active);
         let turn_commands = Arc::clone(&self.turn_commands);
 
         tokio::spawn(async move {
-            let _ = agent.run_turn_loop(Some(message), command_rx).await;
+            let _ = agent.run_turn_loop(message, command_rx).await;
             *turn_commands
                 .lock()
                 .expect("turn command mutex should not be poisoned") = None;
@@ -180,59 +173,6 @@ impl Agent {
         Arc::clone(&self.event_bus)
     }
 
-    /// Resumes the current checkpointed turn.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if another run is active or the agent was not restored
-    /// from a retryable checkpoint.
-    pub async fn resume_turn(&self) -> Result<RunId, AgentError> {
-        if self.active.swap(true, Ordering::SeqCst) {
-            return Err(AgentError::RunAlreadyActive);
-        }
-
-        if !self.resumable.swap(false, Ordering::SeqCst) {
-            self.active.store(false, Ordering::SeqCst);
-            return Err(AgentError::CheckpointNotRetryable);
-        }
-
-        let Some(run_id) = self.current_run() else {
-            self.active.store(false, Ordering::SeqCst);
-            return Err(AgentError::CheckpointNotRetryable);
-        };
-        let Some(_) = self.current_turn() else {
-            self.active.store(false, Ordering::SeqCst);
-            return Err(AgentError::CheckpointNotRetryable);
-        };
-        let cancel = CancellationToken::new();
-        *self
-            .cancel
-            .lock()
-            .expect("cancel mutex should not be poisoned") = Some(cancel.clone());
-        let (command_tx, command_rx) = mpsc::channel(1);
-        *self
-            .turn_commands
-            .lock()
-            .expect("turn command mutex should not be poisoned") = Some(command_tx);
-        let agent = self.clone();
-        let active = Arc::clone(&self.active);
-        let turn_commands = Arc::clone(&self.turn_commands);
-
-        tokio::spawn(async move {
-            let _ = agent.run_turn_loop(None, command_rx).await;
-            *turn_commands
-                .lock()
-                .expect("turn command mutex should not be poisoned") = None;
-            active.store(false, Ordering::SeqCst);
-        });
-
-        Ok(run_id)
-    }
-
-    fn set_next_seq(&self, seq: u64) {
-        self.seq.store(seq, Ordering::SeqCst);
-    }
-
     fn set_usage(&self, usage: TokenUsage) {
         *self
             .usage
@@ -250,7 +190,6 @@ pub struct AgentBuilder {
     llm_provider: Option<Arc<dyn LlmProvider>>,
     tool_registry: Option<Arc<dyn ToolRegistry>>,
     event_bus: Option<Arc<dyn EventStreamBus>>,
-    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
     config: Option<AgentConfig>,
 }
 
@@ -297,82 +236,11 @@ impl AgentBuilder {
         self
     }
 
-    /// Sets the checkpoint store.
-    #[must_use]
-    pub fn checkpoint_store(mut self, checkpoint_store: Arc<dyn CheckpointStore>) -> Self {
-        self.checkpoint_store = Some(checkpoint_store);
-        self
-    }
-
     /// Sets runtime config.
     #[must_use]
     pub fn config(mut self, config: AgentConfig) -> Self {
         self.config = Some(config);
         self
-    }
-
-    /// Restores an [`Agent`] from a retryable checkpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a required builder field is missing, checkpoint
-    /// loading fails, or the checkpoint cannot be resumed by this agent.
-    pub async fn resume(self, run_id: RunId, turn_id: TurnId) -> Result<Agent, AgentError> {
-        let checkpoint_store =
-            self.checkpoint_store
-                .clone()
-                .ok_or(AgentError::MissingBuilderField {
-                    field: "checkpoint_store",
-                })?;
-        let record = match checkpoint_store
-            .latest_turn(run_id, turn_id, CheckpointKind::Agent)
-            .await?
-        {
-            Some(record) if record.status == CheckpointStatus::WaitingRetry => record,
-            Some(_) | None => return Err(AgentError::CheckpointNotRetryable),
-        };
-        let checkpoint = decode_checkpoint_payload(&record.state, record.state_version)?;
-        if let Some(expected) = self.id
-            && checkpoint.agent_id != expected
-        {
-            return Err(AgentError::CheckpointAgentMismatch {
-                expected,
-                actual: checkpoint.agent_id,
-            });
-        }
-
-        let agent = Agent {
-            id: checkpoint.agent_id,
-            name: self
-                .name
-                .ok_or(AgentError::MissingBuilderField { field: "name" })?,
-            system_prompt: self.system_prompt.ok_or(AgentError::MissingBuilderField {
-                field: "system_prompt",
-            })?,
-            llm_provider: self.llm_provider.ok_or(AgentError::MissingBuilderField {
-                field: "llm_provider",
-            })?,
-            tool_registry: self.tool_registry.ok_or(AgentError::MissingBuilderField {
-                field: "tool_registry",
-            })?,
-            event_bus: self
-                .event_bus
-                .ok_or(AgentError::MissingBuilderField { field: "event_bus" })?,
-            checkpoint_store: Some(checkpoint_store),
-            config: self.config.unwrap_or_default(),
-            history: Arc::new(Mutex::new(checkpoint.history)),
-            seq: Arc::new(AtomicU64::new(1)),
-            usage: Arc::new(Mutex::new(TokenUsage::default())),
-            active: Arc::new(AtomicBool::new(false)),
-            resumable: Arc::new(AtomicBool::new(true)),
-            current_run_id: Arc::new(Mutex::new(Some(run_id))),
-            current_turn_id: Arc::new(Mutex::new(Some(turn_id))),
-            cancel: Arc::new(Mutex::new(None)),
-            turn_commands: Arc::new(Mutex::new(None)),
-        };
-        agent.set_next_seq(record.last_seq.saturating_add(1));
-        agent.set_usage(checkpoint.usage);
-        Ok(agent)
     }
 
     /// Builds an [`Agent`].
@@ -398,13 +266,10 @@ impl AgentBuilder {
             event_bus: self
                 .event_bus
                 .ok_or(AgentError::MissingBuilderField { field: "event_bus" })?,
-            checkpoint_store: self.checkpoint_store,
             config: self.config.unwrap_or_default(),
             history: Arc::new(Mutex::new(Vec::new())),
-            seq: Arc::new(AtomicU64::new(1)),
             usage: Arc::new(Mutex::new(TokenUsage::default())),
             active: Arc::new(AtomicBool::new(false)),
-            resumable: Arc::new(AtomicBool::new(false)),
             current_run_id: Arc::new(Mutex::new(None)),
             current_turn_id: Arc::new(Mutex::new(None)),
             cancel: Arc::new(Mutex::new(None)),
@@ -423,7 +288,7 @@ mod tests {
         sync::watch,
         time::{Duration, timeout},
     };
-    use wyse_core::{ChatMessage, ModelId, StreamEnvelope};
+    use wyse_core::{ChatMessage, ModelId, ReplayStart, StreamEnvelope};
     use wyse_infra::event_stream_bus::InMemoryEventStreamBus;
     use wyse_llm::{
         ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmError,
@@ -596,11 +461,12 @@ mod tests {
         timeout(Duration::from_secs(1), async {
             let mut events = agent
                 .event_bus()
-                .subscribe_run(first_run_id)
+                .subscribe_agent(agent.id, ReplayStart::All)
                 .await
                 .expect("event subscription should succeed");
             while let Some(envelope) = events.next().await {
-                let StreamEnvelope { event, .. } = envelope.expect("event should be delivered");
+                let StreamEnvelope { event, .. } =
+                    envelope.expect("event should be delivered").envelope;
                 if matches!(
                     event,
                     wyse_core::RuntimeEvent::Agent {
@@ -621,146 +487,5 @@ mod tests {
         })
         .await
         .expect("active flag should clear after loop completion");
-    }
-
-    #[tokio::test]
-    async fn resume_turn_rejects_completed_agent_without_leaving_it_active() {
-        let provider = Arc::new(BlockingStartProvider::new());
-        let bus = Arc::new(InMemoryEventStreamBus::default());
-        let agent = Agent::builder()
-            .name("test-agent")
-            .system_prompt("be helpful")
-            .llm_provider(provider)
-            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-            .event_bus(bus)
-            .build()
-            .expect("agent should build");
-
-        let run_id = agent
-            .run_turn(ChatMessage::user("hello"))
-            .await
-            .expect("run_turn should start");
-        agent.stop();
-        timeout(Duration::from_secs(1), async {
-            let mut events = agent
-                .event_bus()
-                .subscribe_run(run_id)
-                .await
-                .expect("event subscription should succeed");
-            while let Some(envelope) = events.next().await {
-                let StreamEnvelope { event, .. } = envelope.expect("event should be delivered");
-                if matches!(
-                    event,
-                    wyse_core::RuntimeEvent::Agent {
-                        event: wyse_core::AgentEvent::Cancelled,
-                        ..
-                    }
-                ) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("run should cancel");
-        timeout(Duration::from_secs(1), async {
-            while agent.active.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("active flag should clear after cancellation");
-
-        let error = agent
-            .resume_turn()
-            .await
-            .expect_err("resume should reject agent that was not restored");
-        assert!(matches!(error, AgentError::CheckpointNotRetryable));
-        assert!(!agent.active.load(Ordering::SeqCst));
-
-        let next_run_id = agent
-            .run_turn(ChatMessage::user("hello"))
-            .await
-            .expect("run_turn should still start");
-        assert_eq!(agent.current_run(), Some(next_run_id));
-
-        agent.stop();
-        timeout(Duration::from_secs(1), async {
-            while agent.active.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("active flag should clear after cancellation");
-    }
-
-    #[tokio::test]
-    async fn run_turn_consumes_resume_eligibility_before_starting_new_run() {
-        let provider = Arc::new(BlockingStartProvider::new());
-        let bus = Arc::new(InMemoryEventStreamBus::default());
-        let agent = Agent::builder()
-            .name("test-agent")
-            .system_prompt("be helpful")
-            .llm_provider(provider)
-            .tool_registry(Arc::new(BuiltinToolRegistry::default()))
-            .event_bus(bus)
-            .build()
-            .expect("agent should build");
-        agent.resumable.store(true, Ordering::SeqCst);
-
-        let run_id = agent
-            .run_turn(ChatMessage::user("hello"))
-            .await
-            .expect("run_turn should start");
-        agent.stop();
-        timeout(Duration::from_secs(1), async {
-            let mut events = agent
-                .event_bus()
-                .subscribe_run(run_id)
-                .await
-                .expect("event subscription should succeed");
-            while let Some(envelope) = events.next().await {
-                let StreamEnvelope { event, .. } = envelope.expect("event should be delivered");
-                if matches!(
-                    event,
-                    wyse_core::RuntimeEvent::Agent {
-                        event: wyse_core::AgentEvent::Cancelled,
-                        ..
-                    }
-                ) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("run should cancel");
-        timeout(Duration::from_secs(1), async {
-            while agent.active.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("active flag should clear after cancellation");
-
-        let error = agent
-            .resume_turn()
-            .await
-            .expect_err("resume should reject a non-restored run");
-        assert!(matches!(error, AgentError::CheckpointNotRetryable));
-        assert!(!agent.active.load(Ordering::SeqCst));
-
-        let next_run_id = agent
-            .run_turn(ChatMessage::user("again"))
-            .await
-            .expect("run_turn should still start");
-        assert_eq!(agent.current_run(), Some(next_run_id));
-
-        agent.stop();
-        timeout(Duration::from_secs(1), async {
-            while agent.active.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("active flag should clear after cancellation");
     }
 }

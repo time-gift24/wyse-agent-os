@@ -14,7 +14,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-wyse-checkpoint.workspace = true
 wyse-core.workspace = true
 wyse-infra.workspace = true
 wyse-llm.workspace = true

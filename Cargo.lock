@@ -2037,7 +2037,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "wyse-checkpoint",
  "wyse-core",
  "wyse-infra",
  "wyse-llm",
