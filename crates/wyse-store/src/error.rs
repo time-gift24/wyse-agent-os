@@ -1,18 +1,18 @@
-//! Error types for agent checkpoint persistence.
+//! Error types for agent store persistence.
 
 use thiserror::Error;
 use wyse_core::{AgentId, ChatRole, RunId, TurnId};
 use wyse_filesystem::{CasUpdateError, FilesystemError};
 
-/// Error returned by agent checkpoint operations.
+/// Error returned by agent store operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum CheckpointError {
-    /// A checkpoint filesystem operation failed.
-    #[error("checkpoint filesystem operation failed")]
+pub enum StoreError {
+    /// A store filesystem operation failed.
+    #[error("store filesystem operation failed")]
     Filesystem(#[from] FilesystemError),
     /// The agent state file is missing.
-    #[error("agent checkpoint is missing")]
+    #[error("agent store is missing")]
     AgentMissing,
     /// The persisted state schema version is not supported.
     #[error("unsupported agent state version: {version}")]
@@ -23,11 +23,11 @@ pub enum CheckpointError {
     /// The next message sequence cannot be represented.
     #[error("message sequence overflow")]
     SequenceOverflow,
-    /// A checkpoint append input already has a business sequence.
-    #[error("checkpoint append requires an unsequenced message")]
+    /// A store append input already has a business sequence.
+    #[error("store append requires an unsequenced message")]
     MessageAlreadySequenced,
-    /// A message role cannot be committed to checkpoint history.
-    #[error("invalid checkpoint message role: {role:?}")]
+    /// A message role cannot be committed to store history.
+    #[error("invalid store message role: {role:?}")]
     InvalidMessageRole {
         /// Rejected message role.
         role: ChatRole,
@@ -57,25 +57,25 @@ pub enum CheckpointError {
         last_seq: u64,
     },
     /// Persisted state or an event belongs to a different agent.
-    #[error("checkpoint agent mismatch: expected {expected}, actual {actual}")]
+    #[error("store agent mismatch: expected {expected}, actual {actual}")]
     AgentMismatch {
-        /// Agent identity required by the checkpoint.
+        /// Agent identity required by the store.
         expected: AgentId,
         /// Agent identity found in persisted data.
         actual: AgentId,
     },
     /// A persisted event belongs to a different run.
-    #[error("checkpoint run mismatch: expected {expected}, actual {actual}")]
+    #[error("store run mismatch: expected {expected}, actual {actual}")]
     RunMismatch {
-        /// Run identity required by the checkpoint.
+        /// Run identity required by the store.
         expected: RunId,
         /// Run identity found in persisted data.
         actual: RunId,
     },
     /// A persisted event belongs to a different turn.
-    #[error("checkpoint turn mismatch: expected {expected}, actual {actual}")]
+    #[error("store turn mismatch: expected {expected}, actual {actual}")]
     TurnMismatch {
-        /// Turn identity required by the checkpoint.
+        /// Turn identity required by the store.
         expected: TurnId,
         /// Turn identity found in persisted data.
         actual: TurnId,
@@ -94,10 +94,10 @@ pub enum CheckpointError {
         /// Missing committed sequence.
         seq: u64,
     },
-    /// A checkpoint message file contains another event type.
-    #[error("checkpoint file does not contain an agent message")]
+    /// A store message file contains another event type.
+    #[error("store file does not contain an agent message")]
     UnexpectedMessageEvent,
-    /// A checkpoint message filename does not encode a valid sequence.
+    /// A store message filename does not encode a valid sequence.
     #[error("invalid message filename: {file_name}")]
     InvalidMessageFilename {
         /// Invalid filename.
@@ -111,14 +111,14 @@ pub enum CheckpointError {
         /// Maximum allowed message sequence.
         frontier: u64,
     },
-    /// The checkpoint backend does not provide compare-and-swap.
-    #[error("checkpoint backend does not support compare-and-swap")]
+    /// The store backend does not provide compare-and-swap.
+    #[error("store backend does not support compare-and-swap")]
     CasUnsupported,
-    /// The complete checkpoint compare-and-swap update timed out.
-    #[error("checkpoint compare-and-swap timed out")]
+    /// The complete store compare-and-swap update timed out.
+    #[error("store compare-and-swap timed out")]
     CasTimeout,
-    /// Every permitted checkpoint compare-and-swap write conflicted.
-    #[error("checkpoint compare-and-swap retries exhausted")]
+    /// Every permitted store compare-and-swap write conflicted.
+    #[error("store compare-and-swap retries exhausted")]
     CasRetriesExhausted,
     /// Persisted agent state is malformed JSON.
     #[error("invalid agent state json")]
@@ -126,13 +126,13 @@ pub enum CheckpointError {
     /// A persisted message envelope is malformed JSON.
     #[error("invalid message envelope json")]
     DecodeMessage(#[source] serde_json::Error),
-    /// Checkpoint state or a message could not be encoded as JSON.
-    #[error("failed to encode checkpoint json")]
+    /// Store state or a message could not be encoded as JSON.
+    #[error("failed to encode store json")]
     Encode(#[source] serde_json::Error),
 }
 
-impl From<CasUpdateError<CheckpointError>> for CheckpointError {
-    fn from(error: CasUpdateError<CheckpointError>) -> Self {
+impl From<CasUpdateError<StoreError>> for StoreError {
+    fn from(error: CasUpdateError<StoreError>) -> Self {
         match error {
             CasUpdateError::CasUnsupported => Self::CasUnsupported,
             CasUpdateError::Timeout => Self::CasTimeout,
@@ -150,22 +150,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cas_update_errors_map_to_checkpoint_domain_errors() {
-        let unsupported = CheckpointError::from(CasUpdateError::<CheckpointError>::CasUnsupported);
-        let timeout = CheckpointError::from(CasUpdateError::<CheckpointError>::Timeout);
-        let exhausted = CheckpointError::from(CasUpdateError::<CheckpointError>::RetriesExhausted);
-        let filesystem = CheckpointError::from(CasUpdateError::<CheckpointError>::Filesystem(
+    fn cas_update_errors_map_to_store_domain_errors() {
+        let unsupported = StoreError::from(CasUpdateError::<StoreError>::CasUnsupported);
+        let timeout = StoreError::from(CasUpdateError::<StoreError>::Timeout);
+        let exhausted = StoreError::from(CasUpdateError::<StoreError>::RetriesExhausted);
+        let filesystem = StoreError::from(CasUpdateError::<StoreError>::Filesystem(
             FilesystemError::UnsupportedCas,
         ));
-        let apply = CheckpointError::from(CasUpdateError::Apply(CheckpointError::SequenceOverflow));
+        let apply = StoreError::from(CasUpdateError::Apply(StoreError::SequenceOverflow));
 
-        assert!(matches!(unsupported, CheckpointError::CasUnsupported));
-        assert!(matches!(timeout, CheckpointError::CasTimeout));
-        assert!(matches!(exhausted, CheckpointError::CasRetriesExhausted));
+        assert!(matches!(unsupported, StoreError::CasUnsupported));
+        assert!(matches!(timeout, StoreError::CasTimeout));
+        assert!(matches!(exhausted, StoreError::CasRetriesExhausted));
         assert!(matches!(
             filesystem,
-            CheckpointError::Filesystem(FilesystemError::UnsupportedCas)
+            StoreError::Filesystem(FilesystemError::UnsupportedCas)
         ));
-        assert!(matches!(apply, CheckpointError::SequenceOverflow));
+        assert!(matches!(apply, StoreError::SequenceOverflow));
     }
 }

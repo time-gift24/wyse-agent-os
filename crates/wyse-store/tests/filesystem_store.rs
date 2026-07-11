@@ -4,14 +4,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
 use support::MemoryCasFilesystem;
-use wyse_checkpoint::{
-    AgentCheckpoint, AgentState, AgentStatus, CheckpointError, FilesystemAgentCheckpoint,
-};
 use wyse_core::{
     AgentEvent, AgentId, ChatMessage, ChatRole, EventSource, HistoryQuery, RunId, RuntimeEvent,
     StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{Entry, FILESYSTEM_CAS_RETRIES, VirtualPath};
+use wyse_store::{AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreError};
 
 fn message_envelope(agent_id: AgentId, run_id: RunId, turn_id: TurnId) -> StreamEnvelope {
     StreamEnvelope {
@@ -52,13 +50,13 @@ fn event_sequences(events: &[StreamEnvelope]) -> Vec<u64> {
         .collect()
 }
 
-async fn append_messages(checkpoint: &FilesystemAgentCheckpoint, count: usize) {
-    let state = checkpoint.load_agent().await.expect("load agent");
+async fn append_messages(store: &FilesystemAgentStore, count: usize) {
+    let state = store.load_agent().await.expect("load agent");
     let agent_id = state.agent_id;
     let run_id = RunId::new();
     let turn_id = TurnId::new();
     for index in 0..count {
-        let appended = checkpoint
+        let appended = store
             .append_message(message_envelope(agent_id, run_id, turn_id))
             .await
             .expect("append message");
@@ -72,14 +70,14 @@ async fn append_messages(checkpoint: &FilesystemAgentCheckpoint, count: usize) {
 async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
 
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
-    let first = checkpoint
+    let first = store
         .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
         .await
         .expect("append");
@@ -96,29 +94,29 @@ async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
     .expect("decode stored message");
     assert_eq!(stored.business_seq(), Some(1));
     assert_eq!(stored, first);
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 1);
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 1);
 }
 
 #[tokio::test]
 async fn append_rejects_an_already_sequenced_message() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
     let mut envelope = message_envelope(agent_id, RunId::new(), TurnId::new());
     envelope.business_seq = Some(7);
 
-    let error = checkpoint
+    let error = store
         .append_message(envelope)
         .await
         .expect_err("sequenced input");
 
-    assert!(matches!(error, CheckpointError::MessageAlreadySequenced));
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert!(matches!(error, StoreError::MessageAlreadySequenced));
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 0);
     assert!(!filesystem.exists("/agents/a/messages/1.json"));
 }
 
@@ -126,9 +124,9 @@ async fn append_rejects_an_already_sequenced_message() {
 async fn append_rejects_a_system_message_before_writing() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -142,18 +140,18 @@ async fn append_rejects_a_system_message_before_writing() {
     };
     *message = ChatMessage::system("system prompt");
 
-    let error = checkpoint
+    let error = store
         .append_message(envelope)
         .await
         .expect_err("system message role");
 
     assert!(matches!(
         error,
-        CheckpointError::InvalidMessageRole {
+        StoreError::InvalidMessageRole {
             role: ChatRole::System
         }
     ));
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 0);
     assert!(!filesystem.exists("/agents/a/messages/1.json"));
 }
 
@@ -161,9 +159,9 @@ async fn append_rejects_a_system_message_before_writing() {
 async fn load_rejects_a_committed_system_message() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let mut state = checkpoint
+    let mut state = store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -180,14 +178,14 @@ async fn load_rejects_a_committed_system_message() {
     *message = ChatMessage::system("system prompt");
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
 
-    let error = checkpoint
+    let error = store
         .load_agent()
         .await
         .expect_err("committed system message role");
 
     assert!(matches!(
         error,
-        CheckpointError::InvalidMessageRole {
+        StoreError::InvalidMessageRole {
             role: ChatRole::System
         }
     ));
@@ -197,9 +195,9 @@ async fn load_rejects_a_committed_system_message() {
 async fn load_rejects_an_uncommitted_system_frontier_without_advancing_state() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -214,14 +212,14 @@ async fn load_rejects_an_uncommitted_system_frontier_without_advancing_state() {
     *message = ChatMessage::system("system prompt");
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&envelope));
 
-    let error = checkpoint
+    let error = store
         .load_agent()
         .await
         .expect_err("uncommitted system frontier role");
 
     assert!(matches!(
         error,
-        CheckpointError::InvalidMessageRole {
+        StoreError::InvalidMessageRole {
             role: ChatRole::System
         }
     ));
@@ -239,15 +237,15 @@ async fn load_rejects_an_uncommitted_system_frontier_without_advancing_state() {
 async fn append_rejects_a_message_for_a_different_agent() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
     let other_agent_id = AgentId::new();
 
-    let error = checkpoint
+    let error = store
         .append_message(message_envelope(
             other_agent_id,
             RunId::new(),
@@ -258,10 +256,10 @@ async fn append_rejects_a_message_for_a_different_agent() {
 
     assert!(matches!(
         error,
-        CheckpointError::AgentMismatch { expected, actual }
+        StoreError::AgentMismatch { expected, actual }
             if expected == agent_id && actual == other_agent_id
     ));
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 0);
     assert!(!filesystem.exists("/agents/a/messages/1.json"));
 }
 
@@ -269,9 +267,9 @@ async fn append_rejects_a_message_for_a_different_agent() {
 async fn append_rejects_a_non_message_agent_event() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -282,13 +280,13 @@ async fn append_rejects_a_non_message_agent_event() {
         event: AgentEvent::Started { turn_id },
     };
 
-    let error = checkpoint
+    let error = store
         .append_message(envelope)
         .await
         .expect_err("non-message event");
 
-    assert!(matches!(error, CheckpointError::UnexpectedMessageEvent));
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 0);
+    assert!(matches!(error, StoreError::UnexpectedMessageEvent));
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 0);
     assert!(!filesystem.exists("/agents/a/messages/1.json"));
 }
 
@@ -296,9 +294,9 @@ async fn append_rejects_a_non_message_agent_event() {
 async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let state = checkpoint
+    let state = store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -309,7 +307,7 @@ async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
         .entry_version("/agents/a/messages/1.json")
         .expect("message version");
 
-    let reconciled = checkpoint.load_agent().await.expect("reconcile frontier");
+    let reconciled = store.load_agent().await.expect("reconcile frontier");
 
     assert_eq!(reconciled.last_seq, 1);
     assert_eq!(
@@ -322,23 +320,23 @@ async fn load_reconciles_one_valid_frontier_without_rewriting_it() {
 async fn load_rejects_a_discontiguous_second_message_without_a_frontier() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
     let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
 
-    let error = checkpoint
+    let error = store
         .load_agent()
         .await
         .expect_err("discontiguous extra message");
 
     assert!(matches!(
         error,
-        CheckpointError::MessageBeyondFrontier {
+        StoreError::MessageBeyondFrontier {
             seq: 2,
             frontier: 1
         }
@@ -349,9 +347,9 @@ async fn load_rejects_a_discontiguous_second_message_without_a_frontier() {
 async fn load_rejects_a_third_message_beyond_the_single_frontier() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -360,14 +358,14 @@ async fn load_rejects_a_third_message_beyond_the_single_frontier() {
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.insert_entry("/agents/a/messages/3.json", json_entry(&third));
 
-    let error = checkpoint
+    let error = store
         .load_agent()
         .await
         .expect_err("message beyond single frontier");
 
     assert!(matches!(
         error,
-        CheckpointError::MessageBeyondFrontier {
+        StoreError::MessageBeyondFrontier {
             seq: 3,
             frontier: 1
         }
@@ -378,23 +376,20 @@ async fn load_rejects_a_third_message_beyond_the_single_frontier() {
 async fn load_rejects_noncanonical_message_filenames() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
     let first = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/01.json", json_entry(&first));
 
-    let error = checkpoint
-        .load_agent()
-        .await
-        .expect_err("noncanonical filename");
+    let error = store.load_agent().await.expect_err("noncanonical filename");
 
     assert!(matches!(
         error,
-        CheckpointError::InvalidMessageFilename { file_name } if file_name == "01.json"
+        StoreError::InvalidMessageFilename { file_name } if file_name == "01.json"
     ));
 }
 
@@ -402,9 +397,9 @@ async fn load_rejects_noncanonical_message_filenames() {
 async fn append_retry_returns_an_identical_uncommitted_frontier_without_duplication() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -418,13 +413,10 @@ async fn append_retry_returns_an_identical_uncommitted_frontier_without_duplicat
         .entry_version("/agents/a/messages/1.json")
         .expect("message version");
 
-    let appended = checkpoint
-        .append_message(requested)
-        .await
-        .expect("retry append");
+    let appended = store.append_message(requested).await.expect("retry append");
 
     assert_eq!(appended, envelope);
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 1);
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 1);
     assert!(!filesystem.exists("/agents/a/messages/2.json"));
     assert_eq!(
         filesystem.entry_version("/agents/a/messages/1.json"),
@@ -436,9 +428,9 @@ async fn append_retry_returns_an_identical_uncommitted_frontier_without_duplicat
 async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequence() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -454,13 +446,13 @@ async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequenc
         .metadata
         .insert("request".to_owned(), serde_json::json!(true));
 
-    let appended = checkpoint
+    let appended = store
         .append_message(requested)
         .await
         .expect("append after frontier");
 
     assert_eq!(appended.business_seq(), Some(2));
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 2);
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 2);
     assert!(filesystem.exists("/agents/a/messages/2.json"));
     assert_eq!(
         filesystem.entry_version("/agents/a/messages/1.json"),
@@ -472,9 +464,9 @@ async fn append_reconciles_a_different_frontier_then_retries_at_the_next_sequenc
 async fn append_rejects_an_uncommitted_frontier_from_a_different_run() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -484,43 +476,40 @@ async fn append_rejects_an_uncommitted_frontier_from_a_different_run() {
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
     let requested_run_id = RunId::new();
 
-    let error = checkpoint
+    let error = store
         .append_message(message_envelope(agent_id, requested_run_id, turn_id))
         .await
         .expect_err("run mismatch");
 
     assert!(matches!(
         error,
-        CheckpointError::RunMismatch { expected, actual }
+        StoreError::RunMismatch { expected, actual }
             if expected == requested_run_id && actual == frontier_run_id
     ));
-    assert_eq!(
-        checkpoint.load_agent().await.expect("reconcile").last_seq,
-        1
-    );
+    assert_eq!(store.load_agent().await.expect("reconcile").last_seq, 1);
 }
 
 #[tokio::test]
 async fn append_rejects_discontiguous_message_before_advancing_frontier() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
     let second = sequenced_message_envelope(agent_id, RunId::new(), TurnId::new(), 2);
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&second));
 
-    let error = checkpoint
+    let error = store
         .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
         .await
         .expect_err("discontiguous message");
 
     assert!(matches!(
         error,
-        CheckpointError::MessageBeyondFrontier {
+        StoreError::MessageBeyondFrontier {
             seq: 2,
             frontier: 1
         }
@@ -540,9 +529,9 @@ async fn append_rejects_discontiguous_message_before_advancing_frontier() {
 async fn load_rejects_missing_committed_message() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let mut state = checkpoint
+    let mut state = store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -552,11 +541,11 @@ async fn load_rejects_missing_committed_message() {
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.remove_entry("/agents/a/messages/2.json");
 
-    let error = checkpoint.load_agent().await.expect_err("missing message");
+    let error = store.load_agent().await.expect_err("missing message");
 
     assert!(matches!(
         error,
-        CheckpointError::MissingCommittedMessage { seq: 2 }
+        StoreError::MissingCommittedMessage { seq: 2 }
     ));
 }
 
@@ -564,9 +553,9 @@ async fn load_rejects_missing_committed_message() {
 async fn load_rejects_message_filename_body_sequence_mismatch() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let mut state = checkpoint
+    let mut state = store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -577,14 +566,11 @@ async fn load_rejects_message_filename_body_sequence_mismatch() {
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&first));
     filesystem.insert_entry("/agents/a/messages/2.json", json_entry(&mismatched));
 
-    let error = checkpoint
-        .load_agent()
-        .await
-        .expect_err("sequence mismatch");
+    let error = store.load_agent().await.expect_err("sequence mismatch");
 
     assert!(matches!(
         error,
-        CheckpointError::MessageSequenceMismatch {
+        StoreError::MessageSequenceMismatch {
             path_seq: 2,
             event_seq: 3
         }
@@ -595,9 +581,9 @@ async fn load_rejects_message_filename_body_sequence_mismatch() {
 async fn load_rejects_message_for_a_different_agent() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -605,11 +591,11 @@ async fn load_rejects_message_for_a_different_agent() {
     let frontier = sequenced_message_envelope(other_agent_id, RunId::new(), TurnId::new(), 1);
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&frontier));
 
-    let error = checkpoint.load_agent().await.expect_err("agent mismatch");
+    let error = store.load_agent().await.expect_err("agent mismatch");
 
     assert!(matches!(
         error,
-        CheckpointError::AgentMismatch { expected, actual }
+        StoreError::AgentMismatch { expected, actual }
             if expected == agent_id && actual == other_agent_id
     ));
 }
@@ -618,9 +604,9 @@ async fn load_rejects_message_for_a_different_agent() {
 async fn load_rejects_unknown_message_json_fields() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -632,18 +618,18 @@ async fn load_rejects_unknown_message_json_fields() {
         .insert("owner_id".to_owned(), serde_json::json!("unexpected"));
     filesystem.insert_entry("/agents/a/messages/1.json", json_entry(&value));
 
-    let error = checkpoint.load_agent().await.expect_err("unknown field");
+    let error = store.load_agent().await.expect_err("unknown field");
 
-    assert!(matches!(error, CheckpointError::DecodeMessage(_)));
+    assert!(matches!(error, StoreError::DecodeMessage(_)));
 }
 
 #[tokio::test]
 async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let mut advanced_state: AgentState = checkpoint
+    let mut advanced_state: AgentState = store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -653,9 +639,9 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
     filesystem.fail_next_version_write();
 
     let update = tokio::spawn({
-        let checkpoint = checkpoint.clone();
+        let store = store.clone();
         async move {
-            checkpoint
+            store
                 .update_state(
                     AgentStatus::Finished,
                     Some(RunId::new()),
@@ -682,15 +668,15 @@ async fn state_update_retry_preserves_concurrently_advanced_last_seq() {
 async fn state_update_reconciles_the_previous_run_frontier_before_replacing_identity() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
     let old_run_id = RunId::new();
     let old_turn_id = TurnId::new();
-    checkpoint
+    store
         .update_state(
             AgentStatus::Running,
             Some(old_run_id),
@@ -704,7 +690,7 @@ async fn state_update_reconciles_the_previous_run_frontier_before_replacing_iden
     let new_run_id = RunId::new();
     let new_turn_id = TurnId::new();
 
-    let updated = checkpoint
+    let updated = store
         .update_state(
             AgentStatus::Running,
             Some(new_run_id),
@@ -717,7 +703,7 @@ async fn state_update_reconciles_the_previous_run_frontier_before_replacing_iden
     assert_eq!(updated.last_seq, 1);
     assert_eq!(updated.run_id, Some(new_run_id));
     assert_eq!(updated.turn_id, Some(new_turn_id));
-    let page = checkpoint
+    let page = store
         .history_page(HistoryQuery {
             after_seq: 0,
             through_seq: Some(1),
@@ -726,7 +712,7 @@ async fn state_update_reconciles_the_previous_run_frontier_before_replacing_iden
         .await
         .expect("old frontier is committed and loadable");
     assert_eq!(page.events, [old_frontier]);
-    let appended = checkpoint
+    let appended = store
         .append_message(message_envelope(agent_id, new_run_id, new_turn_id))
         .await
         .expect("append new-run message");
@@ -737,9 +723,9 @@ async fn state_update_reconciles_the_previous_run_frontier_before_replacing_iden
 async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let mut latest_state = checkpoint
+    let mut latest_state = store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -750,8 +736,8 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
     filesystem.pause_next_version_write();
 
     let load = tokio::spawn({
-        let checkpoint = checkpoint.clone();
-        async move { checkpoint.load_agent().await }
+        let store = store.clone();
+        async move { store.load_agent().await }
     });
     filesystem.wait_for_version_write_pause().await;
     let second = sequenced_message_envelope(agent_id, run_id, turn_id, 2);
@@ -764,7 +750,7 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
         .await
         .expect("load task")
         .expect("load retries after state advance");
-    let page = checkpoint
+    let page = store
         .history_page(HistoryQuery {
             after_seq: 0,
             through_seq: Some(2),
@@ -781,14 +767,14 @@ async fn load_retries_when_frontier_cas_observes_a_later_valid_state() {
 async fn pagination_keeps_the_first_page_barrier_after_a_later_append() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem, root);
-    checkpoint
+    let store = FilesystemAgentStore::new(filesystem, root);
+    store
         .initialize(AgentId::new(), "a".to_owned())
         .await
         .expect("initialize");
-    append_messages(&checkpoint, 3).await;
+    append_messages(&store, 3).await;
 
-    let first = checkpoint
+    let first = store
         .history_page(HistoryQuery {
             after_seq: 0,
             through_seq: None,
@@ -796,8 +782,8 @@ async fn pagination_keeps_the_first_page_barrier_after_a_later_append() {
         })
         .await
         .expect("first page");
-    append_messages(&checkpoint, 1).await;
-    let second = checkpoint
+    append_messages(&store, 1).await;
+    let second = store
         .history_page(HistoryQuery {
             after_seq: first.next_front_seq,
             through_seq: Some(first.through_seq),
@@ -818,14 +804,14 @@ async fn pagination_keeps_the_first_page_barrier_after_a_later_append() {
 async fn pagination_rejects_zero_and_oversized_limits() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem, root);
-    checkpoint
+    let store = FilesystemAgentStore::new(filesystem, root);
+    store
         .initialize(AgentId::new(), "a".to_owned())
         .await
         .expect("initialize");
 
     for limit in [0, 257] {
-        let error = checkpoint
+        let error = store
             .history_page(HistoryQuery {
                 after_seq: 0,
                 through_seq: None,
@@ -835,7 +821,7 @@ async fn pagination_rejects_zero_and_oversized_limits() {
             .expect_err("invalid limit");
         assert!(matches!(
             error,
-            CheckpointError::InvalidHistoryLimit { actual, maximum: 256 }
+            StoreError::InvalidHistoryLimit { actual, maximum: 256 }
                 if actual == limit
         ));
     }
@@ -845,14 +831,14 @@ async fn pagination_rejects_zero_and_oversized_limits() {
 async fn pagination_rejects_front_beyond_barrier() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem, root);
-    checkpoint
+    let store = FilesystemAgentStore::new(filesystem, root);
+    store
         .initialize(AgentId::new(), "a".to_owned())
         .await
         .expect("initialize");
-    append_messages(&checkpoint, 2).await;
+    append_messages(&store, 2).await;
 
-    let error = checkpoint
+    let error = store
         .history_page(HistoryQuery {
             after_seq: 2,
             through_seq: Some(1),
@@ -863,7 +849,7 @@ async fn pagination_rejects_front_beyond_barrier() {
 
     assert!(matches!(
         error,
-        CheckpointError::InvalidHistoryRange {
+        StoreError::InvalidHistoryRange {
             after_seq: 2,
             through_seq: 1
         }
@@ -874,14 +860,14 @@ async fn pagination_rejects_front_beyond_barrier() {
 async fn pagination_rejects_barrier_beyond_last_committed_sequence() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem, root);
-    checkpoint
+    let store = FilesystemAgentStore::new(filesystem, root);
+    store
         .initialize(AgentId::new(), "a".to_owned())
         .await
         .expect("initialize");
-    append_messages(&checkpoint, 2).await;
+    append_messages(&store, 2).await;
 
-    let error = checkpoint
+    let error = store
         .history_page(HistoryQuery {
             after_seq: 0,
             through_seq: Some(3),
@@ -892,7 +878,7 @@ async fn pagination_rejects_barrier_beyond_last_committed_sequence() {
 
     assert!(matches!(
         error,
-        CheckpointError::HistoryBarrierBeyondLast {
+        StoreError::HistoryBarrierBeyondLast {
             through_seq: 3,
             last_seq: 2
         }
@@ -903,15 +889,15 @@ async fn pagination_rejects_barrier_beyond_last_committed_sequence() {
 async fn pagination_rejects_missing_path_inside_committed_range() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
-    checkpoint
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    store
         .initialize(AgentId::new(), "a".to_owned())
         .await
         .expect("initialize");
-    append_messages(&checkpoint, 2).await;
+    append_messages(&store, 2).await;
     filesystem.remove_entry("/agents/a/messages/2.json");
 
-    let error = checkpoint
+    let error = store
         .history_page(HistoryQuery {
             after_seq: 0,
             through_seq: None,
@@ -922,7 +908,7 @@ async fn pagination_rejects_missing_path_inside_committed_range() {
 
     assert!(matches!(
         error,
-        CheckpointError::MissingCommittedMessage { seq: 2 }
+        StoreError::MissingCommittedMessage { seq: 2 }
     ));
 }
 
@@ -930,14 +916,14 @@ async fn pagination_rejects_missing_path_inside_committed_range() {
 async fn pagination_reads_nine_and_ten_in_numeric_order() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem, root);
-    checkpoint
+    let store = FilesystemAgentStore::new(filesystem, root);
+    store
         .initialize(AgentId::new(), "a".to_owned())
         .await
         .expect("initialize");
-    append_messages(&checkpoint, 10).await;
+    append_messages(&store, 10).await;
 
-    let page = checkpoint
+    let page = store
         .history_page(HistoryQuery {
             after_seq: 8,
             through_seq: Some(10),
@@ -953,15 +939,15 @@ async fn pagination_reads_nine_and_ten_in_numeric_order() {
 async fn pagination_reads_only_the_requested_message_paths() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
-    checkpoint
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    store
         .initialize(AgentId::new(), "a".to_owned())
         .await
         .expect("initialize");
-    append_messages(&checkpoint, 5).await;
+    append_messages(&store, 5).await;
     filesystem.reset_read_counts();
 
-    let page = checkpoint
+    let page = store
         .history_page(HistoryQuery {
             after_seq: 0,
             through_seq: Some(5),
@@ -986,16 +972,16 @@ async fn pagination_reads_only_the_requested_message_paths() {
 async fn append_reads_only_state_and_the_constant_size_frontier() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
-    append_messages(&checkpoint, 10).await;
+    append_messages(&store, 10).await;
     filesystem.reset_read_counts();
 
-    checkpoint
+    store
         .append_message(message_envelope(agent_id, RunId::new(), TurnId::new()))
         .await
         .expect("append after long history");
@@ -1015,9 +1001,9 @@ async fn append_reads_only_state_and_the_constant_size_frontier() {
 async fn append_stops_after_the_filesystem_cas_retry_limit() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    checkpoint
+    store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -1025,13 +1011,13 @@ async fn append_stops_after_the_filesystem_cas_retry_limit() {
 
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        checkpoint.append_message(message_envelope(agent_id, RunId::new(), TurnId::new())),
+        store.append_message(message_envelope(agent_id, RunId::new(), TurnId::new())),
     )
     .await
     .expect("append terminates")
     .expect_err("append retry exhaustion");
 
-    assert!(matches!(error, CheckpointError::CasRetriesExhausted));
+    assert!(matches!(error, StoreError::CasRetriesExhausted));
     assert_eq!(filesystem.absent_write_attempts(), FILESYSTEM_CAS_RETRIES);
 }
 
@@ -1039,9 +1025,9 @@ async fn append_stops_after_the_filesystem_cas_retry_limit() {
 async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/a").expect("valid root");
-    let checkpoint = FilesystemAgentCheckpoint::new(filesystem.clone(), root);
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
     let agent_id = AgentId::new();
-    let mut advanced_state = checkpoint
+    let mut advanced_state = store
         .initialize(agent_id, "a".to_owned())
         .await
         .expect("initialize");
@@ -1051,8 +1037,8 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
     filesystem.pause_next_read("/agents/a/messages/2.json");
 
     let append = tokio::spawn({
-        let checkpoint = checkpoint.clone();
-        async move { checkpoint.append_message(requested).await }
+        let store = store.clone();
+        async move { store.append_message(requested).await }
     });
     filesystem.wait_for_read_pause().await;
     let committed = sequenced_message_envelope(agent_id, run_id, turn_id, 1);
@@ -1069,6 +1055,6 @@ async fn append_retries_when_one_beyond_belongs_to_an_advanced_state() {
         .expect("stale append retries");
 
     assert_eq!(appended.business_seq(), Some(3));
-    assert_eq!(checkpoint.load_agent().await.expect("state").last_seq, 3);
+    assert_eq!(store.load_agent().await.expect("state").last_seq, 3);
     assert!(filesystem.exists("/agents/a/messages/3.json"));
 }

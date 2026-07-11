@@ -2055,23 +2055,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wyse-checkpoint"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures-util",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "wyse-core",
- "wyse-filesystem",
- "wyse-infra",
-]
-
-[[package]]
 name = "wyse-core"
 version = "0.1.0"
 dependencies = [
@@ -2124,6 +2107,23 @@ dependencies = [
  "thiserror",
  "tokio",
  "wyse-core",
+]
+
+[[package]]
+name = "wyse-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "wyse-core",
+ "wyse-filesystem",
+ "wyse-infra",
 ]
 
 [[package]]

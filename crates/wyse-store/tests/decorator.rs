@@ -5,15 +5,13 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use wyse_checkpoint::{
-    AgentCheckpoint, AgentState, AgentStatus, CheckpointError, CheckpointEventStreamBus,
-};
 use wyse_core::{
     AgentEvent, AgentId, ChatMessage, EventCursor, EventSource, HistoryPage, HistoryQuery,
     LlmCallId, LlmCallRole, LlmEvent, NodeId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
     TokenUsage, TurnId,
 };
 use wyse_infra::{EventStream, EventStreamBus, EventStreamBusError};
+use wyse_store::{AgentState, AgentStatus, AgentStore, StoreError, StoreEventStreamBus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StateUpdate {
@@ -23,7 +21,7 @@ struct StateUpdate {
     usage: TokenUsage,
 }
 
-struct RecordingCheckpoint {
+struct RecordingStore {
     state: Mutex<AgentState>,
     loads: Mutex<usize>,
     appended: Mutex<Vec<StreamEnvelope>>,
@@ -31,7 +29,7 @@ struct RecordingCheckpoint {
     fail_append: bool,
 }
 
-impl RecordingCheckpoint {
+impl RecordingStore {
     fn new(agent_id: AgentId) -> Self {
         Self {
             state: Mutex::new(AgentState::new(agent_id, "recording".to_owned())),
@@ -51,8 +49,8 @@ impl RecordingCheckpoint {
 }
 
 #[async_trait]
-impl AgentCheckpoint for RecordingCheckpoint {
-    async fn load_agent(&self) -> Result<AgentState, CheckpointError> {
+impl AgentStore for RecordingStore {
+    async fn load_agent(&self) -> Result<AgentState, StoreError> {
         *self.loads.lock().expect("loads lock") += 1;
         Ok(self.state.lock().expect("state lock").clone())
     }
@@ -63,7 +61,7 @@ impl AgentCheckpoint for RecordingCheckpoint {
         run_id: Option<RunId>,
         turn_id: Option<TurnId>,
         usage: TokenUsage,
-    ) -> Result<AgentState, CheckpointError> {
+    ) -> Result<AgentState, StoreError> {
         self.updates
             .lock()
             .expect("updates lock")
@@ -84,20 +82,20 @@ impl AgentCheckpoint for RecordingCheckpoint {
     async fn append_message(
         &self,
         mut envelope: StreamEnvelope,
-    ) -> Result<StreamEnvelope, CheckpointError> {
+    ) -> Result<StreamEnvelope, StoreError> {
         self.appended
             .lock()
             .expect("appended lock")
             .push(envelope.clone());
         if self.fail_append {
-            return Err(CheckpointError::AgentMissing);
+            return Err(StoreError::AgentMissing);
         }
         envelope.business_seq = Some(1);
         Ok(envelope)
     }
 
-    async fn history_page(&self, _query: HistoryQuery) -> Result<HistoryPage, CheckpointError> {
-        Err(CheckpointError::AgentMissing)
+    async fn history_page(&self, _query: HistoryQuery) -> Result<HistoryPage, StoreError> {
+        Err(StoreError::AgentMissing)
     }
 }
 
@@ -166,11 +164,11 @@ fn envelope(agent_id: AgentId, run_id: RunId, event: AgentEvent) -> StreamEnvelo
 }
 
 #[tokio::test]
-async fn message_is_checkpointed_unsequenced_then_forwarded_with_committed_sequence() {
+async fn message_is_stored_unsequenced_then_forwarded_with_committed_sequence() {
     let agent_id = AgentId::new();
-    let checkpoint = Arc::new(RecordingCheckpoint::new(agent_id));
+    let store = Arc::new(RecordingStore::new(agent_id));
     let inner = Arc::new(RecordingBus::new());
-    let bus = CheckpointEventStreamBus::new(checkpoint.clone(), inner.clone());
+    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
     let requested = envelope(
         agent_id,
         RunId::new(),
@@ -183,7 +181,7 @@ async fn message_is_checkpointed_unsequenced_then_forwarded_with_committed_seque
     bus.publish(requested).await.expect("publish message");
 
     assert_eq!(
-        checkpoint.appended.lock().expect("appended lock")[0].business_seq,
+        store.appended.lock().expect("appended lock")[0].business_seq,
         None
     );
     assert_eq!(
@@ -195,9 +193,9 @@ async fn message_is_checkpointed_unsequenced_then_forwarded_with_committed_seque
 #[tokio::test]
 async fn state_events_commit_matching_status_run_turn_and_usage() {
     let agent_id = AgentId::new();
-    let checkpoint = Arc::new(RecordingCheckpoint::new(agent_id));
+    let store = Arc::new(RecordingStore::new(agent_id));
     let inner = Arc::new(RecordingBus::new());
-    let bus = CheckpointEventStreamBus::new(checkpoint.clone(), inner);
+    let bus = StoreEventStreamBus::new(store.clone(), inner);
     let run_id = RunId::new();
     let turn_id = TurnId::new();
     let finished_usage = TokenUsage {
@@ -250,7 +248,7 @@ async fn state_events_commit_matching_status_run_turn_and_usage() {
     .expect("publish cancelled");
 
     assert_eq!(
-        *checkpoint.updates.lock().expect("updates lock"),
+        *store.updates.lock().expect("updates lock"),
         vec![
             StateUpdate {
                 status: AgentStatus::Running,
@@ -281,11 +279,11 @@ async fn state_events_commit_matching_status_run_turn_and_usage() {
 }
 
 #[tokio::test]
-async fn llm_delta_bypasses_checkpoint_and_is_forwarded_unchanged() {
+async fn llm_delta_bypasses_store_and_is_forwarded_unchanged() {
     let agent_id = AgentId::new();
-    let checkpoint = Arc::new(RecordingCheckpoint::new(agent_id));
+    let store = Arc::new(RecordingStore::new(agent_id));
     let inner = Arc::new(RecordingBus::new());
-    let bus = CheckpointEventStreamBus::new(checkpoint.clone(), inner.clone());
+    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
     let delta = envelope(
         agent_id,
         RunId::new(),
@@ -300,15 +298,9 @@ async fn llm_delta_bypasses_checkpoint_and_is_forwarded_unchanged() {
 
     bus.publish(delta.clone()).await.expect("publish delta");
 
-    assert!(
-        checkpoint
-            .appended
-            .lock()
-            .expect("appended lock")
-            .is_empty()
-    );
-    assert!(checkpoint.updates.lock().expect("updates lock").is_empty());
-    assert_eq!(*checkpoint.loads.lock().expect("loads lock"), 0);
+    assert!(store.appended.lock().expect("appended lock").is_empty());
+    assert!(store.updates.lock().expect("updates lock").is_empty());
+    assert_eq!(*store.loads.lock().expect("loads lock"), 0);
     assert_eq!(
         *inner.published.lock().expect("published lock"),
         vec![delta]
@@ -316,11 +308,11 @@ async fn llm_delta_bypasses_checkpoint_and_is_forwarded_unchanged() {
 }
 
 #[tokio::test]
-async fn checkpoint_failure_is_persistence_error_and_prevents_inner_publish() {
+async fn store_failure_is_persistence_error_and_prevents_inner_publish() {
     let agent_id = AgentId::new();
-    let checkpoint = Arc::new(RecordingCheckpoint::failing(agent_id));
+    let store = Arc::new(RecordingStore::failing(agent_id));
     let inner = Arc::new(RecordingBus::new());
-    let bus = CheckpointEventStreamBus::new(checkpoint, inner.clone());
+    let bus = StoreEventStreamBus::new(store, inner.clone());
     let message = envelope(
         agent_id,
         RunId::new(),
@@ -330,7 +322,7 @@ async fn checkpoint_failure_is_persistence_error_and_prevents_inner_publish() {
         },
     );
 
-    let error = bus.publish(message).await.expect_err("checkpoint failure");
+    let error = bus.publish(message).await.expect_err("store failure");
 
     assert!(matches!(&error, EventStreamBusError::Persistence { .. }));
     assert_eq!(error.to_string(), "event persistence failed");
@@ -340,9 +332,9 @@ async fn checkpoint_failure_is_persistence_error_and_prevents_inner_publish() {
 #[tokio::test]
 async fn inner_failure_after_committed_message_is_warn_only() {
     let agent_id = AgentId::new();
-    let checkpoint = Arc::new(RecordingCheckpoint::new(agent_id));
+    let store = Arc::new(RecordingStore::new(agent_id));
     let inner = Arc::new(RecordingBus::failing());
-    let bus = CheckpointEventStreamBus::new(checkpoint.clone(), inner.clone());
+    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
     let message = envelope(
         agent_id,
         RunId::new(),
@@ -354,18 +346,18 @@ async fn inner_failure_after_committed_message_is_warn_only() {
 
     bus.publish(message)
         .await
-        .expect("durable checkpoint is authoritative");
+        .expect("durable store is authoritative");
 
-    assert_eq!(checkpoint.appended.lock().expect("appended lock").len(), 1);
+    assert_eq!(store.appended.lock().expect("appended lock").len(), 1);
     assert_eq!(inner.published.lock().expect("published lock").len(), 1);
 }
 
 #[tokio::test]
 async fn subscription_delegates_agent_and_replay_start_unchanged() {
     let agent_id = AgentId::new();
-    let checkpoint = Arc::new(RecordingCheckpoint::new(agent_id));
+    let store = Arc::new(RecordingStore::new(agent_id));
     let inner = Arc::new(RecordingBus::new());
-    let bus = CheckpointEventStreamBus::new(checkpoint, inner.clone());
+    let bus = StoreEventStreamBus::new(store, inner.clone());
     let replay_start = ReplayStart::After(EventCursor::from_transport_sequence(41));
 
     let _stream = bus

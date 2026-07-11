@@ -2,7 +2,7 @@
 members = [
     "crates/wyse-agent",
     "crates/wyse-agent-builtin",
-    "crates/wyse-checkpoint",
+    "crates/wyse-store",
     "crates/wyse-core",
     "crates/wyse-filesystem",
     "crates/wyse-infra",
@@ -35,7 +35,7 @@ uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
 wyse-core = { path = "crates/wyse-core" }
 wyse-filesystem = { path = "crates/wyse-filesystem" }
 wyse-agent = { path = "crates/wyse-agent" }
-wyse-checkpoint = { path = "crates/wyse-checkpoint" }
+wyse-store = { path = "crates/wyse-store" }
 wyse-infra = { path = "crates/wyse-infra" }
 wyse-llm = { path = "crates/wyse-llm" }
 wyse-tools = { path = "crates/wyse-tools" }

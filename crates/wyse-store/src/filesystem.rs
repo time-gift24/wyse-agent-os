@@ -1,4 +1,4 @@
-//! Filesystem-backed agent checkpoint storage.
+//! Filesystem-backed agent store storage.
 
 use std::{
     collections::BTreeSet,
@@ -22,13 +22,12 @@ use wyse_filesystem::{
 };
 
 use crate::{
-    AGENT_STATE_VERSION, AgentCheckpoint, AgentState, AgentStatus, CheckpointError,
-    MAX_HISTORY_PAGE_SIZE,
+    AGENT_STATE_VERSION, AgentState, AgentStatus, AgentStore, MAX_HISTORY_PAGE_SIZE, StoreError,
 };
 
-/// Filesystem-backed checkpoint for one agent root.
+/// Filesystem-backed store for one agent root.
 #[derive(Clone)]
-pub struct FilesystemAgentCheckpoint {
+pub struct FilesystemAgentStore {
     filesystem: Arc<dyn Filesystem>,
     root: VirtualPath,
 }
@@ -38,8 +37,8 @@ enum CommitSequenceOutcome {
     Advanced,
 }
 
-impl FilesystemAgentCheckpoint {
-    /// Creates a checkpoint rooted at an agent-visible virtual path.
+impl FilesystemAgentStore {
+    /// Creates a store rooted at an agent-visible virtual path.
     #[must_use]
     pub fn new(filesystem: Arc<dyn Filesystem>, root: VirtualPath) -> Self {
         Self { filesystem, root }
@@ -49,13 +48,13 @@ impl FilesystemAgentCheckpoint {
     ///
     /// # Errors
     ///
-    /// Returns an error when the paths are invalid, the checkpoint already exists,
+    /// Returns an error when the paths are invalid, the store already exists,
     /// or the filesystem cannot create it.
     pub async fn initialize(
         &self,
         agent_id: AgentId,
         name: String,
-    ) -> Result<AgentState, CheckpointError> {
+    ) -> Result<AgentState, StoreError> {
         let state = AgentState::new(agent_id, name);
         self.filesystem.create_dir(&self.messages_path()?).await?;
         self.filesystem
@@ -68,33 +67,33 @@ impl FilesystemAgentCheckpoint {
         Ok(state)
     }
 
-    fn agent_path(&self) -> Result<VirtualPath, CheckpointError> {
+    fn agent_path(&self) -> Result<VirtualPath, StoreError> {
         self.child_path("agent.json")
     }
 
-    fn messages_path(&self) -> Result<VirtualPath, CheckpointError> {
+    fn messages_path(&self) -> Result<VirtualPath, StoreError> {
         self.child_path("messages")
     }
 
-    fn message_path(&self, seq: u64) -> Result<VirtualPath, CheckpointError> {
+    fn message_path(&self, seq: u64) -> Result<VirtualPath, StoreError> {
         self.child_path(&format!("messages/{seq}.json"))
     }
 
-    fn child_path(&self, suffix: &str) -> Result<VirtualPath, CheckpointError> {
+    fn child_path(&self, suffix: &str) -> Result<VirtualPath, StoreError> {
         let path = if self.root.as_str() == "/" {
             format!("/{suffix}")
         } else {
             format!("{}/{suffix}", self.root.as_str())
         };
         VirtualPath::try_from(path.as_str()).map_err(|source| {
-            CheckpointError::Filesystem(FilesystemError::InvalidVirtualPath { path, source })
+            StoreError::Filesystem(FilesystemError::InvalidVirtualPath { path, source })
         })
     }
 
-    async fn read_state(&self) -> Result<AgentState, CheckpointError> {
+    async fn read_state(&self) -> Result<AgentState, StoreError> {
         let path = self.agent_path()?;
         let Some(record) = self.filesystem.get(&path).await? else {
-            return Err(CheckpointError::AgentMissing);
+            return Err(StoreError::AgentMissing);
         };
         let state = decode_agent_state(&record.entry)?;
         validate_state(&state)?;
@@ -105,15 +104,15 @@ impl FilesystemAgentCheckpoint {
         &self,
         state: &AgentState,
         seq: u64,
-    ) -> Result<Option<StreamEnvelope>, CheckpointError> {
+    ) -> Result<Option<StreamEnvelope>, StoreError> {
         let Some(record) = self.filesystem.get(&self.message_path(seq)?).await? else {
             return Ok(None);
         };
         let envelope = decode_message(&record.entry).inspect_err(|_| {
-            trace_checkpoint_corruption(state, seq);
+            trace_store_corruption(state, seq);
         })?;
         validate_message(&envelope, state.agent_id, seq, None, None).inspect_err(|_| {
-            trace_checkpoint_corruption(state, seq);
+            trace_store_corruption(state, seq);
         })?;
         Ok(Some(envelope))
     }
@@ -122,7 +121,7 @@ impl FilesystemAgentCheckpoint {
         &self,
         expected_previous: u64,
         seq: u64,
-    ) -> Result<CommitSequenceOutcome, CheckpointError> {
+    ) -> Result<CommitSequenceOutcome, StoreError> {
         let updated_at = Utc::now();
         let attempts = AtomicUsize::new(0);
         let result = cas_update(
@@ -134,7 +133,7 @@ impl FilesystemAgentCheckpoint {
                 attempts.fetch_add(1, Ordering::Relaxed);
                 validate_state(current)?;
                 if current.last_seq != expected_previous && current.last_seq != seq {
-                    return Err(CheckpointError::MessageBeyondFrontier {
+                    return Err(StoreError::MessageBeyondFrontier {
                         seq,
                         frontier: current.last_seq,
                     });
@@ -149,11 +148,11 @@ impl FilesystemAgentCheckpoint {
         trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), Some(seq));
         match result {
             Ok(state) => Ok(CommitSequenceOutcome::Committed(state)),
-            Err(CasUpdateError::Apply(CheckpointError::MessageBeyondFrontier {
+            Err(CasUpdateError::Apply(StoreError::MessageBeyondFrontier {
                 seq: attempted,
                 frontier,
             })) if attempted == seq && frontier > seq => Ok(CommitSequenceOutcome::Advanced),
-            Err(error) => Err(CheckpointError::from(error)),
+            Err(error) => Err(StoreError::from(error)),
         }
     }
 
@@ -161,7 +160,7 @@ impl FilesystemAgentCheckpoint {
         &self,
         state: AgentState,
         message_sequences: &BTreeSet<u64>,
-    ) -> Result<Option<AgentState>, CheckpointError> {
+    ) -> Result<Option<AgentState>, StoreError> {
         let frontier = self
             .validate_integrity_snapshot(&state, message_sequences)
             .await?;
@@ -171,7 +170,7 @@ impl FilesystemAgentCheckpoint {
         let frontier_message = self
             .read_message(&state, frontier)
             .await?
-            .ok_or(CheckpointError::MissingCommittedMessage { seq: frontier })?;
+            .ok_or(StoreError::MissingCommittedMessage { seq: frontier })?;
         validate_message(
             &frontier_message,
             state.agent_id,
@@ -179,7 +178,7 @@ impl FilesystemAgentCheckpoint {
             state.run_id,
             state.turn_id,
         )
-        .inspect_err(|_| trace_checkpoint_corruption(&state, frontier))?;
+        .inspect_err(|_| trace_store_corruption(&state, frontier))?;
 
         tracing::info!(
             agent_id = %state.agent_id,
@@ -187,7 +186,7 @@ impl FilesystemAgentCheckpoint {
             turn_id = ?state.turn_id,
             seq = frontier,
             reconciliation_count = 1_u64,
-            "checkpoint frontier reconciliation"
+            "store frontier reconciliation"
         );
         match self.commit_sequence(state.last_seq, frontier).await? {
             CommitSequenceOutcome::Committed(state) => Ok(Some(state)),
@@ -195,13 +194,13 @@ impl FilesystemAgentCheckpoint {
         }
     }
 
-    async fn list_message_sequences(&self) -> Result<BTreeSet<u64>, CheckpointError> {
+    async fn list_message_sequences(&self) -> Result<BTreeSet<u64>, StoreError> {
         let entries = self.filesystem.list_dir(&self.messages_path()?).await?;
         let mut sequences = BTreeSet::new();
         for entry in entries {
             let seq = parse_message_filename(&entry.file_name)?;
             if entry.file_type != FileType::File || entry.path != self.message_path(seq)? {
-                return Err(CheckpointError::InvalidMessageFilename {
+                return Err(StoreError::InvalidMessageFilename {
                     file_name: entry.file_name,
                 });
             }
@@ -210,9 +209,7 @@ impl FilesystemAgentCheckpoint {
         Ok(sequences)
     }
 
-    async fn read_integrity_snapshot(
-        &self,
-    ) -> Result<(AgentState, BTreeSet<u64>), CheckpointError> {
+    async fn read_integrity_snapshot(&self) -> Result<(AgentState, BTreeSet<u64>), StoreError> {
         loop {
             let state = self.read_state().await?;
             let message_sequences = self.list_message_sequences().await?;
@@ -227,17 +224,17 @@ impl FilesystemAgentCheckpoint {
         &self,
         state: &AgentState,
         message_sequences: &BTreeSet<u64>,
-    ) -> Result<u64, CheckpointError> {
+    ) -> Result<u64, StoreError> {
         let frontier = state
             .last_seq
             .checked_add(1)
-            .ok_or(CheckpointError::SequenceOverflow)?;
+            .ok_or(StoreError::SequenceOverflow)?;
         if let Some(seq) = message_sequences
             .range((Excluded(frontier), Unbounded))
             .next()
         {
-            trace_checkpoint_corruption(state, *seq);
-            return Err(CheckpointError::MessageBeyondFrontier {
+            trace_store_corruption(state, *seq);
+            return Err(StoreError::MessageBeyondFrontier {
                 seq: *seq,
                 frontier,
             });
@@ -246,11 +243,11 @@ impl FilesystemAgentCheckpoint {
         Ok(frontier)
     }
 
-    async fn validate_committed_messages(&self, state: &AgentState) -> Result<(), CheckpointError> {
+    async fn validate_committed_messages(&self, state: &AgentState) -> Result<(), StoreError> {
         for seq in 1..=state.last_seq {
             if self.read_message(state, seq).await?.is_none() {
-                trace_checkpoint_corruption(state, seq);
-                return Err(CheckpointError::MissingCommittedMessage { seq });
+                trace_store_corruption(state, seq);
+                return Err(StoreError::MissingCommittedMessage { seq });
             }
         }
         Ok(())
@@ -258,8 +255,8 @@ impl FilesystemAgentCheckpoint {
 }
 
 #[async_trait]
-impl AgentCheckpoint for FilesystemAgentCheckpoint {
-    async fn load_agent(&self) -> Result<AgentState, CheckpointError> {
+impl AgentStore for FilesystemAgentStore {
+    async fn load_agent(&self) -> Result<AgentState, StoreError> {
         loop {
             let (state, message_sequences) = self.read_integrity_snapshot().await?;
             if let Some(state) = self.reconcile_frontier(state, &message_sequences).await? {
@@ -274,7 +271,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         run_id: Option<RunId>,
         turn_id: Option<TurnId>,
         usage: TokenUsage,
-    ) -> Result<AgentState, CheckpointError> {
+    ) -> Result<AgentState, StoreError> {
         self.load_agent().await?;
         let updated_at = Utc::now();
         let attempts = AtomicUsize::new(0);
@@ -297,22 +294,19 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         )
         .await;
         trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
-        result.map_err(CheckpointError::from)
+        result.map_err(StoreError::from)
     }
 
-    async fn append_message(
-        &self,
-        envelope: StreamEnvelope,
-    ) -> Result<StreamEnvelope, CheckpointError> {
+    async fn append_message(&self, envelope: StreamEnvelope) -> Result<StreamEnvelope, StoreError> {
         if envelope.business_seq.is_some() {
-            return Err(CheckpointError::MessageAlreadySequenced);
+            return Err(StoreError::MessageAlreadySequenced);
         }
         let RuntimeEvent::Agent {
             agent_id,
             event: AgentEvent::Message { turn_id, message },
         } = &envelope.event
         else {
-            return Err(CheckpointError::UnexpectedMessageEvent);
+            return Err(StoreError::UnexpectedMessageEvent);
         };
         validate_message_role(message.role)?;
         let input_agent_id = *agent_id;
@@ -321,7 +315,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         for append_attempt in 1..=FILESYSTEM_CAS_RETRIES {
             let state = self.read_state().await?;
             if input_agent_id != state.agent_id {
-                return Err(CheckpointError::AgentMismatch {
+                return Err(StoreError::AgentMismatch {
                     expected: state.agent_id,
                     actual: input_agent_id,
                 });
@@ -329,10 +323,8 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
             let seq = state
                 .last_seq
                 .checked_add(1)
-                .ok_or(CheckpointError::SequenceOverflow)?;
-            let beyond = seq
-                .checked_add(1)
-                .ok_or(CheckpointError::SequenceOverflow)?;
+                .ok_or(StoreError::SequenceOverflow)?;
+            let beyond = seq.checked_add(1).ok_or(StoreError::SequenceOverflow)?;
             let mut committed = envelope.clone();
             committed.business_seq = Some(seq);
             validate_message(&committed, state.agent_id, seq, Some(run_id), Some(turn_id))?;
@@ -343,15 +335,15 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                 if refreshed.last_seq != state.last_seq {
                     continue;
                 }
-                trace_checkpoint_corruption(&state, beyond);
-                return Err(CheckpointError::MessageBeyondFrontier {
+                trace_store_corruption(&state, beyond);
+                return Err(StoreError::MessageBeyondFrontier {
                     seq: beyond,
                     frontier: seq,
                 });
             }
             if let Some(existing) = existing {
                 validate_message(&existing, state.agent_id, seq, Some(run_id), Some(turn_id))
-                    .inspect_err(|_| trace_checkpoint_corruption(&state, seq))?;
+                    .inspect_err(|_| trace_store_corruption(&state, seq))?;
                 self.commit_sequence(state.last_seq, seq).await?;
                 if existing == committed {
                     return Ok(existing);
@@ -362,7 +354,7 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                     turn_id = %turn_id,
                     seq,
                     retry_count = append_attempt,
-                    "checkpoint append retry"
+                    "store append retry"
                 );
                 continue;
             }
@@ -386,13 +378,13 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(CheckpointError::CasRetriesExhausted)
+        Err(StoreError::CasRetriesExhausted)
     }
 
-    async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage, CheckpointError> {
+    async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage, StoreError> {
         let started = std::time::Instant::now();
         if query.limit == 0 || query.limit > MAX_HISTORY_PAGE_SIZE {
-            return Err(CheckpointError::InvalidHistoryLimit {
+            return Err(StoreError::InvalidHistoryLimit {
                 actual: query.limit,
                 maximum: MAX_HISTORY_PAGE_SIZE,
             });
@@ -400,13 +392,13 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
         let state = self.read_state().await?;
         let through_seq = query.through_seq.unwrap_or(state.last_seq);
         if through_seq > state.last_seq {
-            return Err(CheckpointError::HistoryBarrierBeyondLast {
+            return Err(StoreError::HistoryBarrierBeyondLast {
                 through_seq,
                 last_seq: state.last_seq,
             });
         }
         if query.after_seq > through_seq {
-            return Err(CheckpointError::InvalidHistoryRange {
+            return Err(StoreError::InvalidHistoryRange {
                 after_seq: query.after_seq,
                 through_seq,
             });
@@ -419,11 +411,11 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
             let seq = query
                 .after_seq
                 .checked_add(offset)
-                .ok_or(CheckpointError::SequenceOverflow)?;
+                .ok_or(StoreError::SequenceOverflow)?;
             let event = self
                 .read_message(&state, seq)
                 .await?
-                .ok_or(CheckpointError::MissingCommittedMessage { seq })?;
+                .ok_or(StoreError::MissingCommittedMessage { seq })?;
             events.push(event);
         }
         let next_front_seq = events
@@ -443,47 +435,47 @@ impl AgentCheckpoint for FilesystemAgentCheckpoint {
             seq = page.next_front_seq,
             event_count = page.events.len(),
             latency_micros = started.elapsed().as_micros(),
-            "checkpoint history page"
+            "store history page"
         );
         Ok(page)
     }
 }
 
-fn decode_agent_state(entry: &Entry) -> Result<AgentState, CheckpointError> {
-    serde_json::from_slice(entry.contents()).map_err(CheckpointError::DecodeState)
+fn decode_agent_state(entry: &Entry) -> Result<AgentState, StoreError> {
+    serde_json::from_slice(entry.contents()).map_err(StoreError::DecodeState)
 }
 
-fn encode_agent_state(state: &AgentState) -> Result<Entry, CheckpointError> {
+fn encode_agent_state(state: &AgentState) -> Result<Entry, StoreError> {
     serde_json::to_vec(state)
         .map(Entry::new)
-        .map_err(CheckpointError::Encode)
+        .map_err(StoreError::Encode)
 }
 
-fn decode_message(entry: &Entry) -> Result<StreamEnvelope, CheckpointError> {
+fn decode_message(entry: &Entry) -> Result<StreamEnvelope, StoreError> {
     let value: Value =
-        serde_json::from_slice(entry.contents()).map_err(CheckpointError::DecodeMessage)?;
-    validate_strict_message_json(&value).map_err(CheckpointError::DecodeMessage)?;
-    serde_json::from_value(value).map_err(CheckpointError::DecodeMessage)
+        serde_json::from_slice(entry.contents()).map_err(StoreError::DecodeMessage)?;
+    validate_strict_message_json(&value).map_err(StoreError::DecodeMessage)?;
+    serde_json::from_value(value).map_err(StoreError::DecodeMessage)
 }
 
-fn encode_message(envelope: &StreamEnvelope) -> Result<Entry, CheckpointError> {
+fn encode_message(envelope: &StreamEnvelope) -> Result<Entry, StoreError> {
     serde_json::to_vec(envelope)
         .map(Entry::new)
-        .map_err(CheckpointError::Encode)
+        .map_err(StoreError::Encode)
 }
 
-fn validate_state(state: &AgentState) -> Result<(), CheckpointError> {
+fn validate_state(state: &AgentState) -> Result<(), StoreError> {
     if state.state_version != AGENT_STATE_VERSION {
-        return Err(CheckpointError::UnsupportedStateVersion {
+        return Err(StoreError::UnsupportedStateVersion {
             version: state.state_version,
         });
     }
     Ok(())
 }
 
-fn parse_message_filename(file_name: &str) -> Result<u64, CheckpointError> {
+fn parse_message_filename(file_name: &str) -> Result<u64, StoreError> {
     let Some(number) = file_name.strip_suffix(".json") else {
-        return Err(CheckpointError::InvalidMessageFilename {
+        return Err(StoreError::InvalidMessageFilename {
             file_name: file_name.to_owned(),
         });
     };
@@ -491,7 +483,7 @@ fn parse_message_filename(file_name: &str) -> Result<u64, CheckpointError> {
         .parse::<u64>()
         .ok()
         .filter(|seq| *seq != 0 && number == seq.to_string())
-        .ok_or_else(|| CheckpointError::InvalidMessageFilename {
+        .ok_or_else(|| StoreError::InvalidMessageFilename {
             file_name: file_name.to_owned(),
         })?;
     Ok(seq)
@@ -503,11 +495,11 @@ fn validate_message(
     path_seq: u64,
     expected_run_id: Option<RunId>,
     expected_turn_id: Option<TurnId>,
-) -> Result<(), CheckpointError> {
+) -> Result<(), StoreError> {
     if let Some(expected) = expected_run_id
         && envelope.run_id != expected
     {
-        return Err(CheckpointError::RunMismatch {
+        return Err(StoreError::RunMismatch {
             expected,
             actual: envelope.run_id,
         });
@@ -515,26 +507,26 @@ fn validate_message(
     if let EventSource::Agent { agent_id, .. } = &envelope.source
         && *agent_id != expected_agent_id
     {
-        return Err(CheckpointError::AgentMismatch {
+        return Err(StoreError::AgentMismatch {
             expected: expected_agent_id,
             actual: *agent_id,
         });
     }
     let RuntimeEvent::Agent { agent_id, event } = &envelope.event else {
-        return Err(CheckpointError::UnexpectedMessageEvent);
+        return Err(StoreError::UnexpectedMessageEvent);
     };
     if *agent_id != expected_agent_id {
-        return Err(CheckpointError::AgentMismatch {
+        return Err(StoreError::AgentMismatch {
             expected: expected_agent_id,
             actual: *agent_id,
         });
     }
     let AgentEvent::Message { turn_id, message } = event else {
-        return Err(CheckpointError::UnexpectedMessageEvent);
+        return Err(StoreError::UnexpectedMessageEvent);
     };
     validate_message_role(message.role)?;
     if envelope.business_seq != Some(path_seq) {
-        return Err(CheckpointError::MessageSequenceMismatch {
+        return Err(StoreError::MessageSequenceMismatch {
             path_seq,
             event_seq: envelope.business_seq.unwrap_or_default(),
         });
@@ -542,7 +534,7 @@ fn validate_message(
     if let Some(expected) = expected_turn_id
         && *turn_id != expected
     {
-        return Err(CheckpointError::TurnMismatch {
+        return Err(StoreError::TurnMismatch {
             expected,
             actual: *turn_id,
         });
@@ -550,10 +542,10 @@ fn validate_message(
     Ok(())
 }
 
-fn validate_message_role(role: ChatRole) -> Result<(), CheckpointError> {
+fn validate_message_role(role: ChatRole) -> Result<(), StoreError> {
     match role {
         ChatRole::User | ChatRole::Assistant | ChatRole::Tool => Ok(()),
-        role => Err(CheckpointError::InvalidMessageRole { role }),
+        role => Err(StoreError::InvalidMessageRole { role }),
     }
 }
 
@@ -665,12 +657,12 @@ fn strict_keys(
 fn strict_json_error() -> serde_json::Error {
     serde_json::Error::io(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        "invalid strict checkpoint message shape",
+        "invalid strict store message shape",
     ))
 }
 
 fn trace_cas_outcome(
-    result: &Result<AgentState, CasUpdateError<CheckpointError>>,
+    result: &Result<AgentState, CasUpdateError<StoreError>>,
     attempt_count: usize,
     seq: Option<u64>,
 ) {
@@ -685,7 +677,7 @@ fn trace_cas_outcome(
             turn_id = ?turn_id,
             seq = ?seq,
             retry_count = attempt_count - 1,
-            "checkpoint cas retry"
+            "store cas retry"
         );
     }
     if matches!(result, Err(CasUpdateError::RetriesExhausted)) {
@@ -696,18 +688,18 @@ fn trace_cas_outcome(
             seq = ?seq,
             attempt_count,
             exhaustion_count = 1_u64,
-            "checkpoint cas retries exhausted"
+            "store cas retries exhausted"
         );
     }
 }
 
-fn trace_checkpoint_corruption(state: &AgentState, seq: u64) {
+fn trace_store_corruption(state: &AgentState, seq: u64) {
     tracing::error!(
         agent_id = %state.agent_id,
         run_id = ?state.run_id,
         turn_id = ?state.turn_id,
         seq,
         corruption_count = 1_u64,
-        "checkpoint corruption"
+        "store corruption"
     );
 }

@@ -1,4 +1,4 @@
-//! Event stream bus checkpoint persistence.
+//! Event stream bus store persistence.
 
 use std::sync::Arc;
 
@@ -6,19 +6,19 @@ use async_trait::async_trait;
 use wyse_core::{AgentEvent, AgentId, ReplayStart, RuntimeEvent, StreamEnvelope, TokenUsage};
 use wyse_infra::{EventStream, EventStreamBus, EventStreamBusError};
 
-use crate::{AgentCheckpoint, AgentStatus};
+use crate::{AgentStatus, AgentStore};
 
 /// Persists complete agent messages and state before forwarding them to an event stream bus.
-pub struct CheckpointEventStreamBus {
-    checkpoint: Arc<dyn AgentCheckpoint>,
+pub struct StoreEventStreamBus {
+    store: Arc<dyn AgentStore>,
     inner: Arc<dyn EventStreamBus>,
 }
 
-impl CheckpointEventStreamBus {
-    /// Creates a checkpointing event stream bus decorator.
+impl StoreEventStreamBus {
+    /// Creates a store-backed event stream bus decorator.
     #[must_use]
-    pub fn new(checkpoint: Arc<dyn AgentCheckpoint>, inner: Arc<dyn EventStreamBus>) -> Self {
-        Self { checkpoint, inner }
+    pub fn new(store: Arc<dyn AgentStore>, inner: Arc<dyn EventStreamBus>) -> Self {
+        Self { store, inner }
     }
 
     async fn forward_committed(&self, envelope: StreamEnvelope) {
@@ -29,7 +29,7 @@ impl CheckpointEventStreamBus {
 }
 
 #[async_trait]
-impl EventStreamBus for CheckpointEventStreamBus {
+impl EventStreamBus for StoreEventStreamBus {
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
         match &envelope.event {
             RuntimeEvent::Agent {
@@ -37,7 +37,7 @@ impl EventStreamBus for CheckpointEventStreamBus {
                 ..
             } => {
                 let committed = self
-                    .checkpoint
+                    .store
                     .append_message(envelope)
                     .await
                     .map_err(EventStreamBusError::persistence)?;
@@ -48,7 +48,7 @@ impl EventStreamBus for CheckpointEventStreamBus {
                 event: AgentEvent::Started { turn_id },
                 ..
             } => {
-                self.checkpoint
+                self.store
                     .update_state(
                         AgentStatus::Running,
                         Some(envelope.run_id),
@@ -68,11 +68,11 @@ impl EventStreamBus for CheckpointEventStreamBus {
                     _ => return self.inner.publish(envelope).await,
                 };
                 let state = self
-                    .checkpoint
+                    .store
                     .load_agent()
                     .await
                     .map_err(EventStreamBusError::persistence)?;
-                self.checkpoint
+                self.store
                     .update_state(status, Some(envelope.run_id), state.turn_id, usage)
                     .await
                     .map_err(EventStreamBusError::persistence)?;
