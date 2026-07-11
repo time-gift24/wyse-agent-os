@@ -98,6 +98,7 @@ struct TestStore {
     state: Mutex<AgentState>,
     history: Mutex<Vec<StreamEnvelope>>,
     completed: Mutex<Vec<(RunId, TurnId, u64, TokenUsage)>>,
+    load_entered: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl TestStore {
@@ -106,6 +107,7 @@ impl TestStore {
             state: Mutex::new(AgentState::new(agent_id, "test-agent".to_owned())),
             history: Mutex::new(Vec::new()),
             completed: Mutex::new(Vec::new()),
+            load_entered: None,
         }
     }
 
@@ -114,6 +116,14 @@ impl TestStore {
             state: Mutex::new(state),
             history: Mutex::new(history),
             completed: Mutex::new(Vec::new()),
+            load_entered: None,
+        }
+    }
+
+    fn blocking_load(agent_id: AgentId, entered: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            load_entered: Some(entered),
+            ..Self::idle(agent_id)
         }
     }
 }
@@ -121,6 +131,10 @@ impl TestStore {
 #[async_trait]
 impl AgentStore for TestStore {
     async fn load_agent(&self) -> Result<AgentState, StoreError> {
+        if let Some(entered) = &self.load_entered {
+            entered.notify_one();
+            pending::<()>().await;
+        }
         Ok(self.state.lock().expect("state mutex").clone())
     }
 
@@ -269,6 +283,37 @@ async fn resume_rejects_second_active_operation() {
         agent.resume().await,
         Err(AgentError::RunAlreadyActive)
     ));
+    agent.stop();
+}
+
+#[tokio::test]
+async fn dropping_resume_while_store_load_is_pending_releases_active_guard() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let store = Arc::new(TestStore::blocking_load(
+        test_agent_id(),
+        Arc::clone(&entered),
+    ));
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Pending]));
+    let agent = agent_with_store(provider, Arc::new(InMemoryEventStreamBus::default()), store);
+    let resuming_agent = agent.clone();
+    let resume = tokio::spawn(async move { resuming_agent.resume().await });
+
+    timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("resume should enter store load");
+    resume.abort();
+    assert!(
+        resume
+            .await
+            .expect_err("resume task should be aborted")
+            .is_cancelled()
+    );
+
+    let next = agent.run_turn(ChatMessage::user("new operation")).await;
+    assert!(
+        !matches!(next, Err(AgentError::RunAlreadyActive)),
+        "dropped resume must release the active guard"
+    );
     agent.stop();
 }
 

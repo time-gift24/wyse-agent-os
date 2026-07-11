@@ -56,6 +56,32 @@ pub struct Agent {
     pub(crate) turn_commands: Arc<Mutex<Option<mpsc::Sender<TurnCommand>>>>,
 }
 
+struct ActiveGuard<'a> {
+    active: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> ActiveGuard<'a> {
+    fn new(active: &'a AtomicBool) -> Self {
+        Self {
+            active,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.active.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 impl Agent {
     /// Creates an agent builder.
     #[must_use]
@@ -124,15 +150,9 @@ impl Agent {
         if self.active.swap(true, Ordering::SeqCst) {
             return Err(AgentError::RunAlreadyActive);
         }
+        let active_guard = ActiveGuard::new(&self.active);
 
-        let initialized = self.initialize_resume().await;
-        let (run_id, turn_id, next_iteration, usage, history) = match initialized {
-            Ok(initialized) => initialized,
-            Err(error) => {
-                self.active.store(false, Ordering::SeqCst);
-                return Err(error);
-            }
-        };
+        let (run_id, turn_id, next_iteration, usage, history) = self.initialize_resume().await?;
 
         let cancel = CancellationToken::new();
         *self
@@ -167,6 +187,7 @@ impl Agent {
                 .expect("turn command mutex should not be poisoned") = None;
             active.store(false, Ordering::SeqCst);
         });
+        active_guard.disarm();
 
         Ok(run_id)
     }
