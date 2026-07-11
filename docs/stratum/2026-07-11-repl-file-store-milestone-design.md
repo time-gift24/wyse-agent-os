@@ -20,9 +20,9 @@ minimal secret-free shape:
 ```toml
 [stratum]
 storage_root = "./.stratum/repl"
-model = "openai:gpt-4.1-mini"
+model = "deepseek:deepseek-v4-flash"
 
-[openai]
+[deepseek]
 api_key = "..."
 ```
 
