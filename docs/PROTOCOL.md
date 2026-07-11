@@ -60,6 +60,17 @@
 | `llm` | `agent` | 一次 LLM 请求内事件；由 `llm_call_id` 和嵌套 `LlmEvent` 表达细分阶段。 |
 | `plan_updated` | `agent` | agent 可见计划发生变化。 |
 
+## Agent Approval Events
+
+| Event | Required fields | Semantics |
+| --- | --- | --- |
+| `tool_approval_requested` | `approval_id`, `agent_name`, `call_id`, `tool_name`, `arguments`, `tool_kind`, `danger_level` | The tool has not executed and the active turn is waiting for a decision. |
+| `tool_approval_resolved` | `approval_id`, `decision` | The active turn accepted `approve` or `reject`; approval precedes any tool execution. |
+
+`tool_approval_requested` delivery is required. Approval state is in-memory and
+is not restored from checkpoints. Cancellation closes an outstanding approval
+without synthesizing a rejection.
+
 ## LLM Events
 
 | Event | 说明 |

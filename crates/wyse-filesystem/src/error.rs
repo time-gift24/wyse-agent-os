@@ -10,6 +10,24 @@ use crate::{VirtualPath, VirtualPathError};
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum FilesystemError {
+    /// The backend does not provide compare-and-swap operations.
+    #[error("filesystem backend does not support compare-and-swap")]
+    UnsupportedCas,
+    /// A compare-and-swap expectation did not match the current record version.
+    #[error("record version mismatch {path}")]
+    VersionMismatch {
+        /// Virtual path whose version did not match.
+        path: VirtualPath,
+    },
+    /// A backend cannot assign another record version.
+    #[error("record version overflow {path}")]
+    VersionOverflow {
+        /// Virtual path whose version overflowed.
+        path: VirtualPath,
+    },
+    /// The local compare-and-swap record state lock was poisoned.
+    #[error("local filesystem record state lock poisoned")]
+    RecordStatePoisoned,
     /// A virtual path failed validation.
     #[error("invalid virtual path {path}")]
     InvalidVirtualPath {

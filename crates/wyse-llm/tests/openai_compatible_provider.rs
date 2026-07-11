@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
-use wyse_core::{CallId, ModelId};
+use wyse_core::CallId;
 use wyse_llm::{
     ApiKey, ChatMessage, ChatRequest, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
     OpenAICompatibleProvider, ToolCallDelta,
@@ -28,8 +28,12 @@ async fn chat_posts_chat_completion_and_maps_response() {
 
     let response = provider
         .chat(
-            ChatRequest::new(ModelId::from("gpt-configured"))
-                .with_message(ChatMessage::user("say hello")),
+            ChatRequest::new(
+                "openai_compatible:gpt-configured"
+                    .parse()
+                    .expect("model id parses"),
+            )
+            .with_message(ChatMessage::user("say hello")),
         )
         .await
         .expect("chat should succeed");
@@ -68,12 +72,20 @@ async fn builder_uses_injected_client() {
     let provider = OpenAICompatibleProvider::builder()
         .base_url(server.base_url("v1"))
         .api_key(ApiKey::new("sk-test"))
-        .model(ModelId::from("gpt-configured"))
+        .model(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        )
         .client(client)
         .build();
 
     provider
-        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("chat should succeed");
     let request = server.request();
@@ -92,7 +104,11 @@ async fn chat_rejects_request_model_that_differs_from_provider_model() {
     let provider = test_provider("http://127.0.0.1:9/v1");
 
     let error = provider
-        .chat(ChatRequest::new(ModelId::from("other-model")))
+        .chat(ChatRequest::new(
+            "openai_compatible:other-model"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect_err("model mismatch should fail before transport");
 
@@ -103,10 +119,13 @@ async fn chat_rejects_request_model_that_differs_from_provider_model() {
 }
 
 #[test]
-fn openai_compatible_provider_reports_provider_name() {
+fn openai_compatible_provider_model_id_includes_provider_name() {
     let provider = test_provider("http://127.0.0.1:9/v1");
 
-    assert_eq!(provider.provider_name(), "openai_compatible");
+    assert_eq!(
+        provider.model_id().as_str(),
+        "openai_compatible:gpt-configured"
+    );
 }
 
 #[tokio::test]
@@ -124,7 +143,11 @@ async fn chat_maps_provider_status_error_payload() {
     let provider = test_provider(server.base_url("v1"));
 
     let error = provider
-        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect_err("status should fail");
 
@@ -146,8 +169,12 @@ async fn chat_stream_posts_streaming_chat_completion_request() {
 
     let mut stream = provider
         .chat_stream(
-            ChatRequest::new(ModelId::from("gpt-configured"))
-                .with_message(ChatMessage::user("say hello")),
+            ChatRequest::new(
+                "openai_compatible:gpt-configured"
+                    .parse()
+                    .expect("model id parses"),
+            )
+            .with_message(ChatMessage::user("say hello")),
         )
         .await
         .expect("stream should open");
@@ -188,7 +215,11 @@ async fn chat_stream_maps_text_delta_and_finished_event() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -230,7 +261,11 @@ async fn chat_stream_maps_tool_call_delta() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -278,7 +313,11 @@ async fn chat_stream_recovers_sse_events_split_across_tcp_chunks() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -307,7 +346,11 @@ async fn chat_stream_done_emits_unknown_finish_when_no_finish_reason_arrived() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -334,7 +377,11 @@ async fn chat_stream_joins_multiple_data_lines_in_one_sse_event() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -352,7 +399,11 @@ async fn chat_stream_maps_invalid_json_event_to_stream_error() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
     let error = stream
@@ -374,7 +425,11 @@ async fn chat_stream_keeps_events_before_later_stream_error() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -401,7 +456,11 @@ async fn chat_stream_errors_when_eof_arrives_before_finish_event() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -428,7 +487,11 @@ async fn chat_stream_errors_when_eof_leaves_partial_sse_event() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
     let error = stream
@@ -451,7 +514,11 @@ async fn chat_stream_ignores_events_after_terminal_event() {
     let provider = test_provider(server.base_url("v1"));
 
     let mut stream = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect("stream should open");
 
@@ -484,7 +551,11 @@ async fn chat_stream_maps_provider_status_error_payload() {
     let provider = test_provider(server.base_url("v1"));
 
     let result = provider
-        .chat_stream(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await;
     let Err(error) = result else {
         panic!("status should fail");
@@ -504,7 +575,11 @@ async fn chat_stream_rejects_request_model_that_differs_from_provider_model() {
     let provider = test_provider("http://127.0.0.1:9/v1");
 
     let result = provider
-        .chat_stream(ChatRequest::new(ModelId::from("other-model")))
+        .chat_stream(ChatRequest::new(
+            "openai_compatible:other-model"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await;
     let Err(error) = result else {
         panic!("model mismatch should fail before transport");
@@ -522,7 +597,11 @@ async fn chat_maps_success_body_decode_errors_to_response_decode() {
     let provider = test_provider(server.base_url("v1"));
 
     let error = provider
-        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect_err("invalid success body should fail");
 
@@ -535,7 +614,11 @@ async fn chat_maps_status_body_decode_errors_to_provider_payload_decode() {
     let provider = test_provider(server.base_url("v1"));
 
     let error = provider
-        .chat(ChatRequest::new(ModelId::from("gpt-configured")))
+        .chat(ChatRequest::new(
+            "openai_compatible:gpt-configured"
+                .parse()
+                .expect("model id parses"),
+        ))
         .await
         .expect_err("invalid status body should fail");
 
@@ -546,6 +629,8 @@ fn test_provider(base_url: impl Into<String>) -> OpenAICompatibleProvider {
     OpenAICompatibleProvider::new(
         base_url,
         ApiKey::new("sk-test"),
-        ModelId::from("gpt-configured"),
+        "openai_compatible:gpt-configured"
+            .parse()
+            .expect("model id parses"),
     )
 }

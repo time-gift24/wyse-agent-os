@@ -1,0 +1,62 @@
+{
+  "brand": {
+    "home": "Stratum home"
+  },
+  "nav": {
+    "overview": "Overview",
+    "longzhong": "Longzhong"
+  },
+  "hero": {
+    "title": "Build typed agents",
+    "description": "A Rust-first runtime for composing agents, tools, and reliable execution paths."
+  },
+  "actions": {
+    "getStarted": "Get started",
+    "learnMore": "Learn more",
+    "signUp": "Sign up"
+  },
+  "theme": {
+    "toggle": "Toggle dark theme"
+  },
+  "language": {
+    "switchToChinese": "Switch to Chinese",
+    "switchToEnglish": "Switch to English"
+  },
+  "chat": {
+    "assistant": "Longzhong",
+    "you": "You",
+    "history": {
+      "title": "Conversation history",
+      "description": "Recent reasoning and decisions",
+      "new": "New conversation",
+      "current": "Runtime architecture trade-offs",
+      "toolPolicy": "Tool approval policy",
+      "runtimePlan": "Agent Runtime roadmap",
+      "localOnly": "Static layout preview"
+    },
+    "messages": {
+      "assistantIntro": "Share the goal, constraints, and existing context. We will clarify the problem before choosing the smallest viable path.",
+      "userQuestion": "We should define the Agent Runtime boundaries without adding layers for speculative future extensions.",
+      "assistantAnswer": "Start with the three real boundaries: the run loop, model calls, and tool execution. Extract another trait only when a second implementation or a concrete isolation need appears."
+    },
+    "time": {
+      "now": "Just now",
+      "yesterday": "Yesterday",
+      "lastWeek": "Last week"
+    },
+    "composer": {
+      "title": "Continue the conversation",
+      "description": "Describe the goal, constraints, or options you are weighing.",
+      "label": "Message",
+      "placeholder": "Ask Longzhong…",
+      "hint": "Static layout preview; messages are not sent",
+      "send": "Send"
+    }
+  },
+  "errors": {
+    "unexpectedTitle": "Oops!",
+    "unexpectedDetails": "An unexpected error occurred.",
+    "notFoundDetails": "The requested page could not be found.",
+    "genericTitle": "Error"
+  }
+}

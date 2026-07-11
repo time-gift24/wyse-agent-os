@@ -2,6 +2,7 @@
 
 pub mod definition;
 pub mod error;
+pub mod manager;
 pub mod message;
 pub mod mock;
 pub mod protocol;
@@ -12,6 +13,7 @@ pub use definition::{
     ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmProvider,
 };
 pub use error::{ApiKey, LlmError, ProviderStatusError};
+pub use manager::LlmProviderManager;
 pub use message::{ChatContent, ChatMessage, ChatRole};
 pub use mock::MockLlmProvider;
 pub use protocol::deepseek::{

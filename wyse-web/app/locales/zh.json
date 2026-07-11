@@ -1,0 +1,62 @@
+{
+  "brand": {
+    "home": "首页"
+  },
+  "nav": {
+    "overview": "概览",
+    "longzhong": "隆中对"
+  },
+  "hero": {
+    "title": "构建强类型智能体",
+    "description": "一个 Rust 优先的运行时，用于组合智能体、工具与可靠的执行路径。"
+  },
+  "actions": {
+    "getStarted": "开始使用",
+    "learnMore": "了解更多",
+    "signUp": "注册"
+  },
+  "theme": {
+    "toggle": "切换深色主题"
+  },
+  "language": {
+    "switchToChinese": "切换至中文",
+    "switchToEnglish": "切换至英文"
+  },
+  "chat": {
+    "assistant": "隆中对",
+    "you": "你",
+    "history": {
+      "title": "历史对话",
+      "description": "最近的推演与决策记录",
+      "new": "新建对话",
+      "current": "运行时架构取舍",
+      "toolPolicy": "工具审批策略",
+      "runtimePlan": "Agent Runtime 路线图",
+      "localOnly": "当前为静态布局预览"
+    },
+    "messages": {
+      "assistantIntro": "你可以把目标、约束和已有上下文交给我。我们先拆清问题，再决定最小可行路径。",
+      "userQuestion": "我们需要先确定 Agent Runtime 的模块边界，避免为了未来扩展提前增加层次。",
+      "assistantAnswer": "可以先围绕运行循环、模型调用和工具执行三条真实边界组织。只有出现第二个实现或明确隔离需求时，再抽取新的 trait。"
+    },
+    "time": {
+      "now": "刚刚",
+      "yesterday": "昨天",
+      "lastWeek": "上周"
+    },
+    "composer": {
+      "title": "继续对话",
+      "description": "描述目标、限制或你正在权衡的方案。",
+      "label": "输入消息",
+      "placeholder": "向隆中对提问……",
+      "hint": "静态布局预览，暂不发送消息",
+      "send": "发送"
+    }
+  },
+  "errors": {
+    "unexpectedTitle": "出错了",
+    "unexpectedDetails": "发生了意外错误。",
+    "notFoundDetails": "找不到请求的页面。",
+    "genericTitle": "错误"
+  }
+}

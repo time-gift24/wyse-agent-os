@@ -1,5 +1,7 @@
 //! Core protocol types shared across Wyse crates.
 
+pub mod error;
+
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
 use bon::Builder;
@@ -7,6 +9,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+
+pub use error::ModelIdParseError;
 
 /// Identity of one workflow run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -161,6 +165,92 @@ impl FromStr for AgentId {
     }
 }
 
+/// Identity of one tool approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ApprovalId(Uuid);
+
+impl ApprovalId {
+    /// Creates a new UUIDv7 approval id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Returns the inner UUID.
+    #[must_use]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for ApprovalId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ApprovalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Uuid> for ApprovalId {
+    fn from(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
+impl From<ApprovalId> for Uuid {
+    fn from(value: ApprovalId) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for ApprovalId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse::<Uuid>().map(Self)
+    }
+}
+
+/// Whether a tool observes or mutates state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ToolKind {
+    /// Tool only observes state.
+    Read,
+    /// Tool may mutate state.
+    Write,
+}
+
+/// Declared danger of one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DangerLevel {
+    /// Low danger.
+    Low,
+    /// Medium danger.
+    Medium,
+    /// High danger.
+    High,
+}
+
+/// User decision for one tool approval request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ApprovalDecision {
+    /// Approve the tool call.
+    Approve,
+    /// Reject the tool call.
+    Reject,
+}
+
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -203,11 +293,94 @@ macro_rules! string_id {
 }
 
 string_id!(NodeId, "Identity of a workflow node.");
-string_id!(ModelId, "Identity of a model.");
 string_id!(CallId, "Identity of one tool call.");
 string_id!(ToolName, "Provider-visible identity of a tool.");
 string_id!(LlmCallId, "Identity of one LLM call.");
 string_id!(PlanId, "Identity of an agent-visible plan.");
+
+/// Canonical identity of a provider model.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ModelId(String);
+
+impl ModelId {
+    /// Creates a canonical provider-scoped model id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelIdParseError::InvalidFormat`] when either segment is invalid.
+    pub fn new(provider: &str, model: &str) -> Result<Self, ModelIdParseError> {
+        format!("{provider}:{model}").parse()
+    }
+
+    /// Returns the canonical provider name.
+    #[must_use]
+    pub fn provider_name(&self) -> &str {
+        self.0.split_once(':').expect("validated model id").0
+    }
+
+    /// Returns the provider-local model name.
+    #[must_use]
+    pub fn model_name(&self) -> &str {
+        self.0.split_once(':').expect("validated model id").1
+    }
+
+    /// Returns the canonical model id as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ModelId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl FromStr for ModelId {
+    type Err = ModelIdParseError;
+
+    /// Parses a canonical `provider:model` id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelIdParseError::InvalidFormat`] when the value is not canonical.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let Some((provider, model)) = value.split_once(':') else {
+            return Err(ModelIdParseError::InvalidFormat);
+        };
+        if provider.is_empty()
+            || model.is_empty()
+            || model.contains(':')
+            || provider.chars().any(char::is_whitespace)
+            || model.chars().any(char::is_whitespace)
+        {
+            return Err(ModelIdParseError::InvalidFormat);
+        }
+
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for ModelId {
+    type Error = ModelIdParseError;
+
+    /// Converts a canonical `provider:model` id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ModelIdParseError::InvalidFormat`] when the value is not canonical.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<ModelId> for String {
+    fn from(value: ModelId) -> Self {
+        value.0
+    }
+}
 
 /// Source that owns a runtime stream event.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -464,8 +637,18 @@ pub enum LlmEvent {
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentEvent {
+    /// One complete message committed to agent history.
+    Message {
+        /// Turn that produced the message.
+        turn_id: TurnId,
+        /// Complete message payload.
+        message: ChatMessage,
+    },
     /// Agent run started.
-    Started,
+    Started {
+        /// Turn being run.
+        turn_id: TurnId,
+    },
     /// Agent run finished.
     Finished {
         /// Why the run finished.
@@ -477,9 +660,38 @@ pub enum AgentEvent {
     Failed {
         /// Error text safe to expose to callers.
         error_text: String,
+        /// Token usage accumulated by the run.
+        usage: TokenUsage,
     },
     /// Agent run was cancelled.
-    Cancelled,
+    Cancelled {
+        /// Token usage accumulated by the run.
+        usage: TokenUsage,
+    },
+    /// A tool call requires user approval.
+    ToolApprovalRequested {
+        /// Approval request identity.
+        approval_id: ApprovalId,
+        /// Agent requesting approval.
+        agent_name: String,
+        /// Tool call identity.
+        call_id: CallId,
+        /// Provider-visible tool name.
+        tool_name: ToolName,
+        /// Tool call arguments.
+        arguments: Value,
+        /// Whether the tool observes or mutates state.
+        tool_kind: ToolKind,
+        /// Declared danger of the tool.
+        danger_level: DangerLevel,
+    },
+    /// A tool approval request was resolved.
+    ToolApprovalResolved {
+        /// Approval request identity.
+        approval_id: ApprovalId,
+        /// User decision.
+        decision: ApprovalDecision,
+    },
     /// Event emitted by one LLM call inside the agent run.
     Llm {
         /// LLM call identity.
@@ -487,6 +699,23 @@ pub enum AgentEvent {
         /// LLM event payload.
         event: LlmEvent,
     },
+}
+
+impl AgentEvent {
+    /// Returns the serialized event type name.
+    #[must_use]
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::Message { .. } => "message",
+            Self::Started { .. } => "started",
+            Self::Finished { .. } => "finished",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled { .. } => "cancelled",
+            Self::ToolApprovalRequested { .. } => "tool_approval_requested",
+            Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
+            Self::Llm { .. } => "llm",
+        }
+    }
 }
 
 /// Runtime event payload.
@@ -567,13 +796,45 @@ impl RuntimeEvent {
     }
 }
 
+/// Opaque position in a transport event stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventCursor(u64);
+
+impl EventCursor {
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_transport_sequence(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn transport_sequence(self) -> u64 {
+        self.0
+    }
+}
+
+/// Starting position for a replayable event subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayStart {
+    /// Replay all retained events.
+    All,
+    /// Replay events after the supplied transport cursor.
+    After(EventCursor),
+    /// Deliver only newly published events.
+    New,
+}
+
 /// One event in a workflow run stream.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamEnvelope {
+    /// Monotonic business sequence for persisted complete messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business_seq: Option<u64>,
     /// Workflow run identity.
     pub run_id: RunId,
-    /// Monotonic event sequence in one run.
-    pub seq: u64,
     /// Event creation time.
     pub timestamp: DateTime<Utc>,
     /// Event ownership.
@@ -585,9 +846,111 @@ pub struct StreamEnvelope {
     pub metadata: BTreeMap<String, Value>,
 }
 
+impl StreamEnvelope {
+    /// Returns the complete-message business sequence, when present.
+    #[must_use]
+    pub const fn business_seq(&self) -> Option<u64> {
+        self.business_seq
+    }
+}
+
+/// One transport event and its replay cursor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventRecord {
+    /// Transport position of the event.
+    pub cursor: EventCursor,
+    /// Event payload.
+    pub envelope: StreamEnvelope,
+}
+
+/// Fixed-range query over complete agent messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryQuery {
+    /// Excludes messages at or before this business sequence.
+    pub after_seq: u64,
+    /// Optional inclusive upper business-sequence bound.
+    pub through_seq: Option<u64>,
+    /// Maximum number of messages to return.
+    pub limit: usize,
+}
+
+/// One page of complete agent-message history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryPage {
+    /// Inclusive upper business-sequence bound used for this page.
+    pub through_seq: u64,
+    /// Complete message events in the page.
+    pub events: Vec<StreamEnvelope>,
+    /// Business sequence from which the next front page should continue.
+    pub next_front_seq: u64,
+    /// Whether additional events remain in the fixed range.
+    pub has_more: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn agent_envelope(business_seq: Option<u64>, event: AgentEvent) -> StreamEnvelope {
+        StreamEnvelope {
+            business_seq,
+            run_id: RunId::new(),
+            timestamp: Utc::now(),
+            source: EventSource::Run,
+            event: RuntimeEvent::Agent {
+                agent_id: AgentId::new(),
+                event,
+            },
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn only_complete_agent_message_has_business_sequence() -> serde_json::Result<()> {
+        let message = agent_envelope(
+            Some(7),
+            AgentEvent::Message {
+                turn_id: TurnId::new(),
+                message: ChatMessage::user("hello"),
+            },
+        );
+        let delta = agent_envelope(
+            None,
+            AgentEvent::Llm {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+                event: LlmEvent::ReasoningDelta {
+                    delta: "thinking".to_owned(),
+                },
+            },
+        );
+
+        assert_eq!(message.business_seq(), Some(7));
+        assert_eq!(delta.business_seq(), None);
+        assert_eq!(serde_json::to_value(&message)?["business_seq"], json!(7));
+        assert!(serde_json::to_value(&delta)?.get("business_seq").is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn stream_envelope_has_no_top_level_sequence() {
+        let value = serde_json::to_value(agent_envelope(
+            None,
+            AgentEvent::Started {
+                turn_id: TurnId::new(),
+            },
+        ))
+        .expect("serialize envelope");
+
+        assert!(value.get("seq").is_none());
+    }
+
+    #[test]
+    fn event_cursor_round_trips_transport_sequence() {
+        let cursor = EventCursor::from_transport_sequence(12);
+        assert_eq!(cursor.transport_sequence(), 12);
+    }
 
     #[test]
     fn run_id_uses_uuid_v7() {
@@ -619,11 +982,32 @@ mod tests {
     }
 
     #[test]
-    fn model_id_round_trips_string() {
-        let model_id = ModelId::from("gpt-4.1-mini");
+    fn model_id_round_trips_provider_and_model_name() {
+        let model: ModelId = "openai:gpt-4.1-mini".parse().expect("model id parses");
+        let constructed = ModelId::new("openai", "gpt-4.1-mini").expect("model id constructs");
+        let converted =
+            ModelId::try_from("openai:gpt-4.1-mini".to_owned()).expect("model id converts");
 
-        assert_eq!(model_id.as_str(), "gpt-4.1-mini");
-        assert_eq!(model_id.to_string(), "gpt-4.1-mini");
+        assert_eq!(model.provider_name(), "openai");
+        assert_eq!(model.model_name(), "gpt-4.1-mini");
+        assert_eq!(model.as_str(), "openai:gpt-4.1-mini");
+        assert_eq!(model, constructed);
+        assert_eq!(model, converted);
+    }
+
+    #[test]
+    fn model_id_rejects_noncanonical_values() {
+        for value in [
+            "gpt-4.1-mini",
+            ":gpt",
+            "openai:",
+            "openai:gpt:mini",
+            "open ai:gpt",
+            "openai:gpt mini",
+            "openai: gpt",
+        ] {
+            assert!(value.parse::<ModelId>().is_err(), "{value} should fail");
+        }
     }
 
     #[test]
@@ -718,7 +1102,9 @@ mod tests {
     fn runtime_agent_event_type_is_agent() {
         let event = RuntimeEvent::Agent {
             agent_id: AgentId::new(),
-            event: AgentEvent::Started,
+            event: AgentEvent::Started {
+                turn_id: TurnId::new(),
+            },
         };
 
         assert_eq!(event.event_type(), "agent");
@@ -807,5 +1193,40 @@ mod tests {
 
         assert_eq!(value["type"], "tool_call_delta");
         assert_eq!(value["data"]["call_id"], "call-1");
+    }
+
+    #[test]
+    fn approval_id_uses_uuid_v7() {
+        assert_eq!(ApprovalId::new().as_uuid().get_version_num(), 7);
+    }
+
+    #[test]
+    fn tool_approval_events_use_protocol_names() {
+        let approval_id = ApprovalId::new();
+        let requested = AgentEvent::ToolApprovalRequested {
+            approval_id,
+            agent_name: "review-agent".to_owned(),
+            call_id: CallId::from("call-1"),
+            tool_name: ToolName::from("apply_patch"),
+            arguments: serde_json::json!({"patch": "*** Begin Patch"}),
+            tool_kind: ToolKind::Write,
+            danger_level: DangerLevel::High,
+        };
+        let resolved = AgentEvent::ToolApprovalResolved {
+            approval_id,
+            decision: ApprovalDecision::Approve,
+        };
+
+        assert_eq!(requested.event_type(), "tool_approval_requested");
+        assert_eq!(resolved.event_type(), "tool_approval_resolved");
+
+        let requested_json = serde_json::to_value(requested).expect("requested event serializes");
+        let resolved_json = serde_json::to_value(resolved).expect("resolved event serializes");
+
+        assert_eq!(requested_json["type"], "tool_approval_requested");
+        assert_eq!(requested_json["data"]["tool_kind"], "write");
+        assert_eq!(requested_json["data"]["danger_level"], "high");
+        assert_eq!(resolved_json["type"], "tool_approval_resolved");
+        assert_eq!(resolved_json["data"]["decision"], "approve");
     }
 }

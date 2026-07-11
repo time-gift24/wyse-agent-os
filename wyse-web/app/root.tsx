@@ -1,3 +1,5 @@
+import { useState } from "react"
+import { I18nextProvider, useTranslation } from "react-i18next"
 import {
   Links,
   Meta,
@@ -5,24 +7,48 @@ import {
   Scripts,
   ScrollRestoration,
   isRouteErrorResponse,
+  useRouteLoaderData,
 } from "react-router"
 
 import type { Route } from "./+types/root"
+import { createI18n } from "./lib/i18n"
+import { getRequestLanguage } from "./lib/locale"
 import "./app.css"
 
+const themeInitScript = `
+(() => {
+  const key = "wyse-theme";
+  const stored = localStorage.getItem(key);
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const theme = stored === "light" || stored === "dark" ? stored : prefersDark ? "dark" : "light";
+  document.documentElement.classList.toggle("light", theme === "light");
+  document.documentElement.classList.toggle("dark", theme === "dark");
+})();
+`
+
+export function loader({ request }: Route.LoaderArgs) {
+  return { language: getRequestLanguage(request) }
+}
+
 export function Layout({ children }: { children: React.ReactNode }) {
+  const language = useRouteLoaderData<typeof loader>("root")?.language ?? "en"
+  const [i18n] = useState(() => createI18n(language))
+
   return (
-    <html lang="en">
+    <html lang={language} suppressHydrationWarning>
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <Meta />
         <Links />
       </head>
       <body>
-        {children}
-        <ScrollRestoration />
-        <Scripts />
+        <I18nextProvider i18n={i18n}>
+          {children}
+          <ScrollRestoration />
+          <Scripts />
+        </I18nextProvider>
       </body>
     </html>
   )
@@ -33,15 +59,16 @@ export default function App() {
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let message = "Oops!"
-  let details = "An unexpected error occurred."
+  const { t } = useTranslation()
+  let message = t("errors.unexpectedTitle")
+  let details = t("errors.unexpectedDetails")
   let stack: string | undefined
 
   if (isRouteErrorResponse(error)) {
-    message = error.status === 404 ? "404" : "Error"
+    message = error.status === 404 ? "404" : t("errors.genericTitle")
     details =
       error.status === 404
-        ? "The requested page could not be found."
+        ? t("errors.notFoundDetails")
         : error.statusText || details
   } else if (import.meta.env.DEV && error && error instanceof Error) {
     details = error.message

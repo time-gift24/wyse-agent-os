@@ -19,7 +19,7 @@ pub struct MockLlmProvider {
 impl Default for MockLlmProvider {
     fn default() -> Self {
         Self {
-            model: ModelId::from("mock"),
+            model: "mock:mock".parse().expect("static model id is valid"),
             chat_responses: Mutex::default(),
             stream_responses: Mutex::default(),
         }
@@ -56,10 +56,6 @@ impl MockLlmProvider {
 
 #[async_trait]
 impl LlmProvider for MockLlmProvider {
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-
     fn model_id(&self) -> ModelId {
         self.model.clone()
     }
@@ -86,20 +82,11 @@ impl LlmProvider for MockLlmProvider {
 
 #[cfg(test)]
 mod tests {
-    use futures_util::StreamExt;
-    use wyse_core::ModelId;
-
     use crate::{
         ChatMessage, ChatRequest, ChatResponse, ChatStreamEvent, FinishReason, LlmError,
         LlmProvider, MockLlmProvider,
     };
-
-    #[test]
-    fn mock_provider_reports_provider_name() {
-        let provider = MockLlmProvider::new();
-
-        assert_eq!(provider.provider_name(), "mock");
-    }
+    use futures_util::StreamExt;
 
     #[tokio::test]
     async fn mock_returns_queued_chat_response() {
@@ -110,7 +97,9 @@ mod tests {
         });
 
         let response = provider
-            .chat(ChatRequest::new(ModelId::from("mock")))
+            .chat(ChatRequest::new(
+                "mock:mock".parse().expect("model id parses"),
+            ))
             .await
             .expect("mock response should exist");
 
@@ -133,7 +122,9 @@ mod tests {
         ]);
 
         let mut stream = provider
-            .chat_stream(ChatRequest::new(ModelId::from("mock")))
+            .chat_stream(ChatRequest::new(
+                "mock:mock".parse().expect("model id parses"),
+            ))
             .await
             .expect("mock stream should exist");
 
@@ -159,7 +150,9 @@ mod tests {
         let provider = MockLlmProvider::new();
 
         let error = provider
-            .chat(ChatRequest::new(ModelId::from("mock")))
+            .chat(ChatRequest::new(
+                "mock:mock".parse().expect("model id parses"),
+            ))
             .await
             .expect_err("queue should be empty");
 

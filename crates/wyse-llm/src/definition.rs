@@ -16,9 +16,6 @@ pub type ChatStream =
 /// Provider capable of chat completion requests.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
-    /// Returns the stable provider name used in runtime metadata.
-    fn provider_name(&self) -> &str;
-
     /// Returns the model bound to this provider.
     fn model_id(&self) -> ModelId;
 
@@ -127,14 +124,12 @@ pub enum FinishReason {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use wyse_core::ModelId;
-
     use crate::{ChatMessage, ChatRequest, StructuredOutput};
+    use serde_json::json;
 
     #[test]
     fn chat_request_uses_model_id_and_messages() {
-        let request = ChatRequest::new(ModelId::from("gpt-4.1-mini"))
+        let request = ChatRequest::new("openai:gpt-4.1-mini".parse().expect("model id parses"))
             .with_message(ChatMessage::user("hello"))
             .with_structured_output(StructuredOutput::JsonSchema {
                 name: "answer".to_owned(),
@@ -142,7 +137,7 @@ mod tests {
                 strict: true,
             });
 
-        assert_eq!(request.model.as_str(), "gpt-4.1-mini");
+        assert_eq!(request.model.as_str(), "openai:gpt-4.1-mini");
         assert_eq!(request.messages.len(), 1);
         assert!(request.structured_output.is_some());
     }

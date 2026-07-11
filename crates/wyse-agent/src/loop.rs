@@ -1,48 +1,187 @@
 //! Internal streaming loop implementation.
 
-use std::{collections::BTreeMap, sync::atomic::Ordering};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashSet},
+};
 
 use chrono::Utc;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use wyse_checkpoint::{CheckpointKind, CheckpointRecord, CheckpointStatus};
 use wyse_core::{
-    AgentEvent, CallId, ChatMessage, EventSource, LlmCallId, LlmEvent, RuntimeEvent,
-    StreamEnvelope, TokenUsage, ToolCall, ToolName,
+    AgentEvent, ApprovalDecision, ApprovalId, CallId, ChatMessage, ChatRole, EventSource,
+    LlmCallId, LlmEvent, RuntimeEvent, StreamEnvelope, TokenUsage, ToolCall, ToolName,
 };
 use wyse_llm::{ChatRequest, ChatStream, ChatStreamEvent, FinishReason};
 use wyse_tools::ToolInput;
 
 use crate::{
     Agent, AgentError,
-    checkpoint::{AGENT_CHECKPOINT_STATE_VERSION, encode_checkpoint_payload},
+    command::{TurnCommand, reject_inactive_command},
 };
 
-impl Agent {
-    pub(crate) async fn run_turn_loop(self, input: Option<ChatMessage>) -> Result<(), AgentError> {
-        let mut history = self.history_snapshot();
-        if let Some(message) = input {
-            history.push(message);
+pub(crate) struct ResumeContinuation {
+    history: Vec<ChatMessage>,
+    iteration: u64,
+    boundary: ResumeBoundary,
+}
+
+impl ResumeContinuation {
+    pub(crate) fn history(&self) -> &[ChatMessage] {
+        &self.history
+    }
+}
+
+enum ResumeBoundary {
+    Continue,
+    Finish {
+        advance_iteration: bool,
+    },
+    ReconcileTools {
+        assistant_index: usize,
+        next_tool_index: usize,
+    },
+}
+
+struct ActiveTurnSummary {
+    assistant_count: u64,
+    end: ActiveTurnEnd,
+}
+
+enum ActiveTurnEnd {
+    UserOnly,
+    Terminal,
+    ToolCalls {
+        assistant_index: usize,
+        answered_count: usize,
+        call_count: usize,
+    },
+}
+
+fn validate_active_turn(active_turn: &[ChatMessage]) -> Result<ActiveTurnSummary, AgentError> {
+    if active_turn.first().map(|message| message.role) != Some(ChatRole::User) {
+        return Err(AgentError::InvalidResumeHistory);
+    }
+
+    let mut cursor = 1;
+    let mut assistant_count = 0_usize;
+    let mut end = ActiveTurnEnd::UserOnly;
+    while cursor < active_turn.len() {
+        let assistant_index = cursor;
+        let assistant = &active_turn[cursor];
+        if assistant.role != ChatRole::Assistant {
+            return Err(AgentError::InvalidResumeHistory);
+        }
+        assistant_count = assistant_count
+            .checked_add(1)
+            .ok_or(AgentError::InvalidResumeHistory)?;
+        cursor = cursor
+            .checked_add(1)
+            .ok_or(AgentError::InvalidResumeHistory)?;
+
+        let mut call_ids = HashSet::with_capacity(assistant.tool_calls.len());
+        if !assistant
+            .tool_calls
+            .iter()
+            .all(|tool_call| call_ids.insert(&tool_call.call_id))
+        {
+            return Err(AgentError::InvalidResumeHistory);
         }
 
-        self.save_checkpoint(CheckpointStatus::Running, &history)
-            .await?;
-        self.publish_agent_event(AgentEvent::Started, None).await?;
+        if assistant.tool_calls.is_empty() {
+            if cursor != active_turn.len() {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+            end = ActiveTurnEnd::Terminal;
+            break;
+        }
 
-        for turn_index in 0..self.config.max_turns {
+        let mut answered_count = 0_usize;
+        while active_turn
+            .get(cursor)
+            .is_some_and(|message| message.role == ChatRole::Tool)
+        {
+            let expected_call = assistant
+                .tool_calls
+                .get(answered_count)
+                .ok_or(AgentError::InvalidResumeHistory)?;
+            let result = &active_turn[cursor];
+            if result.tool_call_id.as_ref() != Some(&expected_call.call_id) {
+                return Err(AgentError::InvalidResumeHistory);
+            }
+            answered_count = answered_count
+                .checked_add(1)
+                .ok_or(AgentError::InvalidResumeHistory)?;
+            cursor = cursor
+                .checked_add(1)
+                .ok_or(AgentError::InvalidResumeHistory)?;
+        }
+
+        end = ActiveTurnEnd::ToolCalls {
+            assistant_index,
+            answered_count,
+            call_count: assistant.tool_calls.len(),
+        };
+        if answered_count < assistant.tool_calls.len() && cursor != active_turn.len() {
+            return Err(AgentError::InvalidResumeHistory);
+        }
+    }
+
+    Ok(ActiveTurnSummary {
+        assistant_count: u64::try_from(assistant_count)
+            .map_err(|_| AgentError::InvalidResumeHistory)?,
+        end,
+    })
+}
+
+impl Agent {
+    pub(crate) async fn run_turn_loop(
+        self,
+        input: ChatMessage,
+        commands: mpsc::Receiver<TurnCommand>,
+    ) -> Result<(), AgentError> {
+        let mut history = self.history_snapshot();
+        let turn_id = self.current_turn().expect("turn id should be set");
+        self.publish_required_agent_event(AgentEvent::Started { turn_id }, None)
+            .await?;
+        self.publish_required_agent_event(
+            AgentEvent::Message {
+                turn_id,
+                message: input.clone(),
+            },
+            None,
+        )
+        .await?;
+        history.push(input);
+
+        self.continue_turn_loop(history, 0, commands).await
+    }
+
+    pub(crate) async fn continue_turn_loop(
+        self,
+        mut history: Vec<ChatMessage>,
+        mut iteration: u64,
+        mut commands: mpsc::Receiver<TurnCommand>,
+    ) -> Result<(), AgentError> {
+        let turn_id = self.current_turn().expect("turn id should be set");
+        loop {
+            let turn_index = usize::try_from(iteration)
+                .map_err(|_| AgentError::IterationOutOfRange { iteration })?;
+            if turn_index >= self.config.max_turns {
+                break;
+            }
+
             if self
                 .cancel_token()
                 .expect("cancel token should be set")
                 .is_cancelled()
             {
-                self.publish_cancelled(&history).await?;
+                self.publish_cancelled().await?;
                 return Err(AgentError::Cancelled);
             }
-
-            self.save_checkpoint(CheckpointStatus::Running, &history)
-                .await?;
 
             let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
             self.publish_llm_event(
@@ -60,14 +199,8 @@ impl Agent {
                 tools: self.tool_registry.specs(),
                 structured_output: None,
             };
-            let cancel = self.cancel_token().expect("cancel token should be set");
-            let stream = match tokio::select! {
-                () = cancel.cancelled() => {
-                    self.publish_cancelled(&history).await?;
-                    return Err(AgentError::Cancelled);
-                }
-                result = self.llm_provider.chat_stream(request) => result,
-            } {
+            let stream = self.llm_provider.chat_stream(request).await;
+            let stream = match stream {
                 Ok(stream) => stream,
                 Err(source) => {
                     self.publish_llm_event(
@@ -81,53 +214,40 @@ impl Agent {
                     )
                     .await?;
                     let error = AgentError::from(source);
-                    self.publish_checkpointed_agent_event(
-                        CheckpointStatus::WaitingRetry,
-                        AgentEvent::Failed {
-                            error_text: error.to_string(),
-                        },
-                        &history,
-                    )
-                    .await?;
+                    self.publish_failed(&error).await?;
                     return Err(error);
                 }
             };
             let assistant = match self
-                .consume_assistant_stream(turn_index, llm_call_id, stream, &history)
+                .consume_assistant_stream(turn_index, llm_call_id, stream, &mut commands)
                 .await
             {
                 Ok(assistant) => assistant,
                 Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
                 Err(error) => {
-                    if matches!(error, AgentError::Llm { .. }) {
-                        self.publish_checkpointed_agent_event(
-                            CheckpointStatus::WaitingRetry,
-                            AgentEvent::Failed {
-                                error_text: error.to_string(),
-                            },
-                            &history,
-                        )
-                        .await?;
-                    } else {
-                        self.save_failed_checkpoint(&error, &history).await?;
-                    }
+                    self.publish_failed(&error).await?;
                     return Err(error);
                 }
             };
             let finish_reason = assistant.finish_reason;
             let message = assistant.message;
             let tool_calls = message.tool_calls.clone();
+            self.publish_required_agent_event(
+                AgentEvent::Message {
+                    turn_id,
+                    message: message.clone(),
+                },
+                None,
+            )
+            .await?;
             history.push(message);
 
             if finish_reason == FinishReason::ToolCalls && !tool_calls.is_empty() {
-                self.save_checkpoint(CheckpointStatus::Running, &history)
-                    .await?;
-
                 if tool_calls.len() > self.config.max_tool_calls_per_turn {
                     let error = AgentError::ToolCallLimitExceeded {
                         limit: self.config.max_tool_calls_per_turn,
                     };
-                    self.save_failed_checkpoint(&error, &history).await?;
+                    self.publish_failed(&error).await?;
                     return Err(error);
                 }
 
@@ -137,27 +257,45 @@ impl Agent {
                         .expect("cancel token should be set")
                         .is_cancelled()
                     {
-                        self.publish_cancelled(&history).await?;
+                        self.publish_cancelled().await?;
                         return Err(AgentError::Cancelled);
                     }
-                    let tool_message = self
-                        .execute_tool_call(turn_index, tool_call, &history)
-                        .await?;
+                    let tool_message = match self
+                        .execute_tool_call(turn_index, tool_call, &mut commands)
+                        .await
+                    {
+                        Ok(message) => message,
+                        Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                        Err(error) => {
+                            self.publish_failed(&error).await?;
+                            return Err(error);
+                        }
+                    };
+                    self.publish_required_agent_event(
+                        AgentEvent::Message {
+                            turn_id,
+                            message: tool_message.clone(),
+                        },
+                        None,
+                    )
+                    .await?;
                     history.push(tool_message);
-                    self.save_checkpoint(CheckpointStatus::Running, &history)
-                        .await?;
                 }
+                self.complete_iteration(iteration).await?;
+                iteration = iteration
+                    .checked_add(1)
+                    .ok_or(AgentError::IterationOutOfRange { iteration })?;
                 continue;
             }
 
-            let usage = self.current_usage();
-            self.publish_checkpointed_agent_event(
-                CheckpointStatus::Finished,
+            self.complete_iteration(iteration).await?;
+
+            self.publish_required_agent_event(
                 AgentEvent::Finished {
                     finish_reason: finish_reason_name(finish_reason).to_owned(),
-                    usage,
+                    usage: self.current_usage(),
                 },
-                &history,
+                None,
             )
             .await?;
             self.commit_history(history);
@@ -167,8 +305,170 @@ impl Agent {
         let error = AgentError::TurnLimitExceeded {
             limit: self.config.max_turns,
         };
-        self.save_failed_checkpoint(&error, &history).await?;
+        self.publish_failed(&error).await?;
         Err(error)
+    }
+
+    pub(crate) fn prepare_resume_continuation(
+        &self,
+        history: Vec<ChatMessage>,
+        active_turn_start: usize,
+        next_iteration: u64,
+    ) -> Result<ResumeContinuation, AgentError> {
+        let active_turn = history
+            .get(active_turn_start..)
+            .ok_or(AgentError::InvalidResumeHistory)?;
+        let summary = validate_active_turn(active_turn)?;
+
+        let boundary = match (summary.assistant_count.cmp(&next_iteration), summary.end) {
+            (Ordering::Equal, ActiveTurnEnd::UserOnly) => ResumeBoundary::Continue,
+            (Ordering::Equal, ActiveTurnEnd::Terminal) => ResumeBoundary::Finish {
+                advance_iteration: false,
+            },
+            (
+                Ordering::Equal,
+                ActiveTurnEnd::ToolCalls {
+                    answered_count,
+                    call_count,
+                    ..
+                },
+            ) if answered_count == call_count => ResumeBoundary::Continue,
+            (
+                Ordering::Greater,
+                ActiveTurnEnd::ToolCalls {
+                    assistant_index: relative_index,
+                    answered_count,
+                    ..
+                },
+            ) if next_iteration.checked_add(1) == Some(summary.assistant_count) => {
+                let assistant_index = active_turn_start
+                    .checked_add(relative_index)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                ResumeBoundary::ReconcileTools {
+                    assistant_index,
+                    next_tool_index: answered_count,
+                }
+            }
+            (Ordering::Greater, ActiveTurnEnd::Terminal)
+                if next_iteration.checked_add(1) == Some(summary.assistant_count) =>
+            {
+                ResumeBoundary::Finish {
+                    advance_iteration: true,
+                }
+            }
+            _ => return Err(AgentError::InvalidResumeHistory),
+        };
+
+        Ok(ResumeContinuation {
+            history,
+            iteration: next_iteration,
+            boundary,
+        })
+    }
+
+    pub(crate) async fn continue_resumed_turn_loop(
+        self,
+        mut continuation: ResumeContinuation,
+        mut commands: mpsc::Receiver<TurnCommand>,
+    ) -> Result<(), AgentError> {
+        match continuation.boundary {
+            ResumeBoundary::Continue => {
+                self.continue_turn_loop(continuation.history, continuation.iteration, commands)
+                    .await
+            }
+            ResumeBoundary::Finish { advance_iteration } => {
+                if advance_iteration {
+                    self.complete_iteration(continuation.iteration).await?;
+                }
+                self.publish_required_agent_event(
+                    AgentEvent::Finished {
+                        finish_reason: finish_reason_name(FinishReason::Unknown).to_owned(),
+                        usage: self.current_usage(),
+                    },
+                    None,
+                )
+                .await?;
+                self.commit_history(continuation.history);
+                Ok(())
+            }
+            ResumeBoundary::ReconcileTools {
+                assistant_index,
+                next_tool_index,
+            } => {
+                let tool_calls = continuation
+                    .history
+                    .get(assistant_index)
+                    .ok_or(AgentError::InvalidResumeHistory)?
+                    .tool_calls
+                    .clone();
+                if tool_calls.len() > self.config.max_tool_calls_per_turn {
+                    let error = AgentError::ToolCallLimitExceeded {
+                        limit: self.config.max_tool_calls_per_turn,
+                    };
+                    self.publish_failed(&error).await?;
+                    return Err(error);
+                }
+                let turn_index = usize::try_from(continuation.iteration).map_err(|_| {
+                    AgentError::IterationOutOfRange {
+                        iteration: continuation.iteration,
+                    }
+                })?;
+                let turn_id = self.current_turn().expect("turn id should be set");
+                let missing_tool_calls = tool_calls
+                    .get(next_tool_index..)
+                    .ok_or(AgentError::InvalidResumeHistory)?;
+                for tool_call in missing_tool_calls {
+                    if self
+                        .cancel_token()
+                        .expect("cancel token should be set")
+                        .is_cancelled()
+                    {
+                        self.publish_cancelled().await?;
+                        return Err(AgentError::Cancelled);
+                    }
+                    let tool_message = match self
+                        .execute_tool_call(turn_index, tool_call, &mut commands)
+                        .await
+                    {
+                        Ok(message) => message,
+                        Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
+                        Err(error) => {
+                            self.publish_failed(&error).await?;
+                            return Err(error);
+                        }
+                    };
+                    self.publish_required_agent_event(
+                        AgentEvent::Message {
+                            turn_id,
+                            message: tool_message.clone(),
+                        },
+                        None,
+                    )
+                    .await?;
+                    continuation.history.push(tool_message);
+                }
+                self.complete_iteration(continuation.iteration).await?;
+                continuation.iteration = continuation.iteration.checked_add(1).ok_or(
+                    AgentError::IterationOutOfRange {
+                        iteration: continuation.iteration,
+                    },
+                )?;
+                self.continue_turn_loop(continuation.history, continuation.iteration, commands)
+                    .await
+            }
+        }
+    }
+
+    async fn complete_iteration(&self, iteration: u64) -> Result<(), AgentError> {
+        self.store
+            .complete_iteration(
+                self.current_run().expect("run id should be set"),
+                self.current_turn().expect("turn id should be set"),
+                iteration,
+                self.current_usage(),
+            )
+            .await?;
+        Ok(())
     }
 
     fn cancel_token(&self) -> Option<CancellationToken> {
@@ -176,10 +476,6 @@ impl Agent {
             .lock()
             .expect("cancel mutex should not be poisoned")
             .clone()
-    }
-
-    fn reserve_event_seq(&self) -> u64 {
-        self.seq.fetch_add(1, Ordering::SeqCst)
     }
 
     fn current_usage(&self) -> TokenUsage {
@@ -206,69 +502,25 @@ impl Agent {
             .clone()
     }
 
-    fn commit_history(&self, history: Vec<ChatMessage>) {
-        *self
-            .history
-            .lock()
-            .expect("agent history mutex should not be poisoned") = history;
-    }
-
-    async fn publish_checkpointed_agent_event(
-        &self,
-        status: CheckpointStatus,
-        event: AgentEvent,
-        history: &[ChatMessage],
-    ) -> Result<(), AgentError> {
-        let seq = self.reserve_event_seq();
-        self.save_checkpoint(status, history).await?;
-        self.publish_agent_event_at(seq, event, None).await
-    }
-
-    async fn publish_cancelled(&self, history: &[ChatMessage]) -> Result<(), AgentError> {
-        self.publish_checkpointed_agent_event(
-            CheckpointStatus::Cancelled,
-            AgentEvent::Cancelled,
-            history,
+    async fn publish_cancelled(&self) -> Result<(), AgentError> {
+        self.publish_required_agent_event(
+            AgentEvent::Cancelled {
+                usage: self.current_usage(),
+            },
+            None,
         )
         .await
     }
 
-    async fn save_failed_checkpoint(
-        &self,
-        error: &AgentError,
-        history: &[ChatMessage],
-    ) -> Result<(), AgentError> {
-        self.publish_checkpointed_agent_event(
-            CheckpointStatus::Failed,
+    async fn publish_failed(&self, error: &AgentError) -> Result<(), AgentError> {
+        self.publish_required_agent_event(
             AgentEvent::Failed {
                 error_text: error.to_string(),
+                usage: self.current_usage(),
             },
-            history,
+            None,
         )
         .await
-    }
-
-    async fn save_checkpoint(
-        &self,
-        status: CheckpointStatus,
-        history: &[ChatMessage],
-    ) -> Result<(), AgentError> {
-        let Some(store) = &self.checkpoint_store else {
-            return Ok(());
-        };
-
-        let state = encode_checkpoint_payload(self.id, self.current_usage(), history)?;
-        let record = CheckpointRecord::new(
-            self.current_run().expect("run id should be set"),
-            self.current_turn().expect("turn id should be set"),
-            CheckpointKind::Agent,
-            status,
-            AGENT_CHECKPOINT_STATE_VERSION,
-            state,
-            self.seq.load(Ordering::SeqCst).saturating_sub(1),
-        );
-        store.put_latest(record).await?;
-        Ok(())
     }
 
     async fn publish_agent_event(
@@ -276,36 +528,44 @@ impl Agent {
         event: AgentEvent,
         extra_metadata: Option<BTreeMap<String, Value>>,
     ) -> Result<(), AgentError> {
-        let seq = self.reserve_event_seq();
-        self.publish_agent_event_at(seq, event, extra_metadata)
+        self.publish_agent_event_inner(event, extra_metadata, false)
             .await
     }
 
-    async fn publish_agent_event_at(
+    async fn publish_required_agent_event(
         &self,
-        seq: u64,
         event: AgentEvent,
         extra_metadata: Option<BTreeMap<String, Value>>,
     ) -> Result<(), AgentError> {
+        self.publish_agent_event_inner(event, extra_metadata, true)
+            .await
+    }
+
+    async fn publish_agent_event_inner(
+        &self,
+        event: AgentEvent,
+        extra_metadata: Option<BTreeMap<String, Value>>,
+        fail_on_publish_error: bool,
+    ) -> Result<(), AgentError> {
         let mut metadata = BTreeMap::new();
         metadata.insert("agent_name".to_owned(), Value::String(self.name.clone()));
+        let model = self.llm_provider.model_id();
         metadata.insert(
             "llm_provider".to_owned(),
-            Value::String(self.llm_provider.provider_name().to_owned()),
+            Value::String(model.provider_name().to_owned()),
         );
-        let model = self.llm_provider.model_id();
-        metadata.insert("model".to_owned(), Value::String(model.as_str().to_owned()));
         metadata.insert(
-            "llm".to_owned(),
-            Value::String(format!("{}:{}", self.llm_provider.provider_name(), model)),
+            "model".to_owned(),
+            Value::String(model.model_name().to_owned()),
         );
+        metadata.insert("llm".to_owned(), Value::String(model.as_str().to_owned()));
         if let Some(extra_metadata) = extra_metadata {
             metadata.extend(extra_metadata);
         }
 
         let envelope = StreamEnvelope {
+            business_seq: None,
             run_id: self.current_run().expect("run id should be set"),
-            seq,
             timestamp: Utc::now(),
             source: EventSource::Run,
             event: RuntimeEvent::Agent {
@@ -315,9 +575,11 @@ impl Agent {
             metadata,
         };
         if let Err(error) = self.event_bus.publish(envelope).await {
+            if fail_on_publish_error {
+                return Err(AgentError::from(error));
+            }
             warn!(
                 run_id = %self.current_run().expect("run id should be set"),
-                current_seq = seq,
                 source = %error,
                 "failed to publish live agent event"
             );
@@ -330,7 +592,7 @@ impl Agent {
         turn_index: usize,
         llm_call_id: LlmCallId,
         mut stream: ChatStream,
-        history: &[ChatMessage],
+        commands: &mut mpsc::Receiver<TurnCommand>,
     ) -> Result<AssistantStreamResult, AgentError> {
         let mut text = String::new();
         let mut reasoning = String::new();
@@ -340,9 +602,14 @@ impl Agent {
         loop {
             let cancel = self.cancel_token().expect("cancel token should be set");
             tokio::select! {
+                biased;
                 () = cancel.cancelled() => {
-                    self.publish_cancelled(history).await?;
+                    self.publish_cancelled().await?;
                     return Err(AgentError::Cancelled);
+                }
+                command = commands.recv() => {
+                    reject_inactive_command(command)?;
+                    continue;
                 }
                 event = stream.next() => {
                     let Some(event) = event else {
@@ -501,7 +768,7 @@ impl Agent {
         &self,
         turn_index: usize,
         tool_call: &ToolCall,
-        history: &[ChatMessage],
+        commands: &mut mpsc::Receiver<TurnCommand>,
     ) -> Result<ChatMessage, AgentError> {
         let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
         self.publish_llm_event(
@@ -517,16 +784,112 @@ impl Agent {
         .await?;
 
         let name = ToolName::from(tool_call.name.as_str());
-        let cancel = self.cancel_token().expect("cancel token should be set");
-        let tool_result = tokio::select! {
-            () = cancel.cancelled() => {
-                self.publish_cancelled(history).await?;
-                return Err(AgentError::Cancelled);
+        let approval_metadata = match self.tool_registry.authorization(&name) {
+            Ok(approval_metadata) => approval_metadata,
+            Err(error) => {
+                return self
+                    .tool_failure_message(turn_index, llm_call_id, tool_call, error.to_string())
+                    .await;
             }
-            result = self.tool_registry.call(
-                &name,
-                ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
-            ) => result,
+        };
+
+        if let Some((tool_kind, danger_level)) = approval_metadata {
+            let approval_id = ApprovalId::new();
+            self.publish_required_agent_event(
+                AgentEvent::ToolApprovalRequested {
+                    approval_id,
+                    agent_name: self.name.clone(),
+                    call_id: tool_call.call_id.clone(),
+                    tool_name: name.clone(),
+                    arguments: tool_call.arguments.clone(),
+                    tool_kind,
+                    danger_level,
+                },
+                None,
+            )
+            .await?;
+
+            let decision = loop {
+                let cancel = self.cancel_token().expect("cancel token should be set");
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        self.publish_cancelled().await?;
+                        return Err(AgentError::Cancelled);
+                    }
+                    command = commands.recv() => {
+                        let Some(TurnCommand::ResolveToolApproval {
+                            approval_id: candidate,
+                            decision,
+                            response,
+                        }) = command else {
+                            return Err(AgentError::TurnCommandClosed);
+                        };
+                        if candidate != approval_id {
+                            let _ = response.send(Err(AgentError::ApprovalNotFound {
+                                approval_id: candidate,
+                            }));
+                            continue;
+                        }
+                        let _ = response.send(Ok(()));
+                        break decision;
+                    }
+                }
+            };
+
+            self.publish_agent_event(
+                AgentEvent::ToolApprovalResolved {
+                    approval_id,
+                    decision,
+                },
+                None,
+            )
+            .await?;
+
+            match decision {
+                ApprovalDecision::Approve => {}
+                ApprovalDecision::Reject => {
+                    let result = json!({
+                        "error": {
+                            "type": "approval_rejected",
+                            "message": "user rejected tool call"
+                        }
+                    });
+                    self.publish_llm_event(
+                        turn_index,
+                        llm_call_id,
+                        LlmEvent::ToolCallFailed {
+                            call_id: tool_call.call_id.clone(),
+                            error_text: "user rejected tool call".to_owned(),
+                        },
+                        Some(&tool_call.name),
+                        Some(&tool_call.call_id),
+                    )
+                    .await?;
+                    return Ok(ChatMessage::tool(tool_call.call_id.clone(), result));
+                }
+                _ => return Err(AgentError::UnsupportedApprovalDecision),
+            }
+        }
+
+        let future = self.tool_registry.call(
+            &name,
+            ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
+        );
+        tokio::pin!(future);
+        let tool_result = loop {
+            let cancel = self.cancel_token().expect("cancel token should be set");
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    self.publish_cancelled().await?;
+                    return Err(AgentError::Cancelled);
+                }
+                command = commands.recv() => {
+                    reject_inactive_command(command)?;
+                }
+                result = &mut future => break result,
+            }
         };
 
         match tool_result {
@@ -545,23 +908,33 @@ impl Agent {
                 Ok(ChatMessage::tool(tool_call.call_id.clone(), output.result))
             }
             Err(error) => {
-                let error_text = error.to_string();
-                self.publish_llm_event(
-                    turn_index,
-                    llm_call_id,
-                    LlmEvent::ToolCallFailed {
-                        call_id: tool_call.call_id.clone(),
-                        error_text: error_text.clone(),
-                    },
-                    Some(&tool_call.name),
-                    Some(&tool_call.call_id),
-                )
-                .await?;
-                let mut message = ChatMessage::text(wyse_core::ChatRole::Tool, error_text);
-                message.tool_call_id = Some(tool_call.call_id.clone());
-                Ok(message)
+                self.tool_failure_message(turn_index, llm_call_id, tool_call, error.to_string())
+                    .await
             }
         }
+    }
+
+    async fn tool_failure_message(
+        &self,
+        turn_index: usize,
+        llm_call_id: LlmCallId,
+        tool_call: &ToolCall,
+        error_text: String,
+    ) -> Result<ChatMessage, AgentError> {
+        self.publish_llm_event(
+            turn_index,
+            llm_call_id,
+            LlmEvent::ToolCallFailed {
+                call_id: tool_call.call_id.clone(),
+                error_text: error_text.clone(),
+            },
+            Some(&tool_call.name),
+            Some(&tool_call.call_id),
+        )
+        .await?;
+        let mut message = ChatMessage::text(wyse_core::ChatRole::Tool, error_text);
+        message.tool_call_id = Some(tool_call.call_id.clone());
+        Ok(message)
     }
 }
 

@@ -1,0 +1,50 @@
+# wyse-agent AGENTS.md
+
+## Scope
+
+`wyse-agent` owns the active turn loop, turn commands, tool approval events,
+cancellation, conversation history, and turn resumption.
+
+- The Agent receives an injected `EventStreamBus` for event delivery and an
+  injected `AgentStore` for durable resumption.
+- The loop publishes required complete-message and lifecycle events as
+  unsequenced `StreamEnvelope` values.
+- Complete-message commit and retained event delivery remain downstream bus
+  responsibilities; the Agent uses the store to restore durable state and
+  advance its resume position.
+
+## Turn Control
+
+- Use a bounded MPSC channel for interactive commands sent to an active turn.
+- Keep cancellation on `CancellationToken` and prioritize it in `tokio::select!`.
+- The agent owns approval interaction; `wyse-tools` owns authorization metadata.
+- Publish `tool_approval_requested` successfully before waiting.
+- Keep user-message queuing separate until its behavior is implemented.
+
+## Resume
+
+- `Agent::resume()` takes no user message. It loads the injected store and
+  continues the unfinished turn with the same persisted `run_id` and `turn_id`.
+- `agent.json` records `next_iteration` as the durable iteration frontier: every
+  lower iteration has committed its stable boundary, while the frontier has not.
+  It is not simply the next LLM request because committed history may instead
+  require tool reconciliation or terminal completion without another LLM call.
+  Do not recover this frontier from JetStream metadata.
+- Resume rebuilds conversation history only from committed complete messages
+  through the fixed `last_seq` captured from the loaded state; realtime deltas
+  are never resume state.
+- Resume validates the active turn against `next_iteration`. Committed tool
+  result messages must be the exact ordered prefix of the immediately preceding
+  assistant `tool_calls`. Unknown, duplicate, sparse, or out-of-order results
+  are invalid resume history; only the missing suffix executes.
+- Advance `next_iteration` with the `agent.json` CAS only after the assistant
+  message and every tool result message for the iteration are durably committed.
+- Resumed LLM, tool, complete-message, and lifecycle events continue through the
+  injected `EventStreamBus`; resume does not publish directly to the store or
+  retained transport.
+- Tool execution is at-least-once. A process may stop after a tool has produced
+  an external side effect but before its result message is committed, causing
+  resume to execute that tool again. Every tool implementation must therefore
+  guarantee idempotent execution for the same tool call.
+- Web or scheduler composition guarantees that only the Agent owner resumes and
+  writes the turn; `wyse-agent` does not add a second writer lease.

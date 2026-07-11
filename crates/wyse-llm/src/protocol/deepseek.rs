@@ -71,10 +71,6 @@ impl DeepSeekProvider {
 
 #[async_trait]
 impl LlmProvider for DeepSeekProvider {
-    fn provider_name(&self) -> &str {
-        "deepseek"
-    }
-
     fn model_id(&self) -> ModelId {
         self.model.model_id()
     }
@@ -295,7 +291,7 @@ impl DeepSeekModel {
     /// Returns the model id newtype for request construction.
     #[must_use]
     pub fn model_id(self) -> ModelId {
-        ModelId::from(self.as_str())
+        ModelId::new("deepseek", self.as_str()).expect("static model id is valid")
     }
 }
 

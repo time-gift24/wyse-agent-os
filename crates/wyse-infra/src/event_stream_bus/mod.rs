@@ -14,7 +14,8 @@ pub use memory::InMemoryEventStreamBus;
 ///
 /// # Errors
 ///
-/// Returns an error if the NATS connection or JetStream setup fails.
+/// Returns [`EventStreamBusError::InvalidConfig`] if a retention limit or replica count is
+/// invalid, or an error if the NATS connection or JetStream setup fails.
 pub async fn create_nats_event_stream_bus(
     config: NatsEventStreamBusConfig,
 ) -> Result<impl EventStreamBus, EventStreamBusError> {

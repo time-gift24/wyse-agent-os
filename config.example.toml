@@ -1,0 +1,6 @@
+[stratum]
+storage_root = "./.stratum/repl"
+model = "deepseek:deepseek-v4-flash"
+
+[deepseek]
+api_key = "replace-with-your-api-key"
