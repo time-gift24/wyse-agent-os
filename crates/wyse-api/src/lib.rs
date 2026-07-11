@@ -17,7 +17,7 @@ use wyse_llm::{
 
 pub use api::{AgentCreated, AgentView, RunAccepted, router};
 pub use error::{AgentCleanupError, HostError};
-pub use host::{CreatedAgent, HostState, HostedAgent};
+pub use host::{HostState, HostedAgent};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";

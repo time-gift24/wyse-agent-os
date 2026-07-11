@@ -194,12 +194,7 @@ async fn create_agent(
     Span::current().record("run_id", field::display(created.run_id));
     let location = HeaderValue::from_str(&format!("/v1/agents/{}", created.agent_id))
         .expect("agent id always produces a valid location header");
-    let body = AgentCreated {
-        agent_id: created.agent_id,
-        agent_name: created.agent_name.into(),
-        run_id: created.run_id,
-    };
-    let mut response = (StatusCode::CREATED, Json(body)).into_response();
+    let mut response = (StatusCode::CREATED, Json(created)).into_response();
     response.headers_mut().insert(LOCATION, location);
     Ok(response)
 }
@@ -636,11 +631,6 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             StatusCode::CONFLICT,
             "resume_required",
             "agent has an unfinished persisted turn",
-        ),
-        HostError::Agent(AgentError::ApprovalCommandBusy { .. }) => (
-            StatusCode::CONFLICT,
-            "agent_busy",
-            "agent approval command is busy",
         ),
         HostError::Agent(AgentError::ResumeNotRunning { .. }) => (
             StatusCode::CONFLICT,

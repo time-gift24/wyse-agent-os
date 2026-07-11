@@ -8,7 +8,7 @@ use std::{
 use chrono::Utc;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use wyse_core::{
@@ -20,8 +20,7 @@ use wyse_tools::ToolInput;
 
 use crate::{
     Agent, AgentError,
-    command::{TurnCommand, reject_inactive_command},
-    definition::ActiveApprovalGuard,
+    definition::{ActiveApprovalGuard, ApprovalResolution},
 };
 
 pub(crate) struct ResumeContinuation {
@@ -143,7 +142,6 @@ impl Agent {
         self,
         mut history: Vec<ChatMessage>,
         mut iteration: u64,
-        mut commands: mpsc::Receiver<TurnCommand>,
     ) -> Result<(), AgentError> {
         let turn_id = self.current_turn().expect("turn id should be set");
         loop {
@@ -206,7 +204,7 @@ impl Agent {
                 }
             };
             let assistant = match self
-                .consume_assistant_stream(turn_index, llm_call_id, stream, &mut commands)
+                .consume_assistant_stream(turn_index, llm_call_id, stream)
                 .await
             {
                 Ok(assistant) => assistant,
@@ -247,10 +245,7 @@ impl Agent {
                         self.publish_cancelled().await?;
                         return Err(AgentError::Cancelled);
                     }
-                    let tool_message = match self
-                        .execute_tool_call(turn_index, tool_call, &mut commands)
-                        .await
-                    {
+                    let tool_message = match self.execute_tool_call(turn_index, tool_call).await {
                         Ok(message) => message,
                         Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
                         Err(error) => {
@@ -356,11 +351,10 @@ impl Agent {
     pub(crate) async fn continue_resumed_turn_loop(
         self,
         mut continuation: ResumeContinuation,
-        mut commands: mpsc::Receiver<TurnCommand>,
     ) -> Result<(), AgentError> {
         match continuation.boundary {
             ResumeBoundary::Continue => {
-                self.continue_turn_loop(continuation.history, continuation.iteration, commands)
+                self.continue_turn_loop(continuation.history, continuation.iteration)
                     .await
             }
             ResumeBoundary::Finish { advance_iteration } => {
@@ -413,10 +407,7 @@ impl Agent {
                         self.publish_cancelled().await?;
                         return Err(AgentError::Cancelled);
                     }
-                    let tool_message = match self
-                        .execute_tool_call(turn_index, tool_call, &mut commands)
-                        .await
-                    {
+                    let tool_message = match self.execute_tool_call(turn_index, tool_call).await {
                         Ok(message) => message,
                         Err(AgentError::Cancelled) => return Err(AgentError::Cancelled),
                         Err(error) => {
@@ -440,7 +431,7 @@ impl Agent {
                         iteration: continuation.iteration,
                     },
                 )?;
-                self.continue_turn_loop(continuation.history, continuation.iteration, commands)
+                self.continue_turn_loop(continuation.history, continuation.iteration)
                     .await
             }
         }
@@ -572,7 +563,6 @@ impl Agent {
         turn_index: usize,
         llm_call_id: LlmCallId,
         mut stream: ChatStream,
-        commands: &mut mpsc::Receiver<TurnCommand>,
     ) -> Result<AssistantStreamResult, AgentError> {
         let mut text = String::new();
         let mut reasoning = String::new();
@@ -586,10 +576,6 @@ impl Agent {
                 () = cancel.cancelled() => {
                     self.publish_cancelled().await?;
                     return Err(AgentError::Cancelled);
-                }
-                command = commands.recv() => {
-                    reject_inactive_command(command)?;
-                    continue;
                 }
                 event = stream.next() => {
                     let Some(event) = event else {
@@ -748,7 +734,6 @@ impl Agent {
         &self,
         turn_index: usize,
         tool_call: &ToolCall,
-        commands: &mut mpsc::Receiver<TurnCommand>,
     ) -> Result<ChatMessage, AgentError> {
         let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
         self.publish_llm_event(
@@ -775,8 +760,9 @@ impl Agent {
 
         if let Some((tool_kind, danger_level)) = approval_metadata {
             let approval_id = ApprovalId::new();
+            let (decision, mut decision_receiver) = oneshot::channel();
             let mut active_approval =
-                ActiveApprovalGuard::new(self.active_approval.as_ref(), approval_id);
+                ActiveApprovalGuard::new(self.active_approval.as_ref(), approval_id, decision);
             self.publish_required_agent_event(
                 AgentEvent::ToolApprovalRequested {
                     approval_id,
@@ -791,33 +777,20 @@ impl Agent {
             )
             .await?;
 
-            let decision = loop {
-                let cancel = self.cancel_token().expect("cancel token should be set");
-                tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => {
-                        active_approval.clear();
-                        self.publish_cancelled().await?;
-                        return Err(AgentError::Cancelled);
-                    }
-                    command = commands.recv() => {
-                        let Some(TurnCommand::ResolveToolApproval {
-                            approval_id: candidate,
-                            decision,
-                            response,
-                        }) = command else {
-                            return Err(AgentError::TurnCommandClosed);
-                        };
-                        if candidate != approval_id {
-                            let _ = response.send(Err(AgentError::ApprovalNotFound {
-                                approval_id: candidate,
-                            }));
-                            continue;
-                        }
-                        active_approval.clear();
-                        let _ = response.send(Ok(()));
-                        break decision;
-                    }
+            let cancel = self.cancel_token().expect("cancel token should be set");
+            let decision = tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    active_approval.clear();
+                    self.publish_cancelled().await?;
+                    return Err(AgentError::Cancelled);
+                }
+                resolution = &mut decision_receiver => {
+                    let ApprovalResolution { decision, response } =
+                        resolution.map_err(|_| AgentError::NoActiveTurn)?;
+                    active_approval.clear();
+                    let _ = response.send(Ok(()));
+                    decision
                 }
             };
             drop(active_approval);
@@ -862,19 +835,14 @@ impl Agent {
             ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
         );
         tokio::pin!(future);
-        let tool_result = loop {
-            let cancel = self.cancel_token().expect("cancel token should be set");
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => {
-                    self.publish_cancelled().await?;
-                    return Err(AgentError::Cancelled);
-                }
-                command = commands.recv() => {
-                    reject_inactive_command(command)?;
-                }
-                result = &mut future => break result,
+        let cancel = self.cancel_token().expect("cancel token should be set");
+        let tool_result = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                self.publish_cancelled().await?;
+                return Err(AgentError::Cancelled);
             }
+            result = &mut future => result,
         };
 
         match tool_result {

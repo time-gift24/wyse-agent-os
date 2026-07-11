@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use wyse_core::{
     AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatMessage, ChatRole, HistoryQuery, RunId,
@@ -16,7 +16,17 @@ use wyse_llm::LlmProvider;
 use wyse_store::{AgentStatus, AgentStore, MAX_HISTORY_PAGE_SIZE};
 use wyse_tools::ToolRegistry;
 
-use crate::{AgentError, command::TurnCommand};
+use crate::AgentError;
+
+pub(crate) struct ApprovalResolution {
+    pub(crate) decision: ApprovalDecision,
+    pub(crate) response: oneshot::Sender<Result<(), AgentError>>,
+}
+
+pub(crate) struct PendingApproval {
+    approval_id: ApprovalId,
+    decision: oneshot::Sender<ApprovalResolution>,
+}
 
 /// Runtime tuning for an agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +63,7 @@ pub struct Agent {
     current_run_id: Arc<Mutex<Option<RunId>>>,
     current_turn_id: Arc<Mutex<Option<TurnId>>>,
     pub(crate) cancel: Arc<Mutex<Option<CancellationToken>>>,
-    pub(crate) turn_commands: Arc<Mutex<Option<mpsc::Sender<TurnCommand>>>>,
-    pub(crate) active_approval: Arc<Mutex<Option<ApprovalId>>>,
+    pub(crate) active_approval: Arc<Mutex<Option<PendingApproval>>>,
 }
 
 struct ActiveGuard<'a> {
@@ -63,7 +72,7 @@ struct ActiveGuard<'a> {
 }
 
 pub(crate) struct ActiveApprovalGuard<'a> {
-    active_approval: &'a Mutex<Option<ApprovalId>>,
+    active_approval: &'a Mutex<Option<PendingApproval>>,
     approval_id: ApprovalId,
 }
 
@@ -99,12 +108,16 @@ impl Drop for ActiveGuard<'_> {
 
 impl<'a> ActiveApprovalGuard<'a> {
     pub(crate) fn new(
-        active_approval: &'a Mutex<Option<ApprovalId>>,
+        active_approval: &'a Mutex<Option<PendingApproval>>,
         approval_id: ApprovalId,
+        decision: oneshot::Sender<ApprovalResolution>,
     ) -> Self {
         *active_approval
             .lock()
-            .expect("active approval mutex should not be poisoned") = Some(approval_id);
+            .expect("active approval mutex should not be poisoned") = Some(PendingApproval {
+            approval_id,
+            decision,
+        });
         Self {
             active_approval,
             approval_id,
@@ -116,7 +129,10 @@ impl<'a> ActiveApprovalGuard<'a> {
             .active_approval
             .lock()
             .expect("active approval mutex should not be poisoned");
-        if *active_approval == Some(self.approval_id) {
+        if active_approval
+            .as_ref()
+            .is_some_and(|approval| approval.approval_id == self.approval_id)
+        {
             *active_approval = None;
         }
     }
@@ -197,23 +213,11 @@ impl Agent {
         .await?;
         history.push(message);
 
-        let (command_tx, command_rx) = mpsc::channel(1);
-        *self
-            .turn_commands
-            .lock()
-            .expect("turn command mutex should not be poisoned") = Some(command_tx);
         let agent = self.clone();
         let active = Arc::clone(&self.active);
-        let turn_commands = Arc::clone(&self.turn_commands);
 
         tokio::spawn(async move {
-            let result = agent
-                .clone()
-                .continue_turn_loop(history, 0, command_rx)
-                .await;
-            *turn_commands
-                .lock()
-                .expect("turn command mutex should not be poisoned") = None;
+            let result = agent.clone().continue_turn_loop(history, 0).await;
             active.store(false, Ordering::SeqCst);
             agent.finish_background_continuation(run_id, result).await;
         });
@@ -254,25 +258,13 @@ impl Agent {
             .cancel
             .lock()
             .expect("cancel mutex should not be poisoned") = Some(cancel);
-        let (command_tx, command_rx) = mpsc::channel(1);
-        *self
-            .turn_commands
-            .lock()
-            .expect("turn command mutex should not be poisoned") = Some(command_tx);
         self.set_usage(resumed.usage);
         self.commit_history(continuation.history().to_vec());
 
         let agent = self.clone();
         let active = Arc::clone(&self.active);
-        let turn_commands = Arc::clone(&self.turn_commands);
         tokio::spawn(async move {
-            let result = agent
-                .clone()
-                .continue_resumed_turn_loop(continuation, command_rx)
-                .await;
-            *turn_commands
-                .lock()
-                .expect("turn command mutex should not be poisoned") = None;
+            let result = agent.clone().continue_resumed_turn_loop(continuation).await;
             active.store(false, Ordering::SeqCst);
             agent
                 .finish_background_continuation(resumed.run_id, result)
@@ -515,43 +507,29 @@ impl Agent {
         approval_id: ApprovalId,
         decision: ApprovalDecision,
     ) -> Result<(), AgentError> {
-        let sender = self
-            .turn_commands
-            .lock()
-            .expect("turn command mutex should not be poisoned")
-            .clone()
-            .ok_or(AgentError::NoActiveTurn)?;
-        {
+        if !self.active.load(Ordering::SeqCst) {
+            return Err(AgentError::NoActiveTurn);
+        }
+        let pending = {
             let mut active_approval = self
                 .active_approval
                 .lock()
                 .expect("active approval mutex should not be poisoned");
-            if *active_approval != Some(approval_id) {
+            if active_approval
+                .as_ref()
+                .is_none_or(|approval| approval.approval_id != approval_id)
+            {
                 return Err(AgentError::ApprovalNotFound { approval_id });
             }
-            *active_approval = None;
-        }
+            active_approval
+                .take()
+                .expect("matching active approval should be present")
+        };
         let (response, receiver) = oneshot::channel();
-        match sender.try_send(TurnCommand::ResolveToolApproval {
-            approval_id,
-            decision,
-            response,
-        }) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                let mut active_approval = self
-                    .active_approval
-                    .lock()
-                    .expect("active approval mutex should not be poisoned");
-                if active_approval.is_none() && !sender.is_closed() {
-                    *active_approval = Some(approval_id);
-                }
-                return Err(AgentError::ApprovalCommandBusy { approval_id });
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                return Err(AgentError::NoActiveTurn);
-            }
-        }
+        pending
+            .decision
+            .send(ApprovalResolution { decision, response })
+            .map_err(|_| AgentError::NoActiveTurn)?;
         receiver.await.map_err(|_| AgentError::NoActiveTurn)?
     }
 
@@ -598,8 +576,6 @@ fn continuation_error_kind(error: &AgentError) -> &'static str {
         AgentError::PersistedRunRequiresResume { .. } => "persisted_run_requires_resume",
         AgentError::NoActiveTurn => "no_active_turn",
         AgentError::ApprovalNotFound { .. } => "approval_not_found",
-        AgentError::ApprovalCommandBusy { .. } => "approval_command_busy",
-        AgentError::TurnCommandClosed => "turn_command_closed",
         AgentError::UnsupportedApprovalDecision => "unsupported_approval_decision",
         AgentError::Llm { .. } => "llm",
         AgentError::EventBus { .. } => "event_bus",
@@ -722,7 +698,6 @@ impl AgentBuilder {
             current_run_id: Arc::new(Mutex::new(None)),
             current_turn_id: Arc::new(Mutex::new(None)),
             cancel: Arc::new(Mutex::new(None)),
-            turn_commands: Arc::new(Mutex::new(None)),
             active_approval: Arc::new(Mutex::new(None)),
         })
     }
@@ -981,13 +956,6 @@ mod tests {
 
         assert!(agent.run_turn(ChatMessage::user("hello")).await.is_err());
         assert!(!agent.active.load(Ordering::SeqCst));
-        assert!(
-            agent
-                .turn_commands
-                .lock()
-                .expect("turn command mutex should not be poisoned")
-                .is_none()
-        );
     }
 
     #[tokio::test]

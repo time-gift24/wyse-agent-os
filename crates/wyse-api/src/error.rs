@@ -19,24 +19,9 @@ pub enum AgentCleanupError {
     /// Cleanup did not finish within the shutdown bound.
     #[error("agent cleanup timed out")]
     Timeout,
-    /// The messages directory could not be listed.
-    #[error("could not list agent messages during cleanup")]
-    ListMessages(#[source] FilesystemError),
-    /// A message file could not be removed.
-    #[error("could not remove agent message during cleanup")]
-    RemoveMessage(#[source] FilesystemError),
-    /// The messages directory could not be removed.
-    #[error("could not remove agent messages directory during cleanup")]
-    RemoveMessagesDirectory(#[source] FilesystemError),
-    /// The agent state file could not be removed.
-    #[error("could not remove agent state during cleanup")]
-    RemoveAgentState(#[source] FilesystemError),
-    /// The resolved definition could not be removed.
-    #[error("could not remove agent definition during cleanup")]
-    RemoveDefinition(#[source] FilesystemError),
-    /// The agent history directory could not be removed.
-    #[error("could not remove agent directory during cleanup")]
-    RemoveAgentDirectory(#[source] FilesystemError),
+    /// A partial agent file could not be inspected or removed.
+    #[error("could not clean up partial agent files")]
+    Filesystem(#[from] FilesystemError),
 }
 
 /// Error returned while composing or accessing the API host.

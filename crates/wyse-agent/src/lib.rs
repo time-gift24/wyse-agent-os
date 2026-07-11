@@ -1,6 +1,5 @@
 //! Agent runtime loop for Wyse.
 
-mod command;
 pub mod definition;
 pub mod error;
 

@@ -1696,10 +1696,7 @@ async fn create_agent_preserves_on_uncertain_inspection_and_exposes_remove_failu
                     panic!("cleanup failure should be explicit");
                 };
                 assert!(matches!(creation.as_ref(), HostError::Agent(_)));
-                assert!(matches!(
-                    cleanup,
-                    AgentCleanupError::RemoveMessagesDirectory(_)
-                ));
+                assert!(matches!(cleanup, AgentCleanupError::Filesystem(_)));
                 assert_eq!(
                     std::error::Error::source(&error)
                         .expect("creation failure is retained")
@@ -1727,7 +1724,7 @@ async fn creation_cleanup_http_response_does_not_expose_error_details() {
         .expect("virtual path parses");
     let error = HostError::CreationCleanup {
         creation: Box::new(HostError::EmptyText),
-        cleanup: AgentCleanupError::ListMessages(FilesystemError::PermissionDenied {
+        cleanup: AgentCleanupError::Filesystem(FilesystemError::PermissionDenied {
             path: secret_path,
         }),
     };

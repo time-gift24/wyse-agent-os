@@ -36,15 +36,6 @@ pub enum AgentError {
         /// Approval request identity.
         approval_id: wyse_core::ApprovalId,
     },
-    /// The active approval command slot is temporarily occupied.
-    #[error("tool approval command is busy: {approval_id}")]
-    ApprovalCommandBusy {
-        /// Approval request identity.
-        approval_id: wyse_core::ApprovalId,
-    },
-    /// The active turn's command channel closed.
-    #[error("agent turn command channel closed")]
-    TurnCommandClosed,
     /// The approval decision is not supported by this runtime.
     #[error("unsupported tool approval decision")]
     UnsupportedApprovalDecision,

@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use wyse_agent::Agent;
 use wyse_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
-use wyse_core::{AgentId, ChatMessage, DangerLevel, RunId, ToolKind};
+use wyse_core::{AgentId, ChatMessage, DangerLevel, ToolKind};
 use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath};
 use wyse_infra::EventStreamBus;
 use wyse_llm::LlmProviderManager;
@@ -38,21 +38,9 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Shared runtime state for all recovered agents.
 pub struct HostState {
     agents: RwLock<HashMap<AgentId, Arc<HostedAgent>>>,
-    #[allow(
-        dead_code,
-        reason = "retained for the next API endpoint assembly tasks"
-    )]
     filesystem: Arc<dyn Filesystem>,
     event_bus: Arc<dyn EventStreamBus>,
-    #[allow(
-        dead_code,
-        reason = "retained for the next API endpoint assembly tasks"
-    )]
     providers: Arc<LlmProviderManager>,
-    #[allow(
-        dead_code,
-        reason = "retained for the next API endpoint assembly tasks"
-    )]
     config: Arc<Config>,
     shutdown: CancellationToken,
     admission: Arc<AdmissionState>,
@@ -75,18 +63,6 @@ pub struct HostedAgent {
     /// Durable state and complete message history.
     pub store: Arc<dyn AgentStore>,
     needs_resume: AtomicBool,
-}
-
-/// Result of creating and starting a hosted agent.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct CreatedAgent {
-    /// New agent identity.
-    pub agent_id: AgentId,
-    /// Resolved template name.
-    pub agent_name: AgentName,
-    /// Initial run identity.
-    pub run_id: RunId,
 }
 
 enum CreationStage<T, E> {
@@ -353,7 +329,7 @@ impl HostState {
         &self,
         agent_name: AgentName,
         text: String,
-    ) -> Result<CreatedAgent, HostError> {
+    ) -> Result<crate::AgentCreated, HostError> {
         let _admission = self.admit()?;
         if text.trim().is_empty() {
             return Err(HostError::EmptyText);
@@ -510,9 +486,9 @@ impl HostState {
             return Err(HostError::HostShuttingDown);
         }
         agents.insert(agent_id, hosted);
-        Ok(CreatedAgent {
+        Ok(crate::AgentCreated {
             agent_id,
-            agent_name,
+            agent_name: agent_name.into(),
             run_id,
         })
     }
@@ -600,22 +576,17 @@ async fn cleanup_agent_files(
     let entries = match filesystem.list_dir(&messages_path).await {
         Ok(entries) => entries,
         Err(FilesystemError::NotFound { .. }) => Vec::new(),
-        Err(source) => return Err(AgentCleanupError::ListMessages(source)),
+        Err(source) => return Err(source.into()),
     };
     for entry in entries {
-        ignore_not_found(filesystem.remove_file(&entry.path).await)
-            .map_err(AgentCleanupError::RemoveMessage)?;
+        ignore_not_found(filesystem.remove_file(&entry.path).await)?;
     }
-    ignore_not_found(filesystem.remove_dir(&messages_path).await)
-        .map_err(AgentCleanupError::RemoveMessagesDirectory)?;
+    ignore_not_found(filesystem.remove_dir(&messages_path).await)?;
     let agent_path = child_path(root, "agent.json")
         .expect("agent state path should be valid after root validation");
-    ignore_not_found(filesystem.remove_file(&agent_path).await)
-        .map_err(AgentCleanupError::RemoveAgentState)?;
-    ignore_not_found(filesystem.remove_file(definition_path).await)
-        .map_err(AgentCleanupError::RemoveDefinition)?;
-    ignore_not_found(filesystem.remove_dir(root).await)
-        .map_err(AgentCleanupError::RemoveAgentDirectory)?;
+    ignore_not_found(filesystem.remove_file(&agent_path).await)?;
+    ignore_not_found(filesystem.remove_file(definition_path).await)?;
+    ignore_not_found(filesystem.remove_dir(root).await)?;
     Ok(())
 }
 
