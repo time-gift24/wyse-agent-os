@@ -4,6 +4,7 @@ members = [
     "crates/wyse-agent-builtin",
     "crates/wyse-store",
     "crates/wyse-core",
+    "crates/wyse-config",
     "crates/wyse-filesystem",
     "crates/wyse-infra",
     "crates/wyse-llm",
@@ -35,6 +36,7 @@ tokio-util = "0.7.18"
 tracing = "0.1.41"
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
 wyse-core = { path = "crates/wyse-core" }
+wyse-config = { path = "crates/wyse-config" }
 wyse-filesystem = { path = "crates/wyse-filesystem" }
 wyse-agent = { path = "crates/wyse-agent" }
 wyse-store = { path = "crates/wyse-store" }

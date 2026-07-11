@@ -1,6 +1,22 @@
-[stratum]
-storage_root = "./.stratum/repl"
-model = "deepseek:deepseek-v4-flash"
+[agent]
+storage_root = "./.wyse/agents"
 
-[deepseek]
+[llm]
+default = "deepseek:deepseek-v4-flash"
+
+[llm.deepseek]
 api_key = "replace-with-your-api-key"
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+
+[api]
+bind = "127.0.0.1:8080"
+allowed_origins = ["http://localhost:5173"]
+
+[nats]
+url = "nats://127.0.0.1:4222"
+stream_name = "AGENT_EVENTS"
+subject_prefix = "events.agent"
+replicas = 1
+max_age_seconds = 604800
+max_bytes = 1073741824
+max_messages = 1000000
