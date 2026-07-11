@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use wyse_agent::{Agent, AgentError};
-use wyse_checkpoint::AgentCheckpoint;
 use wyse_core::AgentId;
 use wyse_infra::EventStreamBus;
 use wyse_llm::LlmProvider;
@@ -14,9 +13,8 @@ const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 /// # Errors
 ///
 /// Returns an error when the supplied agent wiring is incomplete.
-pub async fn build_default_agent(
+pub fn build_default_agent(
     agent_id: AgentId,
-    checkpoint: Arc<dyn AgentCheckpoint>,
     event_bus: Arc<dyn EventStreamBus>,
     llm_provider: Arc<dyn LlmProvider>,
 ) -> Result<Agent, AgentError> {
@@ -27,7 +25,5 @@ pub async fn build_default_agent(
         .llm_provider(llm_provider)
         .tool_registry(Arc::new(BuiltinToolRegistry::default()))
         .event_bus(event_bus)
-        .checkpoint(checkpoint)
         .build()
-        .await
 }

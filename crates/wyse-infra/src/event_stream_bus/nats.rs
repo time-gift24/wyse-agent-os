@@ -269,13 +269,14 @@ mod tests {
     use async_nats::jetstream::stream::{DiscardPolicy, RetentionPolicy, StorageType};
     use chrono::Utc;
     use wyse_core::{
-        AgentEvent, AgentId, EventCursor, EventSource, ReplayStart, RunId, RuntimeEvent,
+        AgentEvent, AgentId, EventCursor, EventSource, ReplayStart, RunId, RuntimeEvent, TurnId,
     };
 
     use super::*;
 
     fn agent_envelope(agent_id: AgentId, event: AgentEvent) -> StreamEnvelope {
         StreamEnvelope {
+            business_seq: None,
             run_id: RunId::new(),
             timestamp: Utc::now(),
             source: EventSource::Run,
@@ -287,7 +288,12 @@ mod tests {
     #[test]
     fn agent_subject_has_no_product_prefix() {
         let agent_id = AgentId::new();
-        let envelope = agent_envelope(agent_id, AgentEvent::Started);
+        let envelope = agent_envelope(
+            agent_id,
+            AgentEvent::Started {
+                turn_id: TurnId::new(),
+            },
+        );
 
         assert_eq!(
             subject_for("events.agent", &envelope).expect("agent subject"),

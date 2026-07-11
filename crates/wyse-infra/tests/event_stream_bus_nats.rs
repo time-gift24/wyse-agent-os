@@ -6,7 +6,8 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use tokio::time::{Instant, sleep, timeout};
 use wyse_core::{
-    AgentEvent, AgentId, EventRecord, EventSource, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
+    AgentEvent, AgentId, EventRecord, EventSource, ReplayStart, RunId, RuntimeEvent,
+    StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_infra::{
     EventStream, EventStreamBus, EventStreamBusError, NatsEventStreamBusConfig,
@@ -59,9 +60,9 @@ async fn nats_agent_replay_modes_and_isolation() -> Result<(), Box<dyn Error>> {
 
     let agent_id = AgentId::new();
     let other_agent_id = AgentId::new();
-    let first = agent_envelope(agent_id, AgentEvent::Started);
-    let other = agent_envelope(other_agent_id, AgentEvent::Started);
-    let second = agent_envelope(agent_id, AgentEvent::Cancelled);
+    let first = agent_envelope(agent_id, started_event());
+    let other = agent_envelope(other_agent_id, started_event());
+    let second = agent_envelope(agent_id, cancelled_event());
     let mut live = bus.subscribe_agent(agent_id, ReplayStart::New).await?;
 
     bus.publish(first.clone()).await?;
@@ -97,7 +98,7 @@ async fn nats_agent_replay_modes_and_isolation() -> Result<(), Box<dyn Error>> {
     assert_no_record(&mut isolated).await?;
 
     let mut new = bus.subscribe_agent(agent_id, ReplayStart::New).await?;
-    let third = agent_envelope(agent_id, AgentEvent::Started);
+    let third = agent_envelope(agent_id, started_event());
     bus.publish(third.clone()).await?;
     assert_eq!(receive_record(&mut new).await?.envelope, third);
 
@@ -111,9 +112,9 @@ async fn nats_reports_expired_cursor() -> Result<(), Box<dyn Error>> {
     let bus = wait_for_bus(&nats_url).await?;
     let agent_id = AgentId::new();
 
-    bus.publish(agent_envelope(agent_id, AgentEvent::Started))
+    bus.publish(agent_envelope(agent_id, started_event()))
         .await?;
-    bus.publish(agent_envelope(agent_id, AgentEvent::Cancelled))
+    bus.publish(agent_envelope(agent_id, cancelled_event()))
         .await?;
     let mut all = bus.subscribe_agent(agent_id, ReplayStart::All).await?;
     let retained = receive_records(&mut all, 2).await?;
@@ -123,7 +124,7 @@ async fn nats_reports_expired_cursor() -> Result<(), Box<dyn Error>> {
     let stream = jetstream.get_stream(TEST_STREAM).await?;
     stream.purge().await?;
 
-    let after_purge = agent_envelope(agent_id, AgentEvent::Started);
+    let after_purge = agent_envelope(agent_id, started_event());
     bus.publish(after_purge.clone()).await?;
 
     let error = match bus
@@ -281,11 +282,24 @@ async fn assert_no_record(stream: &mut EventStream) -> Result<(), Box<dyn Error>
 
 fn agent_envelope(agent_id: AgentId, event: AgentEvent) -> StreamEnvelope {
     StreamEnvelope {
+        business_seq: None,
         run_id: RunId::new(),
         timestamp: Utc::now(),
         source: EventSource::Run,
         event: RuntimeEvent::Agent { agent_id, event },
         metadata: BTreeMap::new(),
+    }
+}
+
+fn started_event() -> AgentEvent {
+    AgentEvent::Started {
+        turn_id: TurnId::new(),
+    }
+}
+
+fn cancelled_event() -> AgentEvent {
+    AgentEvent::Cancelled {
+        usage: TokenUsage::default(),
     }
 }
 
@@ -297,6 +311,7 @@ fn restart_fixture_agent_id() -> AgentId {
 
 fn restart_fixture_envelope() -> StreamEnvelope {
     StreamEnvelope {
+        business_seq: None,
         run_id: "0197f4d0-0000-7000-8000-000000000002"
             .parse()
             .expect("fixed RunId is valid"),
@@ -306,7 +321,11 @@ fn restart_fixture_envelope() -> StreamEnvelope {
         source: EventSource::Run,
         event: RuntimeEvent::Agent {
             agent_id: restart_fixture_agent_id(),
-            event: AgentEvent::Started,
+            event: AgentEvent::Started {
+                turn_id: "0197f4d0-0000-7000-8000-000000000003"
+                    .parse()
+                    .expect("fixed TurnId is valid"),
+            },
         },
         metadata: BTreeMap::new(),
     }

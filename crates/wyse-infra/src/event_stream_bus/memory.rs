@@ -140,7 +140,7 @@ mod tests {
     use futures_util::StreamExt;
     use wyse_core::{
         AgentEvent, AgentId, ChatMessage, EventCursor, EventSource, ReplayStart, RunId,
-        RuntimeEvent, TurnId,
+        RuntimeEvent, TokenUsage, TurnId,
     };
 
     use super::*;
@@ -148,6 +148,7 @@ mod tests {
 
     fn agent_envelope(agent_id: AgentId, event: AgentEvent) -> StreamEnvelope {
         StreamEnvelope {
+            business_seq: None,
             run_id: RunId::new(),
             timestamp: Utc::now(),
             source: EventSource::Run,
@@ -156,11 +157,27 @@ mod tests {
         }
     }
 
-    fn message_event(seq: u64) -> AgentEvent {
-        AgentEvent::Message {
-            seq,
+    fn message_envelope(agent_id: AgentId, seq: u64) -> StreamEnvelope {
+        let mut envelope = agent_envelope(
+            agent_id,
+            AgentEvent::Message {
+                turn_id: TurnId::new(),
+                message: ChatMessage::user("hello"),
+            },
+        );
+        envelope.business_seq = Some(seq);
+        envelope
+    }
+
+    fn started_event() -> AgentEvent {
+        AgentEvent::Started {
             turn_id: TurnId::new(),
-            message: ChatMessage::user("hello"),
+        }
+    }
+
+    fn cancelled_event() -> AgentEvent {
+        AgentEvent::Cancelled {
+            usage: TokenUsage::default(),
         }
     }
 
@@ -168,10 +185,10 @@ mod tests {
     async fn replay_modes_use_transport_cursor_not_message_sequence() {
         let bus = InMemoryEventStreamBus::default();
         let agent_id = AgentId::new();
-        bus.publish(agent_envelope(agent_id, AgentEvent::Started))
+        bus.publish(agent_envelope(agent_id, started_event()))
             .await
             .expect("publish 1");
-        bus.publish(agent_envelope(agent_id, message_event(99)))
+        bus.publish(message_envelope(agent_id, 99))
             .await
             .expect("publish 2");
 
@@ -195,14 +212,14 @@ mod tests {
     async fn all_replay_continues_with_live_events() {
         let bus = InMemoryEventStreamBus::default();
         let agent_id = AgentId::new();
-        bus.publish(agent_envelope(agent_id, AgentEvent::Started))
+        bus.publish(agent_envelope(agent_id, started_event()))
             .await
             .expect("publish retained");
         let mut stream = bus
             .subscribe_agent(agent_id, ReplayStart::All)
             .await
             .expect("subscribe");
-        bus.publish(agent_envelope(agent_id, AgentEvent::Cancelled))
+        bus.publish(agent_envelope(agent_id, cancelled_event()))
             .await
             .expect("publish live");
 
@@ -217,14 +234,14 @@ mod tests {
     async fn new_subscription_starts_at_creation() {
         let bus = InMemoryEventStreamBus::default();
         let agent_id = AgentId::new();
-        bus.publish(agent_envelope(agent_id, AgentEvent::Started))
+        bus.publish(agent_envelope(agent_id, started_event()))
             .await
             .expect("publish retained");
         let mut stream = bus
             .subscribe_agent(agent_id, ReplayStart::New)
             .await
             .expect("subscribe");
-        bus.publish(agent_envelope(agent_id, AgentEvent::Cancelled))
+        bus.publish(agent_envelope(agent_id, cancelled_event()))
             .await
             .expect("publish live");
 
@@ -234,7 +251,7 @@ mod tests {
         assert!(matches!(
             received.envelope.event,
             RuntimeEvent::Agent {
-                event: AgentEvent::Cancelled,
+                event: AgentEvent::Cancelled { .. },
                 ..
             }
         ));
@@ -250,10 +267,10 @@ mod tests {
             .await
             .expect("subscribe");
 
-        bus.publish(agent_envelope(other_agent_id, AgentEvent::Started))
+        bus.publish(agent_envelope(other_agent_id, started_event()))
             .await
             .expect("publish other");
-        bus.publish(agent_envelope(agent_id, AgentEvent::Cancelled))
+        bus.publish(agent_envelope(agent_id, cancelled_event()))
             .await
             .expect("publish target");
 
@@ -291,11 +308,7 @@ mod tests {
     async fn subscriber_reads_three_retained_events_without_capacity_setting() {
         let bus = InMemoryEventStreamBus::default();
         let agent_id = AgentId::new();
-        for event in [
-            AgentEvent::Started,
-            AgentEvent::Cancelled,
-            AgentEvent::Started,
-        ] {
+        for event in [started_event(), cancelled_event(), started_event()] {
             bus.publish(agent_envelope(agent_id, event))
                 .await
                 .expect("publish");
@@ -315,6 +328,7 @@ mod tests {
     async fn publish_rejects_envelope_without_agent_scope() {
         let bus = InMemoryEventStreamBus::default();
         let envelope = StreamEnvelope {
+            business_seq: None,
             run_id: RunId::new(),
             timestamp: Utc::now(),
             source: EventSource::Run,
