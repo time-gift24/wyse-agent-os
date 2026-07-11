@@ -79,6 +79,9 @@ pub enum OntologyError {
     /// The reserved online tag cannot be deleted.
     #[error("the online tag cannot be deleted")]
     ReservedTag,
+    /// The online tag changed after a write was validated against it.
+    #[error("the online schema changed concurrently")]
+    OnlineRevisionChanged,
     /// An object instance does not exist.
     #[error("object {id} does not exist")]
     ObjectMissing {

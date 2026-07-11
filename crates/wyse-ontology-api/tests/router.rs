@@ -843,6 +843,27 @@ impl OntologyRepository for MemoryRepository {
             .insert(name.clone(), id.clone());
         Ok(())
     }
+    async fn move_online_tag(&self, revision_id: &RevisionId) -> Result<(), OntologyError> {
+        let revision = self
+            .revisions
+            .lock()
+            .map_err(|_| repository_error())?
+            .get(revision_id)
+            .cloned()
+            .ok_or_else(|| OntologyError::RevisionMissing {
+                id: revision_id.clone(),
+            })?;
+        let instances = self.instances.lock().map_err(|_| repository_error())?;
+        let objects = instances.objects.values().cloned().collect::<Vec<_>>();
+        let links = instances.links.values().cloned().collect::<Vec<_>>();
+        drop(instances);
+        wyse_ontology::validate_schema_instances(&revision.schema, &objects, &links)?;
+        self.tags
+            .lock()
+            .map_err(|_| repository_error())?
+            .insert(TagName::online(), revision.id);
+        Ok(())
+    }
     async fn get_tag(&self, name: &TagName) -> Result<Option<RevisionId>, OntologyError> {
         Ok(self
             .tags
@@ -865,7 +886,11 @@ impl OntologyRepository for MemoryRepository {
             links: instances.links.values().cloned().collect(),
         })
     }
-    async fn create_object(&self, object: NewObjectRecord) -> Result<ObjectRecord, OntologyError> {
+    async fn create_object(
+        &self,
+        object: NewObjectRecord,
+        _online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError> {
         let record = ObjectRecord {
             id: object.id,
             object_type_id: object.object_type_id,
@@ -915,7 +940,11 @@ impl OntologyRepository for MemoryRepository {
         });
         Ok(Page { items, next_after })
     }
-    async fn replace_object(&self, object: ObjectRecord) -> Result<ObjectRecord, OntologyError> {
+    async fn replace_object(
+        &self,
+        object: ObjectRecord,
+        _online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError> {
         let mut instances = self.instances.lock().map_err(|_| repository_error())?;
         let Some(current) = instances.objects.get(&object.id) else {
             return Err(OntologyError::ObjectMissing { id: object.id });
@@ -935,6 +964,7 @@ impl OntologyRepository for MemoryRepository {
         id: ObjectId,
         version: u64,
         force: bool,
+        _online_revision_id: &RevisionId,
     ) -> Result<(), OntologyError> {
         let mut instances = self.instances.lock().map_err(|_| repository_error())?;
         let Some(current) = instances.objects.get(&id) else {
@@ -962,6 +992,7 @@ impl OntologyRepository for MemoryRepository {
         &self,
         link: NewLinkRecord,
         constraints: &[LinkCardinalityConstraint],
+        _online_revision_id: &RevisionId,
     ) -> Result<LinkRecord, OntologyError> {
         let record = LinkRecord {
             id: link.id,
@@ -1020,6 +1051,7 @@ impl OntologyRepository for MemoryRepository {
         &self,
         link: LinkRecord,
         constraints: &[LinkCardinalityConstraint],
+        _online_revision_id: &RevisionId,
     ) -> Result<LinkRecord, OntologyError> {
         let mut instances = self.instances.lock().map_err(|_| repository_error())?;
         let Some(current) = instances.links.get(&link.id) else {
@@ -1042,7 +1074,12 @@ impl OntologyRepository for MemoryRepository {
         instances.links.insert(updated.id, updated.clone());
         Ok(updated)
     }
-    async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError> {
+    async fn delete_link(
+        &self,
+        id: LinkId,
+        version: u64,
+        _online_revision_id: &RevisionId,
+    ) -> Result<(), OntologyError> {
         let mut instances = self.instances.lock().map_err(|_| repository_error())?;
         let Some(current) = instances.links.get(&id) else {
             return Err(OntologyError::LinkMissing { id });

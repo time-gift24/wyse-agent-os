@@ -88,6 +88,64 @@ async fn repository_rejects_a_stored_revision_with_mismatched_schema_content()
 
 #[tokio::test]
 #[ignore = "requires MySQL 8 started by the crate Makefile"]
+async fn moving_online_rejects_a_revision_incompatible_with_existing_instances()
+-> Result<(), Box<dyn std::error::Error>> {
+    use sqlx::MySqlPool;
+
+    let repository =
+        SqlxOntologyRepository::new(MySqlPool::connect(&std::env::var("DATABASE_URL")?).await?);
+    let object_type_id = ObjectTypeId::new();
+    let compatible_schema = SchemaDocument {
+        schema_version: 1,
+        object_types: vec![ObjectType {
+            id: object_type_id,
+            name: "person".to_owned(),
+            description: String::new(),
+            properties: Vec::new(),
+        }],
+        link_types: Vec::new(),
+    };
+    let compatible = PublishedRevision {
+        id: revision_id(&compatible_schema)?,
+        schema: compatible_schema,
+    };
+    repository.insert_revision(compatible.clone()).await?;
+    repository.move_online_tag(&compatible.id).await?;
+    repository
+        .create_object(
+            NewObjectRecord {
+                id: ObjectId::new(),
+                object_type_id,
+                values: Map::new(),
+            },
+            &compatible.id,
+        )
+        .await?;
+
+    let incompatible_schema = SchemaDocument {
+        schema_version: 1,
+        object_types: Vec::new(),
+        link_types: Vec::new(),
+    };
+    let incompatible = PublishedRevision {
+        id: revision_id(&incompatible_schema)?,
+        schema: incompatible_schema,
+    };
+    repository.insert_revision(incompatible.clone()).await?;
+
+    assert!(matches!(
+        repository.move_online_tag(&incompatible.id).await,
+        Err(OntologyError::PublishInvalid { .. })
+    ));
+    assert_eq!(
+        repository.get_tag(&TagName::online()).await?,
+        Some(compatible.id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MySQL 8 started by the crate Makefile"]
 async fn repository_atomically_enforces_cardinality_and_excludes_replaced_link()
 -> Result<(), Box<dyn std::error::Error>> {
     use sqlx::MySqlPool;
@@ -95,17 +153,23 @@ async fn repository_atomically_enforces_cardinality_and_excludes_replaced_link()
     let repository = Arc::new(SqlxOntologyRepository::new(
         MySqlPool::connect(&std::env::var("DATABASE_URL")?).await?,
     ));
+    let online = published_revision();
+    repository.insert_revision(online.clone()).await?;
+    repository.put_tag(&TagName::online(), &online.id).await?;
     let object_type_id = ObjectTypeId::new();
     let source = ObjectId::new();
     let first_target = ObjectId::new();
     let second_target = ObjectId::new();
     for id in [source, first_target, second_target] {
         repository
-            .create_object(NewObjectRecord {
-                id,
-                object_type_id,
-                values: Map::new(),
-            })
+            .create_object(
+                NewObjectRecord {
+                    id,
+                    object_type_id,
+                    values: Map::new(),
+                },
+                &online.id,
+            )
             .await?;
     }
 
@@ -117,6 +181,7 @@ async fn repository_atomically_enforces_cardinality_and_excludes_replaced_link()
     let first = {
         let barrier = barrier.clone();
         let repository = repository.clone();
+        let online_id = online.id.clone();
         async move {
             barrier.wait().await;
             repository
@@ -128,6 +193,7 @@ async fn repository_atomically_enforces_cardinality_and_excludes_replaced_link()
                         target_object_id: first_target,
                     },
                     &constraints,
+                    &online_id,
                 )
                 .await
         }
@@ -135,6 +201,7 @@ async fn repository_atomically_enforces_cardinality_and_excludes_replaced_link()
     let second = {
         let barrier = barrier.clone();
         let repository = repository.clone();
+        let online_id = online.id.clone();
         async move {
             barrier.wait().await;
             repository
@@ -146,6 +213,7 @@ async fn repository_atomically_enforces_cardinality_and_excludes_replaced_link()
                         target_object_id: second_target,
                     },
                     &constraints,
+                    &online_id,
                 )
                 .await
         }
@@ -173,6 +241,7 @@ async fn repository_atomically_enforces_cardinality_and_excludes_replaced_link()
                 version: created.version,
             },
             &constraints,
+            &online.id,
         )
         .await?;
     assert_eq!(replaced.version, created.version + 1);
@@ -187,16 +256,22 @@ async fn force_delete_serializes_with_link_creation() -> Result<(), Box<dyn std:
     let repository = Arc::new(SqlxOntologyRepository::new(
         MySqlPool::connect(&std::env::var("DATABASE_URL")?).await?,
     ));
+    let online = published_revision();
+    repository.insert_revision(online.clone()).await?;
+    repository.put_tag(&TagName::online(), &online.id).await?;
     let object_type_id = ObjectTypeId::new();
     let source = ObjectId::new();
     let target = ObjectId::new();
     for id in [source, target] {
         repository
-            .create_object(NewObjectRecord {
-                id,
-                object_type_id,
-                values: Map::new(),
-            })
+            .create_object(
+                NewObjectRecord {
+                    id,
+                    object_type_id,
+                    values: Map::new(),
+                },
+                &online.id,
+            )
             .await?;
     }
 
@@ -204,14 +279,16 @@ async fn force_delete_serializes_with_link_creation() -> Result<(), Box<dyn std:
     let deleting = {
         let barrier = barrier.clone();
         let repository = repository.clone();
+        let online_id = online.id.clone();
         async move {
             barrier.wait().await;
-            repository.delete_object(source, 1, true).await
+            repository.delete_object(source, 1, true, &online_id).await
         }
     };
     let creating = {
         let barrier = barrier.clone();
         let repository = repository.clone();
+        let online_id = online.id.clone();
         async move {
             barrier.wait().await;
             repository
@@ -225,6 +302,7 @@ async fn force_delete_serializes_with_link_creation() -> Result<(), Box<dyn std:
                     &[LinkCardinalityConstraint {
                         cardinality: Cardinality::ManyToMany,
                     }],
+                    &online_id,
                 )
                 .await
         }

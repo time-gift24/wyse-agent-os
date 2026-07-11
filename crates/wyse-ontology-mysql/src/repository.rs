@@ -25,7 +25,8 @@ const INSTANCE_WRITE_LOCK: &str = "wyse_ontology_instance_write";
 const INSTANCE_WRITE_LOCK_TIMEOUT_SECONDS: i32 = 10;
 
 struct InstanceWriteLock {
-    connection: PoolConnection<MySql>,
+    connection: Option<PoolConnection<MySql>>,
+    released: bool,
 }
 
 impl InstanceWriteLock {
@@ -38,7 +39,10 @@ impl InstanceWriteLock {
             .await
             .map_err(sqlx_error)?;
         if acquired == Some(1) {
-            Ok(Self { connection })
+            Ok(Self {
+                connection: Some(connection),
+                released: false,
+            })
         } else {
             Err(repository_error(
                 MySqlOntologyRepositoryError::InstanceLockUnavailable,
@@ -47,25 +51,40 @@ impl InstanceWriteLock {
     }
 
     fn connection_mut(&mut self) -> &mut PoolConnection<MySql> {
-        &mut self.connection
+        self.connection
+            .as_mut()
+            .expect("active instance-write lock retains its connection")
     }
 
     async fn release(mut self) -> Result<(), OntologyError> {
         let released: Result<Option<i64>, sqlx::Error> =
             sqlx::query_scalar("SELECT RELEASE_LOCK(?)")
                 .bind(INSTANCE_WRITE_LOCK)
-                .fetch_one(&mut *self.connection)
+                .fetch_one(&mut **self.connection_mut())
                 .await;
         if matches!(&released, Ok(Some(1))) {
+            self.released = true;
             return Ok(());
         }
 
-        let _ = self.connection.close().await;
+        if let Some(connection) = &mut self.connection {
+            connection.close_on_drop();
+        }
         match released {
             Err(source) => Err(sqlx_error(source)),
             Ok(_) => Err(repository_error(
                 MySqlOntologyRepositoryError::InstanceLockReleaseFailed,
             )),
+        }
+    }
+}
+
+impl Drop for InstanceWriteLock {
+    fn drop(&mut self) {
+        if !self.released
+            && let Some(connection) = &mut self.connection
+        {
+            connection.close_on_drop();
         }
     }
 }
@@ -165,6 +184,24 @@ impl OntologyRepository for SqlxOntologyRepository {
         Ok(())
     }
 
+    async fn move_online_tag(&self, revision_id: &RevisionId) -> Result<(), OntologyError> {
+        let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
+        let operation = async {
+            let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            let revision = revision_in_transaction(&mut transaction, revision_id)
+                .await?
+                .ok_or_else(|| OntologyError::RevisionMissing {
+                    id: revision_id.clone(),
+                })?;
+            let snapshot = schema_validation_snapshot_transaction(&mut transaction).await?;
+            validate_schema_instances(&revision.schema, &snapshot.objects, &snapshot.links)?;
+            put_tag_transaction(&mut transaction, &TagName::online(), revision_id).await?;
+            transaction.commit().await.map_err(sqlx_error)
+        }
+        .await;
+        finish_instance_write(lock, operation).await
+    }
+
     async fn get_tag(&self, name: &TagName) -> Result<Option<RevisionId>, OntologyError> {
         let row = sqlx::query("SELECT revision_id FROM ontology_tags WHERE name = ?")
             .bind(name.as_str())
@@ -212,11 +249,16 @@ impl OntologyRepository for SqlxOntologyRepository {
         Ok(SchemaValidationSnapshot { objects, links })
     }
 
-    async fn create_object(&self, object: NewObjectRecord) -> Result<ObjectRecord, OntologyError> {
+    async fn create_object(
+        &self,
+        object: NewObjectRecord,
+        online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError> {
         let values = serde_json::to_string(&object.values).map_err(encode_values_error)?;
         let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
         let operation = async {
             let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            ensure_online_revision(&mut transaction, online_revision_id).await?;
             sqlx::query(
                 "INSERT INTO objects (id, object_type_id, values_json, version) VALUES (?, ?, CAST(? AS JSON), 1)",
             )
@@ -287,11 +329,16 @@ impl OntologyRepository for SqlxOntologyRepository {
         page(rows, limit, object_from_row, |object| object.id.as_uuid())
     }
 
-    async fn replace_object(&self, object: ObjectRecord) -> Result<ObjectRecord, OntologyError> {
+    async fn replace_object(
+        &self,
+        object: ObjectRecord,
+        online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError> {
         let values = serde_json::to_string(&object.values).map_err(encode_values_error)?;
         let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
         let operation = async {
             let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            ensure_online_revision(&mut transaction, online_revision_id).await?;
             let result = sqlx::query(
                 "UPDATE objects SET values_json = CAST(? AS JSON), version = version + 1, updated_at = UTC_TIMESTAMP(6) \
                  WHERE id = ? AND version = ?",
@@ -320,13 +367,16 @@ impl OntologyRepository for SqlxOntologyRepository {
         id: ObjectId,
         version: u64,
         force: bool,
+        online_revision_id: &RevisionId,
     ) -> Result<(), OntologyError> {
         let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
         let operation = async {
             if force {
-                return delete_object_force(lock.connection_mut(), id, version).await;
+                return delete_object_force(lock.connection_mut(), id, version, online_revision_id)
+                    .await;
             }
             let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            ensure_online_revision(&mut transaction, online_revision_id).await?;
             let result = sqlx::query("DELETE FROM objects WHERE id = ? AND version = ?")
                 .bind(id.to_string())
                 .bind(version)
@@ -346,8 +396,9 @@ impl OntologyRepository for SqlxOntologyRepository {
         &self,
         link: NewLinkRecord,
         constraints: &[LinkCardinalityConstraint],
+        online_revision_id: &RevisionId,
     ) -> Result<LinkRecord, OntologyError> {
-        create_link_with_cardinality(&self.pool, link, constraints).await
+        create_link_with_cardinality(&self.pool, link, constraints, online_revision_id).await
     }
 
     async fn get_link(&self, id: LinkId) -> Result<Option<LinkRecord>, OntologyError> {
@@ -396,14 +447,21 @@ impl OntologyRepository for SqlxOntologyRepository {
         &self,
         link: LinkRecord,
         constraints: &[LinkCardinalityConstraint],
+        online_revision_id: &RevisionId,
     ) -> Result<LinkRecord, OntologyError> {
-        replace_link_with_cardinality(&self.pool, link, constraints).await
+        replace_link_with_cardinality(&self.pool, link, constraints, online_revision_id).await
     }
 
-    async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError> {
+    async fn delete_link(
+        &self,
+        id: LinkId,
+        version: u64,
+        online_revision_id: &RevisionId,
+    ) -> Result<(), OntologyError> {
         let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
         let operation = async {
             let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            ensure_online_revision(&mut transaction, online_revision_id).await?;
             let result = sqlx::query("DELETE FROM links WHERE id = ? AND version = ?")
                 .bind(id.to_string())
                 .bind(version)
@@ -467,14 +525,66 @@ async fn insert_revision_transaction(
     Ok(())
 }
 
+async fn revision_in_transaction(
+    transaction: &mut Transaction<'_, MySql>,
+    id: &RevisionId,
+) -> Result<Option<PublishedRevision>, OntologyError> {
+    sqlx::query("SELECT revision_id, schema_json FROM ontology_revisions WHERE revision_id = ?")
+        .bind(id.as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(sqlx_error)?
+        .map(revision_from_row)
+        .transpose()
+}
+
+async fn put_tag_transaction(
+    transaction: &mut Transaction<'_, MySql>,
+    name: &TagName,
+    revision_id: &RevisionId,
+) -> Result<(), OntologyError> {
+    sqlx::query(
+        "INSERT INTO ontology_tags (name, revision_id) VALUES (?, ?) \
+         ON DUPLICATE KEY UPDATE revision_id = VALUES(revision_id), updated_at = UTC_TIMESTAMP(6)",
+    )
+    .bind(name.as_str())
+    .bind(revision_id.as_str())
+    .execute(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?;
+    Ok(())
+}
+
+async fn ensure_online_revision(
+    transaction: &mut Transaction<'_, MySql>,
+    expected: &RevisionId,
+) -> Result<(), OntologyError> {
+    let online = TagName::online();
+    let actual = sqlx::query("SELECT revision_id FROM ontology_tags WHERE name = ? FOR UPDATE")
+        .bind(online.as_str())
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(sqlx_error)?
+        .map(|row| revision_id_from_str(row.get::<String, _>("revision_id")))
+        .transpose()?
+        .ok_or(OntologyError::TagMissing { name: online })?;
+    if actual == *expected {
+        Ok(())
+    } else {
+        Err(OntologyError::OnlineRevisionChanged)
+    }
+}
+
 async fn create_link_with_cardinality(
     pool: &MySqlPool,
     link: NewLinkRecord,
     constraints: &[LinkCardinalityConstraint],
+    online_revision_id: &RevisionId,
 ) -> Result<LinkRecord, OntologyError> {
     let mut lock = InstanceWriteLock::acquire(pool).await?;
     let operation = async {
         let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+        ensure_online_revision(&mut transaction, online_revision_id).await?;
         lock_objects(
             &mut transaction,
             [link.source_object_id, link.target_object_id].into_iter(),
@@ -503,10 +613,12 @@ async fn replace_link_with_cardinality(
     pool: &MySqlPool,
     link: LinkRecord,
     constraints: &[LinkCardinalityConstraint],
+    online_revision_id: &RevisionId,
 ) -> Result<LinkRecord, OntologyError> {
     let mut lock = InstanceWriteLock::acquire(pool).await?;
     let operation = async {
         let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+        ensure_online_revision(&mut transaction, online_revision_id).await?;
         let current = sqlx::query(
         "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links WHERE id = ? FOR UPDATE",
         )
@@ -647,8 +759,10 @@ async fn delete_object_force(
     connection: &mut PoolConnection<MySql>,
     id: ObjectId,
     version: u64,
+    online_revision_id: &RevisionId,
 ) -> Result<(), OntologyError> {
     let mut transaction = connection.begin().await.map_err(sqlx_error)?;
+    ensure_online_revision(&mut transaction, online_revision_id).await?;
     lock_objects(&mut transaction, std::iter::once(id)).await?;
     sqlx::query("DELETE FROM links WHERE source_object_id = ? OR target_object_id = ?")
         .bind(id.to_string())
@@ -829,8 +943,17 @@ fn map_object_delete_error(id: ObjectId, error: sqlx::Error) -> OntologyError {
 
 #[cfg(test)]
 mod tests {
-    use super::object_write_failure_from_exists;
-    use wyse_ontology::{ObjectId, OntologyError};
+    use std::{future::pending, sync::Arc};
+
+    use tokio::{
+        sync::Notify,
+        time::{Duration, timeout},
+    };
+    use wyse_ontology::{
+        ObjectId, OntologyError, OntologyRepository, PublishedRevision, SchemaDocument, revision_id,
+    };
+
+    use super::{InstanceWriteLock, SqlxOntologyRepository, object_write_failure_from_exists};
 
     #[test]
     fn object_write_failure_distinguishes_missing_from_version_conflict() {
@@ -842,5 +965,50 @@ mod tests {
         assert!(
             matches!(object_write_failure_from_exists(id, true), OntologyError::ObjectVersionConflict { id: actual } if actual == id)
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MySQL 8 started by the crate Makefile"]
+    async fn cancelling_a_lock_holder_closes_its_mysql_session()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let pool = sqlx::MySqlPool::connect(&std::env::var("DATABASE_URL")?).await?;
+        let acquired = Arc::new(Notify::new());
+        let holder = {
+            let acquired = acquired.clone();
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let _lock = InstanceWriteLock::acquire(&pool).await?;
+                acquired.notify_one();
+                pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok::<(), OntologyError>(())
+            })
+        };
+        acquired.notified().await;
+        holder.abort();
+        assert!(
+            holder
+                .await
+                .expect_err("holder is cancelled")
+                .is_cancelled()
+        );
+
+        let schema = SchemaDocument {
+            schema_version: 1,
+            object_types: Vec::new(),
+            link_types: Vec::new(),
+        };
+        let revision = PublishedRevision {
+            id: revision_id(&schema)?,
+            schema,
+        };
+        let repository = SqlxOntologyRepository::new(pool);
+        timeout(
+            Duration::from_secs(2),
+            repository.publish_revision(revision),
+        )
+        .await
+        .map_err(|_| "named lock remained held after task cancellation")??;
+        Ok(())
     }
 }

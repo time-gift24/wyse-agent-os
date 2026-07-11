@@ -480,7 +480,11 @@ impl OntologyService {
         revision_id: &RevisionId,
     ) -> Result<(), OntologyError> {
         self.load_revision(revision_id).await?;
-        self.repository.put_tag(name, revision_id).await
+        if name == &TagName::online() {
+            self.repository.move_online_tag(revision_id).await
+        } else {
+            self.repository.put_tag(name, revision_id).await
+        }
     }
 
     /// Resolves a tag to its target revision.
@@ -537,14 +541,18 @@ impl OntologyService {
             values: request.values,
             version: 1,
         };
-        self.validate_object_write(&request.schema_ref, &candidate)
+        let online_revision_id = self
+            .validate_object_write(&request.schema_ref, &candidate)
             .await?;
         self.repository
-            .create_object(NewObjectRecord {
-                id: candidate.id,
-                object_type_id: candidate.object_type_id,
-                values: candidate.values,
-            })
+            .create_object(
+                NewObjectRecord {
+                    id: candidate.id,
+                    object_type_id: candidate.object_type_id,
+                    values: candidate.values,
+                },
+                &online_revision_id,
+            )
             .await
     }
 
@@ -612,9 +620,12 @@ impl OntologyService {
             values: request.values,
             ..current
         };
-        self.validate_object_write(&request.schema_ref, &candidate)
+        let online_revision_id = self
+            .validate_object_write(&request.schema_ref, &candidate)
             .await?;
-        self.repository.replace_object(candidate).await
+        self.repository
+            .replace_object(candidate, &online_revision_id)
+            .await
     }
 
     /// Deletes an object, optionally deleting all incident links atomically.
@@ -631,9 +642,10 @@ impl OntologyService {
         force: bool,
     ) -> Result<(), OntologyError> {
         self.resolve_schema(&schema_ref).await?;
-        self.resolve_schema(&SchemaRef::Tag(TagName::online()))
-            .await?;
-        self.repository.delete_object(id, version, force).await
+        let (online_revision_id, _) = self.resolve_online_schema().await?;
+        self.repository
+            .delete_object(id, version, force, &online_revision_id)
+            .await
     }
 
     /// Creates a link after validating endpoints and cardinality in both schemas.
@@ -649,7 +661,7 @@ impl OntologyService {
             target_object_id: request.target_object_id,
             version: 1,
         };
-        let constraints = self
+        let (constraints, online_revision_id) = self
             .validate_link_write(&request.schema_ref, &candidate)
             .await?;
         self.repository
@@ -661,6 +673,7 @@ impl OntologyService {
                     target_object_id: candidate.target_object_id,
                 },
                 &constraints,
+                &online_revision_id,
             )
             .await
     }
@@ -726,11 +739,11 @@ impl OntologyService {
             target_object_id: request.target_object_id,
             ..current
         };
-        let constraints = self
+        let (constraints, online_revision_id) = self
             .validate_link_write(&request.schema_ref, &candidate)
             .await?;
         self.repository
-            .replace_link_with_cardinality(candidate, &constraints)
+            .replace_link_with_cardinality(candidate, &constraints, &online_revision_id)
             .await
     }
 
@@ -747,33 +760,31 @@ impl OntologyService {
         version: u64,
     ) -> Result<(), OntologyError> {
         self.resolve_schema(&schema_ref).await?;
-        self.resolve_schema(&SchemaRef::Tag(TagName::online()))
-            .await?;
-        self.repository.delete_link(id, version).await
+        let (online_revision_id, _) = self.resolve_online_schema().await?;
+        self.repository
+            .delete_link(id, version, &online_revision_id)
+            .await
     }
 
     async fn validate_object_write(
         &self,
         schema_ref: &SchemaRef,
         candidate: &ObjectRecord,
-    ) -> Result<(), OntologyError> {
+    ) -> Result<RevisionId, OntologyError> {
         let requested = self.resolve_schema(schema_ref).await?;
-        let online = self
-            .resolve_schema(&SchemaRef::Tag(TagName::online()))
-            .await?;
+        let (online_revision_id, online) = self.resolve_online_schema().await?;
         validate_object_in_schema(&requested, candidate)?;
-        validate_object_in_schema(&online, candidate)
+        validate_object_in_schema(&online, candidate)?;
+        Ok(online_revision_id)
     }
 
     async fn validate_link_write(
         &self,
         schema_ref: &SchemaRef,
         candidate: &LinkRecord,
-    ) -> Result<Vec<LinkCardinalityConstraint>, OntologyError> {
+    ) -> Result<(Vec<LinkCardinalityConstraint>, RevisionId), OntologyError> {
         let requested = self.resolve_schema(schema_ref).await?;
-        let online = self
-            .resolve_schema(&SchemaRef::Tag(TagName::online()))
-            .await?;
+        let (online_revision_id, online) = self.resolve_online_schema().await?;
         let source = self
             .repository
             .get_object(candidate.source_object_id)
@@ -788,10 +799,24 @@ impl OntologyService {
             .ok_or(OntologyError::ObjectMissing {
                 id: candidate.target_object_id,
             })?;
-        Ok(vec![
-            validate_link_in_schema(&requested, candidate, &source, &target)?,
-            validate_link_in_schema(&online, candidate, &source, &target)?,
-        ])
+        Ok((
+            vec![
+                validate_link_in_schema(&requested, candidate, &source, &target)?,
+                validate_link_in_schema(&online, candidate, &source, &target)?,
+            ],
+            online_revision_id,
+        ))
+    }
+
+    async fn resolve_online_schema(&self) -> Result<(RevisionId, SchemaDocument), OntologyError> {
+        let name = TagName::online();
+        let revision_id = self
+            .repository
+            .get_tag(&name)
+            .await?
+            .ok_or(OntologyError::TagMissing { name })?;
+        let revision = self.load_revision(&revision_id).await?;
+        Ok((revision_id, revision.schema))
     }
 
     async fn load_revision(&self, id: &RevisionId) -> Result<PublishedRevision, OntologyError> {
@@ -996,6 +1021,24 @@ mod tests {
         publish_writes: AtomicUsize,
     }
 
+    impl MemoryRepository {
+        fn ensure_online_revision(&self, expected: &RevisionId) -> Result<(), OntologyError> {
+            let name = TagName::online();
+            let actual = self
+                .tags
+                .lock()
+                .expect("memory repository mutex is not poisoned")
+                .get(&name)
+                .cloned()
+                .ok_or(OntologyError::TagMissing { name })?;
+            if actual == *expected {
+                Ok(())
+            } else {
+                Err(OntologyError::OnlineRevisionChanged)
+            }
+        }
+    }
+
     fn ensure_cardinality<'a>(
         links: impl Iterator<Item = &'a LinkRecord>,
         candidate: &LinkRecord,
@@ -1095,6 +1138,37 @@ mod tests {
             Ok(())
         }
 
+        async fn move_online_tag(&self, revision_id: &RevisionId) -> Result<(), OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
+            let revision = self
+                .revisions
+                .lock()
+                .expect("memory repository mutex is not poisoned")
+                .get(revision_id)
+                .cloned()
+                .ok_or_else(|| OntologyError::RevisionMissing {
+                    id: revision_id.clone(),
+                })?;
+            let instances = self
+                .instances
+                .lock()
+                .expect("memory repository mutex is not poisoned");
+            crate::validate_schema_instances(
+                &revision.schema,
+                &instances.objects.values().cloned().collect::<Vec<_>>(),
+                &instances.links.values().cloned().collect::<Vec<_>>(),
+            )?;
+            drop(instances);
+            self.tags
+                .lock()
+                .expect("memory repository mutex is not poisoned")
+                .insert(TagName::online(), revision.id);
+            Ok(())
+        }
+
         async fn get_tag(&self, name: &TagName) -> Result<Option<RevisionId>, OntologyError> {
             Ok(self
                 .tags
@@ -1129,11 +1203,13 @@ mod tests {
         async fn create_object(
             &self,
             object: NewObjectRecord,
+            online_revision_id: &RevisionId,
         ) -> Result<ObjectRecord, OntologyError> {
             let _write_gate = self
                 .write_gate
                 .lock()
                 .expect("memory repository mutex is not poisoned");
+            self.ensure_online_revision(online_revision_id)?;
             let record = ObjectRecord {
                 id: object.id,
                 object_type_id: object.object_type_id,
@@ -1189,11 +1265,13 @@ mod tests {
         async fn replace_object(
             &self,
             object: ObjectRecord,
+            online_revision_id: &RevisionId,
         ) -> Result<ObjectRecord, OntologyError> {
             let _write_gate = self
                 .write_gate
                 .lock()
                 .expect("memory repository mutex is not poisoned");
+            self.ensure_online_revision(online_revision_id)?;
             let mut instances = self
                 .instances
                 .lock()
@@ -1217,11 +1295,13 @@ mod tests {
             id: ObjectId,
             version: u64,
             force: bool,
+            online_revision_id: &RevisionId,
         ) -> Result<(), OntologyError> {
             let _write_gate = self
                 .write_gate
                 .lock()
                 .expect("memory repository mutex is not poisoned");
+            self.ensure_online_revision(online_revision_id)?;
             let mut instances = self
                 .instances
                 .lock()
@@ -1252,11 +1332,13 @@ mod tests {
             &self,
             link: NewLinkRecord,
             constraints: &[LinkCardinalityConstraint],
+            online_revision_id: &RevisionId,
         ) -> Result<LinkRecord, OntologyError> {
             let _write_gate = self
                 .write_gate
                 .lock()
                 .expect("memory repository mutex is not poisoned");
+            self.ensure_online_revision(online_revision_id)?;
             let record = LinkRecord {
                 id: link.id,
                 link_type_id: link.link_type_id,
@@ -1320,11 +1402,13 @@ mod tests {
             &self,
             link: LinkRecord,
             constraints: &[LinkCardinalityConstraint],
+            online_revision_id: &RevisionId,
         ) -> Result<LinkRecord, OntologyError> {
             let _write_gate = self
                 .write_gate
                 .lock()
                 .expect("memory repository mutex is not poisoned");
+            self.ensure_online_revision(online_revision_id)?;
             let mut instances = self
                 .instances
                 .lock()
@@ -1352,11 +1436,17 @@ mod tests {
             Ok(updated)
         }
 
-        async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError> {
+        async fn delete_link(
+            &self,
+            id: LinkId,
+            version: u64,
+            online_revision_id: &RevisionId,
+        ) -> Result<(), OntologyError> {
             let _write_gate = self
                 .write_gate
                 .lock()
                 .expect("memory repository mutex is not poisoned");
+            self.ensure_online_revision(online_revision_id)?;
             let mut instances = self
                 .instances
                 .lock()
@@ -1446,6 +1536,45 @@ mod tests {
 
         assert_eq!(repository.snapshot_reads.load(Ordering::SeqCst), 0);
         assert_eq!(repository.publish_writes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn moving_online_rejects_a_revision_incompatible_with_existing_instances() {
+        let (service, repository) = service_with_object(json!({"age":42})).await;
+        let current = service
+            .publish(&DraftName::try_from("main".to_owned()).expect("valid draft name"))
+            .await
+            .expect("current schema can be published");
+        service
+            .put_tag(&TagName::online(), &current.id)
+            .await
+            .expect("current schema can become online");
+
+        let incompatible_schema = SchemaDocument {
+            schema_version: 1,
+            object_types: Vec::new(),
+            link_types: Vec::new(),
+        };
+        let incompatible = PublishedRevision {
+            id: revision_id(&incompatible_schema).expect("schema has a revision id"),
+            schema: incompatible_schema,
+        };
+        repository
+            .insert_revision(incompatible.clone())
+            .await
+            .expect("test setup stores immutable revision");
+
+        assert!(matches!(
+            service.put_tag(&TagName::online(), &incompatible.id).await,
+            Err(OntologyError::PublishInvalid { .. })
+        ));
+        assert_eq!(
+            service
+                .get_tag(&TagName::online())
+                .await
+                .expect("online tag remains available"),
+            current.id
+        );
     }
 
     #[tokio::test]

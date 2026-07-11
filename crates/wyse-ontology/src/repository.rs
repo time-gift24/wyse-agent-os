@@ -225,6 +225,14 @@ pub trait OntologyRepository: Send + Sync {
     /// Returns an ontology error when persistence fails.
     async fn put_tag(&self, name: &TagName, revision_id: &RevisionId) -> Result<(), OntologyError>;
 
+    /// Validates all current instances then moves the `online` tag atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::PublishInvalid`] when an existing instance does
+    /// not satisfy the target revision, or an ontology error when persistence fails.
+    async fn move_online_tag(&self, revision_id: &RevisionId) -> Result<(), OntologyError>;
+
     /// Resolves a tag to its revision identity.
     ///
     /// # Errors
@@ -254,7 +262,11 @@ pub trait OntologyRepository: Send + Sync {
     /// # Errors
     ///
     /// Returns an ontology error when persistence fails.
-    async fn create_object(&self, object: NewObjectRecord) -> Result<ObjectRecord, OntologyError>;
+    async fn create_object(
+        &self,
+        object: NewObjectRecord,
+        online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError>;
 
     /// Loads an object by identity.
     ///
@@ -280,7 +292,11 @@ pub trait OntologyRepository: Send + Sync {
     /// # Errors
     ///
     /// Returns an ontology error when persistence fails.
-    async fn replace_object(&self, object: ObjectRecord) -> Result<ObjectRecord, OntologyError>;
+    async fn replace_object(
+        &self,
+        object: ObjectRecord,
+        online_revision_id: &RevisionId,
+    ) -> Result<ObjectRecord, OntologyError>;
 
     /// Deletes an object, optionally deleting its links too.
     ///
@@ -292,6 +308,7 @@ pub trait OntologyRepository: Send + Sync {
         id: ObjectId,
         version: u64,
         force: bool,
+        online_revision_id: &RevisionId,
     ) -> Result<(), OntologyError>;
 
     /// Atomically checks every cardinality constraint and persists a new link.
@@ -303,6 +320,7 @@ pub trait OntologyRepository: Send + Sync {
         &self,
         link: NewLinkRecord,
         constraints: &[LinkCardinalityConstraint],
+        online_revision_id: &RevisionId,
     ) -> Result<LinkRecord, OntologyError>;
 
     /// Loads a link by identity.
@@ -332,6 +350,7 @@ pub trait OntologyRepository: Send + Sync {
         &self,
         link: LinkRecord,
         constraints: &[LinkCardinalityConstraint],
+        online_revision_id: &RevisionId,
     ) -> Result<LinkRecord, OntologyError>;
 
     /// Deletes a link conditionally on its version.
@@ -339,7 +358,12 @@ pub trait OntologyRepository: Send + Sync {
     /// # Errors
     ///
     /// Returns an ontology error when persistence fails.
-    async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError>;
+    async fn delete_link(
+        &self,
+        id: LinkId,
+        version: u64,
+        online_revision_id: &RevisionId,
+    ) -> Result<(), OntologyError>;
 }
 
 #[cfg(test)]

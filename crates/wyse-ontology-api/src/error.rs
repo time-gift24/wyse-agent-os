@@ -54,7 +54,8 @@ impl IntoResponse for ApiError {
                 }
                 OntologyError::DraftConflict { .. }
                 | OntologyError::ObjectVersionConflict { .. }
-                | OntologyError::LinkVersionConflict { .. } => (
+                | OntologyError::LinkVersionConflict { .. }
+                | OntologyError::OnlineRevisionChanged => (
                     StatusCode::PRECONDITION_FAILED,
                     "precondition_failed",
                     None,
