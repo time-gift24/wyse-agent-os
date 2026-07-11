@@ -1,13 +1,10 @@
 # wyse-agent-builtin
 
+- This crate is library-only; composition roots own configuration and invocation.
+- Callers inject the `AgentId`, `Arc<dyn AgentStore>`,
+  `Arc<dyn EventStreamBus>`, and `Arc<dyn LlmProvider>` into
+  `build_default_agent`.
+- The helper performs no filesystem-backend or retained-log composition; Web
+  supplies the same logical Agent store used by its `StoreEventStreamBus`.
 - `ModelId` is always `provider:model`.
-- `simple_agent` reads provider keys and raw model names from `./config.toml`.
-  Commit only `config.example.toml`; `/config.toml` remains ignored. Never log keys.
-- Binary construction creates concrete configured providers and injects them into
-  `LlmProviderManager`; the manager only registers and looks up providers.
-- Binaries subscribe through `EventStreamBus` and write complete NDJSON
-  `StreamEnvelope` values; do not hide reasoning or metadata.
-- Keep provider dispatch concrete in `default_agent`; add a registry only when
-  more than the current direct match requires one.
-- `simple_agent` is intentionally no-tool and one-shot. Add tools or REPL
-  behavior only in a separately approved executable.
+- Keep provider dispatch concrete in `default_agent`; add a registry only when the direct match no longer suffices.
