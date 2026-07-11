@@ -803,6 +803,19 @@ impl OntologyRepository for MemoryRepository {
             .insert(revision.id.clone(), revision);
         Ok(())
     }
+    async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
+        wyse_ontology::validate_published_revision(&revision)?;
+        let instances = self.instances.lock().map_err(|_| repository_error())?;
+        let objects = instances.objects.values().cloned().collect::<Vec<_>>();
+        let links = instances.links.values().cloned().collect::<Vec<_>>();
+        drop(instances);
+        wyse_ontology::validate_schema_instances(&revision.schema, &objects, &links)?;
+        self.revisions
+            .lock()
+            .map_err(|_| repository_error())?
+            .insert(revision.id.clone(), revision);
+        Ok(())
+    }
     async fn get_revision(
         &self,
         id: &RevisionId,

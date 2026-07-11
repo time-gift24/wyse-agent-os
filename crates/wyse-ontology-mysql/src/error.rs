@@ -20,6 +20,12 @@ pub(crate) enum MySqlOntologyRepositoryError {
         /// Domain value that failed validation.
         kind: &'static str,
     },
+    /// The shared instance-write advisory lock could not be acquired.
+    #[error("could not acquire the shared instance-write lock")]
+    InstanceLockUnavailable,
+    /// The shared instance-write advisory lock could not be released.
+    #[error("could not release the shared instance-write lock")]
+    InstanceLockReleaseFailed,
     /// The database operation failed.
     #[error("mysql operation failed")]
     Sqlx(#[source] sqlx::Error),

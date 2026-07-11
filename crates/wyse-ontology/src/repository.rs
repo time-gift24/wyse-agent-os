@@ -1,12 +1,14 @@
 //! Persistence contract for published schemas and shared instances.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::{
     Cardinality, LinkId, LinkTypeId, ObjectId, ObjectTypeId, OntologyError, RevisionId,
-    SchemaDocument, TagName,
+    SchemaDocument, TagName, revision_id, validate_object_values,
 };
 
 /// A published immutable schema revision.
@@ -16,6 +18,89 @@ pub struct PublishedRevision {
     pub id: RevisionId,
     /// Validated schema body stored for this revision.
     pub schema: SchemaDocument,
+}
+
+/// Validates that a revision's identity is the canonical digest of its schema.
+///
+/// # Errors
+///
+/// Returns a schema validation error when the schema is invalid, or
+/// [`OntologyError::RevisionIdentityMismatch`] when the supplied identity does
+/// not equal the canonical schema digest.
+pub fn validate_published_revision(revision: &PublishedRevision) -> Result<(), OntologyError> {
+    let expected = revision_id(&revision.schema)?;
+    if expected == revision.id {
+        Ok(())
+    } else {
+        Err(OntologyError::RevisionIdentityMismatch {
+            expected,
+            actual: revision.id.clone(),
+        })
+    }
+}
+
+/// Validates all shared instances against a schema revision candidate.
+///
+/// # Errors
+///
+/// Returns [`OntologyError::PublishInvalid`] when an object or link does not
+/// satisfy `schema`.
+pub fn validate_schema_instances(
+    schema: &SchemaDocument,
+    objects: &[ObjectRecord],
+    links: &[LinkRecord],
+) -> Result<(), OntologyError> {
+    let mut diagnostics = Vec::new();
+    let objects_by_id: HashMap<ObjectId, &ObjectRecord> =
+        objects.iter().map(|object| (object.id, object)).collect();
+
+    for object in objects {
+        let Some(object_type) = schema
+            .object_types
+            .iter()
+            .find(|object_type| object_type.id == object.object_type_id)
+        else {
+            diagnostics.push(format!("object {} has an unknown object type", object.id));
+            continue;
+        };
+        if let Err(OntologyError::ValueInvalid {
+            diagnostics: errors,
+        }) = validate_object_values(&object_type.properties, &object.values)
+        {
+            diagnostics.extend(
+                errors
+                    .into_iter()
+                    .map(|error| format!("object {}: {error}", object.id)),
+            );
+        }
+    }
+
+    for link in links {
+        let Some(link_type) = schema
+            .link_types
+            .iter()
+            .find(|link_type| link_type.id == link.link_type_id)
+        else {
+            diagnostics.push(format!("link {} has an unknown link type", link.id));
+            continue;
+        };
+        match objects_by_id.get(&link.source_object_id) {
+            Some(source) if source.object_type_id == link_type.source_object_type_id => {}
+            Some(_) => diagnostics.push(format!("link {} has a source of the wrong type", link.id)),
+            None => diagnostics.push(format!("link {} has a missing source object", link.id)),
+        }
+        match objects_by_id.get(&link.target_object_id) {
+            Some(target) if target.object_type_id == link_type.target_object_type_id => {}
+            Some(_) => diagnostics.push(format!("link {} has a target of the wrong type", link.id)),
+            None => diagnostics.push(format!("link {} has a missing target object", link.id)),
+        }
+    }
+
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        Err(OntologyError::PublishInvalid { diagnostics })
+    }
 }
 
 /// A stored object instance.
@@ -104,6 +189,17 @@ pub trait OntologyRepository: Send + Sync {
     ///
     /// Returns an ontology error when persistence fails.
     async fn insert_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError>;
+
+    /// Validates every current instance and atomically inserts a revision.
+    ///
+    /// Implementations must linearize this operation with all object and link
+    /// writes, so an instance cannot be committed between validation and insert.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OntologyError::PublishInvalid`] when an existing instance does
+    /// not satisfy the revision, or an ontology error when persistence fails.
+    async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError>;
 
     /// Loads a revision by its content identity.
     ///
@@ -244,4 +340,29 @@ pub trait OntologyRepository: Send + Sync {
     ///
     /// Returns an ontology error when persistence fails.
     async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PublishedRevision, validate_published_revision};
+    use crate::{ObjectType, ObjectTypeId, RevisionId, SchemaDocument};
+
+    #[test]
+    fn published_revision_rejects_an_id_that_does_not_match_its_schema() {
+        let revision = PublishedRevision {
+            id: RevisionId::try_from("0".repeat(64)).expect("syntactically valid revision id"),
+            schema: SchemaDocument {
+                schema_version: 1,
+                object_types: vec![ObjectType {
+                    id: ObjectTypeId::new(),
+                    name: "person".to_owned(),
+                    description: String::new(),
+                    properties: Vec::new(),
+                }],
+                link_types: Vec::new(),
+            },
+        };
+
+        assert!(validate_published_revision(&revision).is_err());
+    }
 }

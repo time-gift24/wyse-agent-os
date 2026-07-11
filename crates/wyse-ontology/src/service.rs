@@ -1,6 +1,6 @@
 //! Pure ontology schema use cases.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
@@ -442,14 +442,11 @@ impl OntologyService {
     pub async fn publish(&self, name: &DraftName) -> Result<PublishedRevision, OntologyError> {
         let draft = self.drafts.load(name).await?;
         draft.schema.validate()?;
-        let snapshot = self.repository.schema_validation_snapshot().await?;
-        validate_schema_instances(&draft.schema, &snapshot.objects, &snapshot.links)?;
-
         let revision = PublishedRevision {
             id: revision_id(&draft.schema)?,
             schema: draft.schema,
         };
-        self.repository.insert_revision(revision.clone()).await?;
+        self.repository.publish_revision(revision.clone()).await?;
         Ok(revision)
     }
 
@@ -883,64 +880,6 @@ fn validate_link_in_schema(
     })
 }
 
-fn validate_schema_instances(
-    schema: &SchemaDocument,
-    objects: &[ObjectRecord],
-    links: &[LinkRecord],
-) -> Result<(), OntologyError> {
-    let mut diagnostics = Vec::new();
-    let objects_by_id: HashMap<ObjectId, &ObjectRecord> =
-        objects.iter().map(|object| (object.id, object)).collect();
-
-    for object in objects {
-        let Some(object_type) = schema
-            .object_types
-            .iter()
-            .find(|object_type| object_type.id == object.object_type_id)
-        else {
-            diagnostics.push(format!("object {} has an unknown object type", object.id));
-            continue;
-        };
-        if let Err(OntologyError::ValueInvalid {
-            diagnostics: errors,
-        }) = validate_object_values(&object_type.properties, &object.values)
-        {
-            diagnostics.extend(
-                errors
-                    .into_iter()
-                    .map(|error| format!("object {}: {error}", object.id)),
-            );
-        }
-    }
-
-    for link in links {
-        let Some(link_type) = schema
-            .link_types
-            .iter()
-            .find(|link_type| link_type.id == link.link_type_id)
-        else {
-            diagnostics.push(format!("link {} has an unknown link type", link.id));
-            continue;
-        };
-        match objects_by_id.get(&link.source_object_id) {
-            Some(source) if source.object_type_id == link_type.source_object_type_id => {}
-            Some(_) => diagnostics.push(format!("link {} has a source of the wrong type", link.id)),
-            None => diagnostics.push(format!("link {} has a missing source object", link.id)),
-        }
-        match objects_by_id.get(&link.target_object_id) {
-            Some(target) if target.object_type_id == link_type.target_object_type_id => {}
-            Some(_) => diagnostics.push(format!("link {} has a target of the wrong type", link.id)),
-            None => diagnostics.push(format!("link {} has a missing target object", link.id)),
-        }
-    }
-
-    if diagnostics.is_empty() {
-        Ok(())
-    } else {
-        Err(OntologyError::PublishInvalid { diagnostics })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1049,10 +988,12 @@ mod tests {
     }
 
     struct MemoryRepository {
+        write_gate: Mutex<()>,
         instances: Mutex<MemoryInstances>,
         revisions: Mutex<BTreeMap<RevisionId, PublishedRevision>>,
         tags: Mutex<BTreeMap<TagName, RevisionId>>,
         snapshot_reads: AtomicUsize,
+        publish_writes: AtomicUsize,
     }
 
     fn ensure_cardinality<'a>(
@@ -1093,6 +1034,30 @@ mod tests {
                 .lock()
                 .expect("memory repository mutex is not poisoned")
                 .insert(revision.id.clone(), revision);
+            Ok(())
+        }
+
+        async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
+            crate::validate_published_revision(&revision)?;
+            let instances = self
+                .instances
+                .lock()
+                .expect("memory repository mutex is not poisoned");
+            crate::validate_schema_instances(
+                &revision.schema,
+                &instances.objects.values().cloned().collect::<Vec<_>>(),
+                &instances.links.values().cloned().collect::<Vec<_>>(),
+            )?;
+            drop(instances);
+            self.revisions
+                .lock()
+                .expect("memory repository mutex is not poisoned")
+                .insert(revision.id.clone(), revision);
+            self.publish_writes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1165,6 +1130,10 @@ mod tests {
             &self,
             object: NewObjectRecord,
         ) -> Result<ObjectRecord, OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
             let record = ObjectRecord {
                 id: object.id,
                 object_type_id: object.object_type_id,
@@ -1221,6 +1190,10 @@ mod tests {
             &self,
             object: ObjectRecord,
         ) -> Result<ObjectRecord, OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
             let mut instances = self
                 .instances
                 .lock()
@@ -1245,6 +1218,10 @@ mod tests {
             version: u64,
             force: bool,
         ) -> Result<(), OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
             let mut instances = self
                 .instances
                 .lock()
@@ -1276,6 +1253,10 @@ mod tests {
             link: NewLinkRecord,
             constraints: &[LinkCardinalityConstraint],
         ) -> Result<LinkRecord, OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
             let record = LinkRecord {
                 id: link.id,
                 link_type_id: link.link_type_id,
@@ -1340,6 +1321,10 @@ mod tests {
             link: LinkRecord,
             constraints: &[LinkCardinalityConstraint],
         ) -> Result<LinkRecord, OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
             let mut instances = self
                 .instances
                 .lock()
@@ -1368,6 +1353,10 @@ mod tests {
         }
 
         async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError> {
+            let _write_gate = self
+                .write_gate
+                .lock()
+                .expect("memory repository mutex is not poisoned");
             let mut instances = self
                 .instances
                 .lock()
@@ -1411,6 +1400,7 @@ mod tests {
             .await
             .expect("draft can be created");
         let repository = MemoryRepository {
+            write_gate: Mutex::new(()),
             instances: Mutex::new(MemoryInstances {
                 objects: BTreeMap::from([(
                     ObjectId::from(Uuid::from_u128(3)),
@@ -1426,6 +1416,7 @@ mod tests {
             revisions: Mutex::new(BTreeMap::new()),
             tags: Mutex::new(BTreeMap::new()),
             snapshot_reads: AtomicUsize::new(0),
+            publish_writes: AtomicUsize::new(0),
         };
 
         let repository = Arc::new(repository);
@@ -1445,7 +1436,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishing_reads_a_single_validation_snapshot() {
+    async fn publishing_uses_the_repository_atomic_publish_operation() {
         let (service, repository) = service_with_object(json!({"age":42})).await;
 
         service
@@ -1453,7 +1444,8 @@ mod tests {
             .await
             .expect("valid draft can be published");
 
-        assert_eq!(repository.snapshot_reads.load(Ordering::SeqCst), 1);
+        assert_eq!(repository.snapshot_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(repository.publish_writes.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1953,10 +1945,12 @@ mod tests {
         OntologyService::new(
             drafts,
             Arc::new(MemoryRepository {
+                write_gate: Mutex::new(()),
                 instances: Mutex::new(MemoryInstances::default()),
                 revisions: Mutex::new(BTreeMap::new()),
                 tags: Mutex::new(BTreeMap::new()),
                 snapshot_reads: AtomicUsize::new(0),
+                publish_writes: AtomicUsize::new(0),
             }),
         )
     }
@@ -2014,6 +2008,7 @@ mod tests {
             schema: online_schema,
         };
         let repository = Arc::new(MemoryRepository {
+            write_gate: Mutex::new(()),
             instances: Mutex::new(MemoryInstances {
                 objects: objects
                     .into_iter()
@@ -2027,6 +2022,7 @@ mod tests {
             )])),
             tags: Mutex::new(BTreeMap::from([(TagName::online(), online_revision.id)])),
             snapshot_reads: AtomicUsize::new(0),
+            publish_writes: AtomicUsize::new(0),
         });
         OntologyService::new(drafts, repository)
     }

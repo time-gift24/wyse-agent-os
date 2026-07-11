@@ -85,6 +85,7 @@ impl IntoResponse for ApiError {
                 OntologyError::InvalidDraftName
                 | OntologyError::InvalidTagName
                 | OntologyError::InvalidRevisionId
+                | OntologyError::RevisionIdentityMismatch { .. }
                 | OntologyError::InvalidPageLimit { .. } => (
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "invalid_request",

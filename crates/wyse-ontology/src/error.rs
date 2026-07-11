@@ -23,6 +23,14 @@ pub enum OntologyError {
     /// A revision id is not a lowercase SHA-256 digest.
     #[error("revision id must be a 64-character lowercase hexadecimal SHA-256 digest")]
     InvalidRevisionId,
+    /// A revision identity does not match its canonical schema content.
+    #[error("revision id does not match its schema content")]
+    RevisionIdentityMismatch {
+        /// The digest computed from the schema.
+        expected: RevisionId,
+        /// The identity supplied with the revision.
+        actual: RevisionId,
+    },
     /// A schema violates one or more structural invariants.
     #[error("schema is invalid")]
     SchemaInvalid {

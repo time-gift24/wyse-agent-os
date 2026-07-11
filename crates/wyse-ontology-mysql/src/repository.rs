@@ -4,12 +4,13 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use serde_json::{Map, Value};
-use sqlx::{Acquire, MySql, MySqlPool, Row, Transaction};
+use sqlx::{Acquire, MySql, MySqlPool, Row, Transaction, pool::PoolConnection};
 use uuid::Uuid;
 use wyse_ontology::{
     Cardinality, LinkCardinalityConstraint, LinkId, LinkRecord, NewLinkRecord, NewObjectRecord,
     ObjectId, ObjectRecord, ObjectTypeId, OntologyError, OntologyRepository, Page,
     PublishedRevision, RevisionId, SchemaValidationSnapshot, TagName, canonical_schema_bytes,
+    validate_published_revision, validate_schema_instances,
 };
 
 use crate::error::MySqlOntologyRepositoryError;
@@ -18,6 +19,67 @@ use crate::error::MySqlOntologyRepositoryError;
 #[derive(Clone)]
 pub struct SqlxOntologyRepository {
     pool: MySqlPool,
+}
+
+const INSTANCE_WRITE_LOCK: &str = "wyse_ontology_instance_write";
+const INSTANCE_WRITE_LOCK_TIMEOUT_SECONDS: i32 = 10;
+
+struct InstanceWriteLock {
+    connection: PoolConnection<MySql>,
+}
+
+impl InstanceWriteLock {
+    async fn acquire(pool: &MySqlPool) -> Result<Self, OntologyError> {
+        let mut connection = pool.acquire().await.map_err(sqlx_error)?;
+        let acquired: Option<i64> = sqlx::query_scalar("SELECT GET_LOCK(?, ?)")
+            .bind(INSTANCE_WRITE_LOCK)
+            .bind(INSTANCE_WRITE_LOCK_TIMEOUT_SECONDS)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sqlx_error)?;
+        if acquired == Some(1) {
+            Ok(Self { connection })
+        } else {
+            Err(repository_error(
+                MySqlOntologyRepositoryError::InstanceLockUnavailable,
+            ))
+        }
+    }
+
+    fn connection_mut(&mut self) -> &mut PoolConnection<MySql> {
+        &mut self.connection
+    }
+
+    async fn release(mut self) -> Result<(), OntologyError> {
+        let released: Result<Option<i64>, sqlx::Error> =
+            sqlx::query_scalar("SELECT RELEASE_LOCK(?)")
+                .bind(INSTANCE_WRITE_LOCK)
+                .fetch_one(&mut *self.connection)
+                .await;
+        if matches!(&released, Ok(Some(1))) {
+            return Ok(());
+        }
+
+        let _ = self.connection.close().await;
+        match released {
+            Err(source) => Err(sqlx_error(source)),
+            Ok(_) => Err(repository_error(
+                MySqlOntologyRepositoryError::InstanceLockReleaseFailed,
+            )),
+        }
+    }
+}
+
+async fn finish_instance_write<T>(
+    lock: InstanceWriteLock,
+    operation: Result<T, OntologyError>,
+) -> Result<T, OntologyError> {
+    let release = lock.release().await;
+    match (operation, release) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 impl SqlxOntologyRepository {
@@ -31,6 +93,7 @@ impl SqlxOntologyRepository {
 #[async_trait]
 impl OntologyRepository for SqlxOntologyRepository {
     async fn insert_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
+        validate_published_revision(&revision)?;
         let schema_json =
             String::from_utf8(canonical_schema_bytes(&revision.schema)?).map_err(|_| {
                 repository_error(MySqlOntologyRepositoryError::InvalidPersisted {
@@ -49,6 +112,20 @@ impl OntologyRepository for SqlxOntologyRepository {
         .await
         .map_err(sqlx_error)?;
         Ok(())
+    }
+
+    async fn publish_revision(&self, revision: PublishedRevision) -> Result<(), OntologyError> {
+        validate_published_revision(&revision)?;
+        let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
+        let operation = async {
+            let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            let snapshot = schema_validation_snapshot_transaction(&mut transaction).await?;
+            validate_schema_instances(&revision.schema, &snapshot.objects, &snapshot.links)?;
+            insert_revision_transaction(&mut transaction, &revision).await?;
+            transaction.commit().await.map_err(sqlx_error)
+        }
+        .await;
+        finish_instance_write(lock, operation).await
     }
 
     async fn get_revision(
@@ -137,21 +214,28 @@ impl OntologyRepository for SqlxOntologyRepository {
 
     async fn create_object(&self, object: NewObjectRecord) -> Result<ObjectRecord, OntologyError> {
         let values = serde_json::to_string(&object.values).map_err(encode_values_error)?;
-        sqlx::query(
-            "INSERT INTO objects (id, object_type_id, values_json, version) VALUES (?, ?, CAST(? AS JSON), 1)",
-        )
-        .bind(object.id.to_string())
-        .bind(object.object_type_id.to_string())
-        .bind(values)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_error)?;
-        Ok(ObjectRecord {
-            id: object.id,
-            object_type_id: object.object_type_id,
-            values: object.values,
-            version: 1,
-        })
+        let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
+        let operation = async {
+            let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            sqlx::query(
+                "INSERT INTO objects (id, object_type_id, values_json, version) VALUES (?, ?, CAST(? AS JSON), 1)",
+            )
+            .bind(object.id.to_string())
+            .bind(object.object_type_id.to_string())
+            .bind(values)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+            transaction.commit().await.map_err(sqlx_error)?;
+            Ok(ObjectRecord {
+                id: object.id,
+                object_type_id: object.object_type_id,
+                values: object.values,
+                version: 1,
+            })
+        }
+        .await;
+        finish_instance_write(lock, operation).await
     }
 
     async fn get_object(&self, id: ObjectId) -> Result<Option<ObjectRecord>, OntologyError> {
@@ -205,23 +289,30 @@ impl OntologyRepository for SqlxOntologyRepository {
 
     async fn replace_object(&self, object: ObjectRecord) -> Result<ObjectRecord, OntologyError> {
         let values = serde_json::to_string(&object.values).map_err(encode_values_error)?;
-        let result = sqlx::query(
-            "UPDATE objects SET values_json = CAST(? AS JSON), version = version + 1, updated_at = UTC_TIMESTAMP(6) \
-             WHERE id = ? AND version = ?",
-        )
-        .bind(values)
-        .bind(object.id.to_string())
-        .bind(object.version)
-        .execute(&self.pool)
-        .await
-        .map_err(sqlx_error)?;
-        if result.rows_affected() == 0 {
-            return Err(object_write_failure(&self.pool, object.id).await?);
+        let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
+        let operation = async {
+            let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            let result = sqlx::query(
+                "UPDATE objects SET values_json = CAST(? AS JSON), version = version + 1, updated_at = UTC_TIMESTAMP(6) \
+                 WHERE id = ? AND version = ?",
+            )
+            .bind(values)
+            .bind(object.id.to_string())
+            .bind(object.version)
+            .execute(&mut *transaction)
+            .await
+            .map_err(sqlx_error)?;
+            if result.rows_affected() == 0 {
+                return Err(object_write_failure(&self.pool, object.id).await?);
+            }
+            transaction.commit().await.map_err(sqlx_error)?;
+            Ok(ObjectRecord {
+                version: object.version + 1,
+                ..object
+            })
         }
-        Ok(ObjectRecord {
-            version: object.version + 1,
-            ..object
-        })
+        .await;
+        finish_instance_write(lock, operation).await
     }
 
     async fn delete_object(
@@ -230,19 +321,25 @@ impl OntologyRepository for SqlxOntologyRepository {
         version: u64,
         force: bool,
     ) -> Result<(), OntologyError> {
-        if force {
-            return delete_object_force(&self.pool, id, version).await;
+        let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
+        let operation = async {
+            if force {
+                return delete_object_force(lock.connection_mut(), id, version).await;
+            }
+            let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            let result = sqlx::query("DELETE FROM objects WHERE id = ? AND version = ?")
+                .bind(id.to_string())
+                .bind(version)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| map_object_delete_error(id, error))?;
+            if result.rows_affected() == 0 {
+                return Err(object_write_failure(&self.pool, id).await?);
+            }
+            transaction.commit().await.map_err(sqlx_error)
         }
-        let result = sqlx::query("DELETE FROM objects WHERE id = ? AND version = ?")
-            .bind(id.to_string())
-            .bind(version)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| map_object_delete_error(id, error))?;
-        if result.rows_affected() == 0 {
-            return Err(object_write_failure(&self.pool, id).await?);
-        }
-        Ok(())
+        .await;
+        finish_instance_write(lock, operation).await
     }
 
     async fn create_link_with_cardinality(
@@ -304,17 +401,70 @@ impl OntologyRepository for SqlxOntologyRepository {
     }
 
     async fn delete_link(&self, id: LinkId, version: u64) -> Result<(), OntologyError> {
-        let result = sqlx::query("DELETE FROM links WHERE id = ? AND version = ?")
-            .bind(id.to_string())
-            .bind(version)
-            .execute(&self.pool)
-            .await
-            .map_err(sqlx_error)?;
-        if result.rows_affected() == 0 {
-            return Err(link_write_failure(&self.pool, id).await?);
+        let mut lock = InstanceWriteLock::acquire(&self.pool).await?;
+        let operation = async {
+            let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+            let result = sqlx::query("DELETE FROM links WHERE id = ? AND version = ?")
+                .bind(id.to_string())
+                .bind(version)
+                .execute(&mut *transaction)
+                .await
+                .map_err(sqlx_error)?;
+            if result.rows_affected() == 0 {
+                return Err(link_write_failure(&self.pool, id).await?);
+            }
+            transaction.commit().await.map_err(sqlx_error)
         }
-        Ok(())
+        .await;
+        finish_instance_write(lock, operation).await
     }
+}
+
+async fn schema_validation_snapshot_transaction(
+    transaction: &mut Transaction<'_, MySql>,
+) -> Result<SchemaValidationSnapshot, OntologyError> {
+    let objects =
+        sqlx::query("SELECT id, object_type_id, values_json, version FROM objects ORDER BY id")
+            .fetch_all(&mut **transaction)
+            .await
+            .map_err(sqlx_error)?
+            .into_iter()
+            .map(object_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+    let links = sqlx::query(
+        "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links ORDER BY id",
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?
+    .into_iter()
+    .map(link_from_row)
+    .collect::<Result<Vec<_>, _>>()?;
+    Ok(SchemaValidationSnapshot { objects, links })
+}
+
+async fn insert_revision_transaction(
+    transaction: &mut Transaction<'_, MySql>,
+    revision: &PublishedRevision,
+) -> Result<(), OntologyError> {
+    let schema_json =
+        String::from_utf8(canonical_schema_bytes(&revision.schema)?).map_err(|_| {
+            repository_error(MySqlOntologyRepositoryError::InvalidPersisted {
+                kind: "canonical schema UTF-8",
+            })
+        })?;
+    sqlx::query(
+        "INSERT INTO ontology_revisions (revision_id, schema_json, schema_format_version) \
+         VALUES (?, CAST(? AS JSON), ?) \
+         ON DUPLICATE KEY UPDATE revision_id = revision_id",
+    )
+    .bind(revision.id.as_str())
+    .bind(schema_json)
+    .bind(revision.schema.schema_version)
+    .execute(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?;
+    Ok(())
 }
 
 async fn create_link_with_cardinality(
@@ -322,26 +472,31 @@ async fn create_link_with_cardinality(
     link: NewLinkRecord,
     constraints: &[LinkCardinalityConstraint],
 ) -> Result<LinkRecord, OntologyError> {
-    let mut transaction = pool.begin().await.map_err(sqlx_error)?;
-    lock_objects(
-        &mut transaction,
-        [link.source_object_id, link.target_object_id].into_iter(),
-    )
-    .await?;
-    ensure_cardinality(&mut transaction, &link_record(&link), constraints, None).await?;
-    sqlx::query(
-        "INSERT INTO links (id, link_type_id, source_object_id, target_object_id, version) \
-         VALUES (?, ?, ?, ?, 1)",
-    )
-    .bind(link.id.to_string())
-    .bind(link.link_type_id.to_string())
-    .bind(link.source_object_id.to_string())
-    .bind(link.target_object_id.to_string())
-    .execute(&mut *transaction)
-    .await
-    .map_err(sqlx_error)?;
-    transaction.commit().await.map_err(sqlx_error)?;
-    Ok(link_record(&link))
+    let mut lock = InstanceWriteLock::acquire(pool).await?;
+    let operation = async {
+        let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+        lock_objects(
+            &mut transaction,
+            [link.source_object_id, link.target_object_id].into_iter(),
+        )
+        .await?;
+        ensure_cardinality(&mut transaction, &link_record(&link), constraints, None).await?;
+        sqlx::query(
+            "INSERT INTO links (id, link_type_id, source_object_id, target_object_id, version) \
+             VALUES (?, ?, ?, ?, 1)",
+        )
+        .bind(link.id.to_string())
+        .bind(link.link_type_id.to_string())
+        .bind(link.source_object_id.to_string())
+        .bind(link.target_object_id.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        transaction.commit().await.map_err(sqlx_error)?;
+        Ok(link_record(&link))
+    }
+    .await;
+    finish_instance_write(lock, operation).await
 }
 
 async fn replace_link_with_cardinality(
@@ -349,23 +504,25 @@ async fn replace_link_with_cardinality(
     link: LinkRecord,
     constraints: &[LinkCardinalityConstraint],
 ) -> Result<LinkRecord, OntologyError> {
-    let mut transaction = pool.begin().await.map_err(sqlx_error)?;
-    let current = sqlx::query(
+    let mut lock = InstanceWriteLock::acquire(pool).await?;
+    let operation = async {
+        let mut transaction = lock.connection_mut().begin().await.map_err(sqlx_error)?;
+        let current = sqlx::query(
         "SELECT id, link_type_id, source_object_id, target_object_id, version FROM links WHERE id = ? FOR UPDATE",
-    )
-    .bind(link.id.to_string())
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(sqlx_error)?
-    .map(link_from_row)
-    .transpose()?;
-    let Some(current) = current else {
-        return Err(OntologyError::LinkMissing { id: link.id });
-    };
-    if current.version != link.version {
-        return Err(OntologyError::LinkVersionConflict { id: link.id });
-    }
-    lock_objects(
+        )
+        .bind(link.id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?
+        .map(link_from_row)
+        .transpose()?;
+        let Some(current) = current else {
+            return Err(OntologyError::LinkMissing { id: link.id });
+        };
+        if current.version != link.version {
+            return Err(OntologyError::LinkVersionConflict { id: link.id });
+        }
+        lock_objects(
         &mut transaction,
         [
             current.source_object_id,
@@ -374,26 +531,29 @@ async fn replace_link_with_cardinality(
             link.target_object_id,
         ]
         .into_iter(),
-    )
-    .await?;
-    ensure_cardinality(&mut transaction, &link, constraints, Some(link.id)).await?;
-    sqlx::query(
+        )
+        .await?;
+        ensure_cardinality(&mut transaction, &link, constraints, Some(link.id)).await?;
+        sqlx::query(
         "UPDATE links SET source_object_id = ?, target_object_id = ?, version = version + 1, updated_at = UTC_TIMESTAMP(6) \
          WHERE id = ? AND version = ?",
-    )
-    .bind(link.source_object_id.to_string())
-    .bind(link.target_object_id.to_string())
-    .bind(link.id.to_string())
-    .bind(link.version)
-    .execute(&mut *transaction)
-    .await
-    .map_err(sqlx_error)?;
-    let updated = LinkRecord {
-        version: link.version + 1,
-        ..link
-    };
-    transaction.commit().await.map_err(sqlx_error)?;
-    Ok(updated)
+        )
+        .bind(link.source_object_id.to_string())
+        .bind(link.target_object_id.to_string())
+        .bind(link.id.to_string())
+        .bind(link.version)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_error)?;
+        let updated = LinkRecord {
+            version: link.version + 1,
+            ..link
+        };
+        transaction.commit().await.map_err(sqlx_error)?;
+        Ok(updated)
+    }
+    .await;
+    finish_instance_write(lock, operation).await
 }
 
 fn link_record(link: &NewLinkRecord) -> LinkRecord {
@@ -484,11 +644,12 @@ async fn ensure_cardinality(
 }
 
 async fn delete_object_force(
-    pool: &MySqlPool,
+    connection: &mut PoolConnection<MySql>,
     id: ObjectId,
     version: u64,
 ) -> Result<(), OntologyError> {
-    let mut transaction = pool.begin().await.map_err(sqlx_error)?;
+    let mut transaction = connection.begin().await.map_err(sqlx_error)?;
+    lock_objects(&mut transaction, std::iter::once(id)).await?;
     sqlx::query("DELETE FROM links WHERE source_object_id = ? OR target_object_id = ?")
         .bind(id.to_string())
         .bind(id.to_string())
@@ -570,7 +731,13 @@ fn revision_from_row(row: sqlx::mysql::MySqlRow) -> Result<PublishedRevision, On
             source,
         })
     })?;
-    Ok(PublishedRevision { id, schema })
+    let revision = PublishedRevision { id, schema };
+    validate_published_revision(&revision).map_err(|_| {
+        repository_error(MySqlOntologyRepositoryError::InvalidPersisted {
+            kind: "revision schema or identity",
+        })
+    })?;
+    Ok(revision)
 }
 
 fn object_from_row(row: sqlx::mysql::MySqlRow) -> Result<ObjectRecord, OntologyError> {

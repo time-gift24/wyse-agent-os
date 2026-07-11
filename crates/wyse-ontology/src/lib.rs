@@ -19,6 +19,7 @@ pub use id::{
 pub use repository::{
     LinkCardinalityConstraint, LinkRecord, NewLinkRecord, NewObjectRecord, ObjectRecord,
     OntologyRepository, Page, PublishedRevision, SchemaValidationSnapshot,
+    validate_published_revision, validate_schema_instances,
 };
 pub use schema::{Cardinality, LinkType, ObjectType, PropertyType, SchemaDocument, ValueType};
 pub use service::{CreateLink, CreateObject, OntologyService, ReplaceLink, ReplaceObject};
