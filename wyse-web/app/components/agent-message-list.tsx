@@ -86,7 +86,11 @@ export function AgentMessageList({
               </MessageContent>
               <time
                 dateTime={message.timestamp}
-                className="px-1 text-[0.625rem] text-muted-foreground"
+                className={
+                  isUser
+                    ? "self-end px-1 text-[0.625rem] text-muted-foreground"
+                    : "px-1 text-[0.625rem] text-muted-foreground"
+                }
               >
                 {dateTimeFormat.format(new Date(message.timestamp))}
               </time>

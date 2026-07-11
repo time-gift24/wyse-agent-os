@@ -94,4 +94,31 @@ describe("AgentMessageList", () => {
     expect(html).toContain("流式输出中")
     expect(html.indexOf("正在思考")).toBeLessThan(html.indexOf("partial"))
   })
+
+  it("aligns a user message timestamp with the user bubble", () => {
+    const html = renderToStaticMarkup(
+      <MessageScrollerProvider>
+        <MessageScroller>
+          <AgentMessageList
+            messages={[
+              {
+                agentId: "agent-1",
+                businessSeq: 1,
+                role: "user",
+                text: "Hello",
+                json: null,
+                reasoning: null,
+                toolCalls: [],
+                timestamp: "2026-07-12T00:00:00Z",
+              },
+            ]}
+            drafts={{}}
+            tools={{}}
+          />
+        </MessageScroller>
+      </MessageScrollerProvider>
+    )
+
+    expect(html).toMatch(/<time[^>]*self-end/)
+  })
 })
