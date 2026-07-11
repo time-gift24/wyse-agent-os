@@ -413,13 +413,16 @@ async fn delete_link_type(
 async fn publish_draft(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<Json<RevisionResponse>, ApiError> {
-    Ok(Json(
-        state
-            .service
-            .publish(&parse_draft_name(name)?)
-            .await?
-            .into(),
+) -> Result<(StatusCode, Json<RevisionResponse>), ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .service
+                .publish(&parse_draft_name(name)?)
+                .await?
+                .into(),
+        ),
     ))
 }
 

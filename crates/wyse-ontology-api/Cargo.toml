@@ -16,6 +16,7 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 tower.workspace = true
 wyse-filesystem.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
