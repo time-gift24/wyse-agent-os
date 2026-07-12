@@ -80,3 +80,10 @@ export function nextDisplayedConfig(
 ): ModelConfig {
   return accepted ? requested : current
 }
+
+export function pendingConfigAfterAcceptance(
+  pending: ModelConfig | null,
+  accepted: ModelConfig
+): ModelConfig | null {
+  return pending === accepted ? null : pending
+}

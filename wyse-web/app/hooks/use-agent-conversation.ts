@@ -19,6 +19,7 @@ import {
 import {
   configForModel,
   configForTemplate,
+  pendingConfigAfterAcceptance,
   withThinkingLevel,
   type AgentTemplateView,
   type ModelConfig,
@@ -305,7 +306,9 @@ export function useAgentConversation(): AgentConversation {
           client.generation === selectionGeneration.current
         ) {
           setAcceptedModelConfig(selectedConfig)
-          setRequestedModelConfig(null)
+          setRequestedModelConfig((pendingConfig) =>
+            pendingConfigAfterAcceptance(pendingConfig, selectedConfig)
+          )
         }
         return true
       } catch (error) {

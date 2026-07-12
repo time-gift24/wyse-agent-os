@@ -3,6 +3,7 @@ import {
   configForModel,
   configForTemplate,
   nextDisplayedConfig,
+  pendingConfigAfterAcceptance,
   schemaDefault,
   supportsThinkingControls,
   withThinkingLevel,
@@ -35,6 +36,14 @@ describe("model configuration helpers", () => {
     const requested = { model: "deepseek:test", parameters: {} }
     expect(nextDisplayedConfig(current, requested, false)).toEqual(current)
     expect(nextDisplayedConfig(current, requested, true)).toEqual(requested)
+  })
+
+  it("keeps a newer staged config after an earlier submission is accepted", () => {
+    const submitted = { model: "openai:submitted", parameters: {} }
+    const newer = { model: "openai:newer", parameters: {} }
+
+    expect(pendingConfigAfterAcceptance(submitted, submitted)).toBeNull()
+    expect(pendingConfigAfterAcceptance(newer, submitted)).toBe(newer)
   })
 
   it("displays the selected Agent template configuration before creation", () => {
