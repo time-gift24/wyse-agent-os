@@ -117,7 +117,7 @@ export function ChatHistory({
             variants={backdropVariants}
             transition={{ duration: reduceMotion ? 0 : 0.15 }}
             onClick={onClose}
-            className="absolute inset-0 bg-wyse-ink/5"
+            className="absolute inset-0 bg-transparent"
             aria-hidden="true"
           />
 
@@ -135,12 +135,13 @@ export function ChatHistory({
               ease: [0.16, 1, 0.3, 1] as const,
             }}
             className={cn(
-              "wyse-paper-surface wyse-history-drawer",
-              "flex flex-col gap-3 p-3",
-              "max-h-[calc(100dvh-9rem)] rounded-5xl"
+              "wyse-history-drawer",
+              "flex flex-col gap-2 overflow-hidden",
+              "rounded-2xl border border-wyse-line bg-wyse-bg-paper shadow-wyse-soft",
+              "max-h-[calc(100dvh-9rem)]"
             )}
           >
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between px-3 pt-2.5">
               <div className="flex items-center gap-1.5 text-muted-foreground">
                 <HistoryIcon className="size-3" aria-hidden="true" />
                 <span className="text-[10px] font-medium">
@@ -168,38 +169,43 @@ export function ChatHistory({
                     behavior: reduceMotion ? "auto" : "smooth",
                   })
                 }}
-                className="group flex items-center gap-2 rounded-xl bg-secondary/50 px-2.5 py-2 text-left transition-colors hover:bg-secondary/70"
+                className="mx-2.5 flex items-center gap-2 rounded-lg bg-secondary/50 px-2.5 py-2 text-left transition-colors hover:bg-secondary/70"
               >
-                <span
-                  className={cn(
-                    "size-1.5 shrink-0 rounded-full bg-wyse-action",
-                    isRunning && "animate-pulse"
-                  )}
-                />
+                <div className="flex flex-col items-center gap-1">
+                  <span
+                    className={cn(
+                      "size-1.5 shrink-0 rounded-full bg-wyse-action",
+                      isRunning && "animate-pulse"
+                    )}
+                  />
+                  <span className="w-px flex-1 bg-wyse-line/50" />
+                </div>
                 <div className="flex min-w-0 flex-1 flex-col">
                   <span className="text-[9px] font-medium text-wyse-action">
                     {t("chat.history.activeNow")}
                   </span>
-                  <span className="truncate text-xs text-foreground">
+                  <span className="truncate text-[11px] text-foreground">
                     {currentAgent.title}
                   </span>
                 </div>
               </button>
             ) : null}
 
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium text-wyse-action hover:bg-wyse-action/5 hover:text-wyse-action"
-              onClick={() => {
-                onNewConversation()
-              }}
-            >
-              <PlusIcon className="size-3" aria-hidden="true" />
-              {t("chat.history.new")}
-            </Button>
+            <div className="px-2.5">
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium text-wyse-action hover:bg-wyse-action/5 hover:text-wyse-action"
+                onClick={() => {
+                  onNewConversation()
+                }}
+              >
+                <PlusIcon className="size-3" aria-hidden="true" />
+                {t("chat.history.new")}
+              </Button>
+            </div>
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2.5 pb-2.5">
               <AnimatedList
                 staggerDelay={0.025}
                 maxDelay={0.18}
@@ -225,15 +231,15 @@ export function ChatHistory({
                         className={cn(
                           "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
                           isCurrent
-                            ? "bg-secondary/70"
+                            ? "bg-secondary/50"
                             : isMockItem
                               ? "opacity-50"
-                              : "hover:bg-secondary/40"
+                              : "hover:bg-secondary/30"
                         )}
                       >
                         <span
                           className={cn(
-                            "truncate text-xs",
+                            "truncate text-[11px]",
                             isCurrent
                               ? "font-medium text-foreground"
                               : "text-foreground/80"
@@ -241,8 +247,7 @@ export function ChatHistory({
                         >
                           {agent.title}
                         </span>
-                        <span className="flex shrink-0 items-center gap-1 text-[9px] text-muted-foreground">
-                          <Clock3Icon className="size-2.5" aria-hidden="true" />
+                        <span className="shrink-0 text-[9px] text-muted-foreground">
                           {formatRelativeTime(
                             agent.lastOpenedAt,
                             i18n.resolvedLanguage ?? "en"
