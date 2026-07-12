@@ -342,9 +342,13 @@ impl HostState {
             Ok(run_id) => run_id,
             Err(error @ AgentError::RunAlreadyActive) => return Err(error.into()),
             Err(error) => {
-                let requires_resume = match hosted.store.load_agent().await {
-                    Ok(state) => state.status == AgentStatus::Running,
-                    Err(_) => true,
+                let requires_resume = tokio::select! {
+                    biased;
+                    state = hosted.store.load_agent() => match state {
+                        Ok(state) => state.status == AgentStatus::Running,
+                        Err(_) => true,
+                    },
+                    () = shutdown.cancelled() => return Err(HostError::HostShuttingDown),
                 };
                 if requires_resume {
                     hosted.mark_needs_resume();
@@ -366,6 +370,9 @@ impl HostState {
         requested: Option<ModelConfig>,
     ) -> Result<Agent, HostError> {
         let state = hosted.store.load_agent().await?;
+        if requested.is_some() && state.status == AgentStatus::Running {
+            return Err(AgentError::RunAlreadyActive.into());
+        }
         match requested {
             None => {
                 let model_config = state

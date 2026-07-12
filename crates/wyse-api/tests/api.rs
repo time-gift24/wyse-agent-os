@@ -684,6 +684,10 @@ struct FailFirstMessageFilesystem {
     created_root: Mutex<Option<VirtualPath>>,
     cleanup_failure: Option<CleanupFailure>,
     fail_start_turn: AtomicBool,
+    block_recovery_after_failed_start: bool,
+    block_recovery_load: AtomicBool,
+    recovery_entered: tokio::sync::Notify,
+    recovery_release: tokio::sync::Notify,
 }
 
 #[derive(Clone, Copy)]
@@ -699,6 +703,10 @@ impl FailFirstMessageFilesystem {
             created_root: Mutex::new(None),
             cleanup_failure: None,
             fail_start_turn: AtomicBool::new(false),
+            block_recovery_after_failed_start: false,
+            block_recovery_load: AtomicBool::new(false),
+            recovery_entered: tokio::sync::Notify::new(),
+            recovery_release: tokio::sync::Notify::new(),
         }
     }
 
@@ -708,6 +716,10 @@ impl FailFirstMessageFilesystem {
             created_root: Mutex::new(None),
             cleanup_failure: Some(cleanup_failure),
             fail_start_turn: AtomicBool::new(false),
+            block_recovery_after_failed_start: false,
+            block_recovery_load: AtomicBool::new(false),
+            recovery_entered: tokio::sync::Notify::new(),
+            recovery_release: tokio::sync::Notify::new(),
         }
     }
 
@@ -717,7 +729,28 @@ impl FailFirstMessageFilesystem {
             created_root: Mutex::new(None),
             cleanup_failure: None,
             fail_start_turn: AtomicBool::new(true),
+            block_recovery_after_failed_start: false,
+            block_recovery_load: AtomicBool::new(false),
+            recovery_entered: tokio::sync::Notify::new(),
+            recovery_release: tokio::sync::Notify::new(),
         }
+    }
+
+    fn failing_start_turn_with_blocked_recovery(inner: Arc<dyn Filesystem>) -> Self {
+        Self {
+            inner,
+            created_root: Mutex::new(None),
+            cleanup_failure: None,
+            fail_start_turn: AtomicBool::new(true),
+            block_recovery_after_failed_start: true,
+            block_recovery_load: AtomicBool::new(false),
+            recovery_entered: tokio::sync::Notify::new(),
+            recovery_release: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn release_recovery_load(&self) {
+        self.recovery_release.notify_one();
     }
 
     fn created_agent_id(&self) -> AgentId {
@@ -745,6 +778,12 @@ impl FailFirstMessageFilesystem {
 #[async_trait]
 impl Filesystem for FailFirstMessageFilesystem {
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        if path.as_str().ends_with("/agent.json")
+            && self.block_recovery_load.swap(false, Ordering::SeqCst)
+        {
+            self.recovery_entered.notify_one();
+            self.recovery_release.notified().await;
+        }
         self.inner.get(path).await
     }
 
@@ -757,6 +796,9 @@ impl Filesystem for FailFirstMessageFilesystem {
         if path.as_str().ends_with("/agent.json")
             && self.fail_start_turn.swap(false, Ordering::SeqCst)
         {
+            if self.block_recovery_after_failed_start {
+                self.block_recovery_load.store(true, Ordering::SeqCst);
+            }
             return Err(FilesystemError::PermissionDenied { path: path.clone() });
         }
         if path.as_str().ends_with("/messages/1.json") {
@@ -1412,6 +1454,132 @@ async fn configured_start_failure_keeps_the_active_agent_and_model_config() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn configured_start_while_current_agent_is_active_returns_busy_and_remains_cancellable() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(PendingProvider(fixture.model.clone())))
+        .expect("provider registers");
+    providers
+        .register(Arc::new(TestProvider(
+            fixture.deepseek_model_config().model,
+        )))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&fixture.filesystem),
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+
+    host.start_message(agent_id, "wait".to_owned(), None)
+        .await
+        .expect("original turn starts");
+    let error = host
+        .start_message(
+            agent_id,
+            "switch".to_owned(),
+            Some(fixture.deepseek_model_config()),
+        )
+        .await
+        .expect_err("configured start conflicts with the active runtime");
+
+    assert!(matches!(
+        error,
+        HostError::Agent(AgentError::RunAlreadyActive)
+    ));
+    assert!(!host.agent(agent_id).expect("agent exists").needs_resume());
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/cancel"))
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    host.shutdown().await;
+    assert_eq!(
+        host.agent(agent_id)
+            .expect("agent exists")
+            .store
+            .load_agent()
+            .await
+            .expect("state loads")
+            .status,
+        AgentStatus::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn failed_candidate_recovery_read_is_cancelled_by_shutdown() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let filesystem = Arc::new(
+        FailFirstMessageFilesystem::failing_start_turn_with_blocked_recovery(Arc::clone(
+            &fixture.filesystem,
+        )),
+    );
+    let mut providers = LlmProviderManager::new();
+    providers
+        .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    providers
+        .register(Arc::new(TestProvider(
+            fixture.deepseek_model_config().model,
+        )))
+        .expect("provider registers");
+    let host = HostState::restore(
+        fixture.config.clone(),
+        Arc::clone(&filesystem) as Arc<dyn Filesystem>,
+        Arc::new(InMemoryEventStreamBus::default()),
+        providers,
+    )
+    .await
+    .expect("host restores");
+
+    let message_host = Arc::clone(&host);
+    let message = tokio::spawn(async move {
+        message_host
+            .start_message(
+                agent_id,
+                "switch".to_owned(),
+                Some(ModelConfig::new(
+                    ModelId::new("deepseek", "test-model").expect("model id is valid"),
+                    Map::new(),
+                )),
+            )
+            .await
+    });
+    timeout(
+        Duration::from_secs(1),
+        filesystem.recovery_entered.notified(),
+    )
+    .await
+    .expect("candidate recovery reads Store");
+
+    let shutdown_host = Arc::clone(&host);
+    let mut shutdown = tokio::spawn(async move { shutdown_host.shutdown().await });
+    timeout(Duration::from_secs(2), &mut shutdown)
+        .await
+        .expect("shutdown drains admission")
+        .expect("shutdown task completes");
+    let result = timeout(Duration::from_secs(1), message)
+        .await
+        .expect("message returns after shutdown")
+        .expect("message task completes");
+    assert!(matches!(result, Err(HostError::HostShuttingDown)));
+    filesystem.release_recovery_load();
 }
 
 #[tokio::test]
