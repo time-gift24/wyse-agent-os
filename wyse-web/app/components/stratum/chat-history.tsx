@@ -186,7 +186,13 @@ export function ChatHistory({
               <Button
                 type="button"
                 variant="ghost"
-                className="h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium text-wyse-action hover:bg-wyse-action/5 hover:text-wyse-action"
+                aria-current={state.agentId === null ? "true" : undefined}
+                className={cn(
+                  "h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium",
+                  state.agentId === null
+                    ? "bg-wyse-action/10 text-wyse-action"
+                    : "text-wyse-action hover:bg-wyse-action/5"
+                )}
                 onClick={() => {
                   onNewConversation()
                 }}

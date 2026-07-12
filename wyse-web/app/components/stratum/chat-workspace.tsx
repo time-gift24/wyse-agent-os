@@ -54,6 +54,14 @@ export function ChatWorkspace({
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
 
+  // 选择对话（包括新建）后聚焦输入框
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      composerRef.current?.focus()
+    }, 100)
+    return () => clearTimeout(timer)
+  }, [state.agentId])
+
   const { scrollRef, contentRef, scrollToBottom, isAtBottom } =
     useStickToBottom({
       initial: "smooth",
@@ -219,10 +227,21 @@ export function ChatWorkspace({
         </button>
       )}
 
-      <div ref={inputContainerRef} className="fixed inset-x-0 bottom-0 z-40 mb-4 px-4 md:mb-6 md:px-8">
+      <div
+        ref={inputContainerRef}
+        className={cn(
+          "fixed inset-x-0 z-40 mb-4 px-4 md:mb-6 md:px-8",
+          state.agentId === null
+            ? "top-1/2 -translate-y-1/2"
+            : "bottom-0"
+        )}
+      >
         <Card
           size="sm"
-          className="prompt-input-glass mx-auto wyse-content-width bg-transparent ring-0"
+          className={cn(
+            "prompt-input-glass mx-auto bg-transparent ring-0",
+            state.agentId === null ? "max-w-2xl" : "wyse-content-width"
+          )}
         >
           <CardContent>
             <PromptInput
