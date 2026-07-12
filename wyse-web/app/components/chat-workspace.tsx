@@ -235,7 +235,7 @@ export function ChatWorkspace() {
   return (
     <section
       id="longzhong"
-      className="h-[100dvh] overflow-visible px-4 pt-4 pb-8 md:px-8 md:pb-10"
+      className="h-[100dvh] w-screen shrink-0 overflow-visible px-4 pt-4 pb-8 md:px-8 md:pb-10"
     >
       <div className="wyse-content-width relative mx-auto flex h-full flex-col gap-(--layout-gap)">
         <Card

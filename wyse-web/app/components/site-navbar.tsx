@@ -53,7 +53,12 @@ export function SiteNavbar() {
     const reduceMotion = window.matchMedia(
       "(prefers-reduced-motion: reduce)"
     ).matches
-    const targetY = target.getBoundingClientRect().top + window.scrollY
+    const horizontalTrigger = ScrollTrigger.getById("home-horizontal")
+    const targetY = horizontalTrigger
+      ? horizontalTrigger.start +
+        (horizontalTrigger.end - horizontalTrigger.start) *
+          (section === "overview" ? 0 : 1)
+      : target.getBoundingClientRect().top + window.scrollY
 
     if (reduceMotion) {
       window.scrollTo(0, targetY)
@@ -70,7 +75,7 @@ export function SiteNavbar() {
   }
 
   useGSAP(
-    () => {
+    (_, contextSafe) => {
       const glass = glassRef.current
 
       const sectionNav = sectionNavRef.current
@@ -191,20 +196,22 @@ export function SiteNavbar() {
         onUpdate: () => setGlassVisible(window.scrollY > 12),
       })
 
-      ScrollTrigger.create({
-        id: "site-navbar-longzhong",
-        trigger: document.getElementById("longzhong"),
-        start: "top center",
-        end: "bottom center",
-        onEnter: () => setActiveSection("longzhong"),
-        onEnterBack: () => setActiveSection("longzhong"),
-        onLeaveBack: () => setActiveSection("overview"),
-        onRefresh: () => {
-          if (activeSection) setActiveSection(activeSection, true)
-        },
+      const handleHorizontalSectionChange = contextSafe((event: Event) => {
+        const section = (event as CustomEvent<"overview" | "longzhong">).detail
+        if (section === "overview" || section === "longzhong") {
+          setActiveSection(section)
+        }
       })
+      window.addEventListener(
+        "wyse:horizontal-section",
+        handleHorizontalSectionChange
+      )
 
       return () => {
+        window.removeEventListener(
+          "wyse:horizontal-section",
+          handleHorizontalSectionChange
+        )
         setActiveSectionRef.current = null
       }
     },
