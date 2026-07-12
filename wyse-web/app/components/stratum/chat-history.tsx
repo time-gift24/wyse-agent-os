@@ -3,6 +3,7 @@
 import { useEffect, useMemo } from "react"
 import {
   Clock3Icon,
+  HistoryIcon,
   PlusIcon,
   Trash2Icon,
   XIcon,
@@ -10,6 +11,7 @@ import {
 import { useTranslation } from "react-i18next"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 
+import { AnimatedList } from "~/components/AnimatedList"
 import { Button } from "~/components/ui/button"
 import type { ConversationState } from "~/features/agent-conversation/types"
 import type { RecentAgent } from "~/lib/recent-agents"
@@ -87,13 +89,13 @@ export function ChatHistory({
   const panelVariants = {
     hidden: {
       scale: reduceMotion ? 1 : 0.96,
-      x: reduceMotion ? 0 : 16,
+      x: reduceMotion ? 0 : 12,
       opacity: reduceMotion ? 1 : 0,
     },
     visible: { scale: 1, x: 0, opacity: 1 },
     exit: {
       scale: reduceMotion ? 1 : 0.96,
-      x: reduceMotion ? 0 : 16,
+      x: reduceMotion ? 0 : 12,
       opacity: reduceMotion ? 1 : 0,
     },
   }
@@ -102,22 +104,6 @@ export function ChatHistory({
     hidden: { opacity: 0 },
     visible: { opacity: 1 },
     exit: { opacity: 0 },
-  }
-
-  const listVariants = {
-    hidden: {},
-    visible: {
-      transition: { staggerChildren: reduceMotion ? 0 : 0.03 },
-    },
-  }
-
-  const itemVariants = {
-    hidden: { opacity: 0, y: 10 },
-    visible: {
-      opacity: 1,
-      y: 0,
-      transition: { duration: 0.2, ease: [0.16, 1, 0.3, 1] as const },
-    },
   }
 
   return (
@@ -145,42 +131,33 @@ export function ChatHistory({
             exit="exit"
             variants={panelVariants}
             transition={{
-              duration: reduceMotion ? 0 : 0.25,
+              duration: reduceMotion ? 0 : 0.22,
               ease: [0.16, 1, 0.3, 1] as const,
             }}
             className={cn(
-              "wyse-paper-surface shadow-none wyse-history-drawer",
-              "flex flex-col gap-4 p-4",
-              "max-h-[calc(100dvh-9rem)] rounded-l-none rounded-r-5xl"
+              "wyse-paper-surface wyse-history-drawer",
+              "flex flex-col gap-3 p-3",
+              "max-h-[calc(100dvh-9rem)] rounded-5xl"
             )}
           >
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-medium text-muted-foreground">
-                {t("chat.history.title")}
-              </span>
+              <div className="flex items-center gap-1.5 text-muted-foreground">
+                <HistoryIcon className="size-3" aria-hidden="true" />
+                <span className="text-[10px] font-medium">
+                  {t("chat.history.title")}
+                </span>
+              </div>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-xs"
                 onClick={onClose}
                 aria-label={t("errors.genericTitle")}
+                className="text-muted-foreground hover:text-foreground"
               >
-                <XIcon className="size-3.5" aria-hidden="true" />
+                <XIcon className="size-3" aria-hidden="true" />
               </Button>
             </div>
-
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-7 justify-start gap-2 text-xs font-medium text-wyse-action hover:bg-wyse-action/5 hover:text-wyse-action"
-              onClick={() => {
-                onNewConversation()
-                onClose()
-              }}
-            >
-              <PlusIcon className="size-3.5" aria-hidden="true" />
-              {t("chat.history.new")}
-            </Button>
 
             {currentAgent ? (
               <button
@@ -190,9 +167,8 @@ export function ChatHistory({
                     top: document.body.scrollHeight,
                     behavior: reduceMotion ? "auto" : "smooth",
                   })
-                  onClose()
                 }}
-                className="group flex items-center gap-3 rounded-lg bg-secondary/40 px-3 py-2 text-left transition-colors hover:bg-secondary/60"
+                className="group flex items-center gap-2 rounded-xl bg-secondary/50 px-2.5 py-2 text-left transition-colors hover:bg-secondary/70"
               >
                 <span
                   className={cn(
@@ -200,23 +176,34 @@ export function ChatHistory({
                     isRunning && "animate-pulse"
                   )}
                 />
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="text-[0.625rem] font-medium text-wyse-action">
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="text-[9px] font-medium text-wyse-action">
                     {t("chat.history.activeNow")}
                   </span>
-                  <span className="truncate text-sm text-foreground">
+                  <span className="truncate text-xs text-foreground">
                     {currentAgent.title}
                   </span>
                 </div>
               </button>
             ) : null}
 
+            <Button
+              type="button"
+              variant="ghost"
+              className="h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium text-wyse-action hover:bg-wyse-action/5 hover:text-wyse-action"
+              onClick={() => {
+                onNewConversation()
+              }}
+            >
+              <PlusIcon className="size-3" aria-hidden="true" />
+              {t("chat.history.new")}
+            </Button>
+
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-              <motion.ul
-                initial="hidden"
-                animate="visible"
-                variants={listVariants}
-                className="flex flex-col"
+              <AnimatedList
+                staggerDelay={0.025}
+                maxDelay={0.18}
+                className="gap-0.5"
               >
                 {displayAgents.map((agent) => {
                   const isCurrent = agent.agentId === state.agentId
@@ -224,10 +211,9 @@ export function ChatHistory({
                   const isMockItem = isMock
 
                   return (
-                    <motion.li
+                    <div
                       key={agent.agentId}
-                      variants={itemVariants}
-                      className="group flex items-center border-b border-wyse-line/40 last:border-b-0"
+                      className="group relative flex items-center"
                     >
                       <button
                         type="button"
@@ -235,12 +221,11 @@ export function ChatHistory({
                         aria-current={isCurrent ? "true" : undefined}
                         onClick={() => {
                           onSelectAgent(agent.agentId)
-                          onClose()
                         }}
                         className={cn(
-                          "flex min-w-0 flex-1 flex-col gap-0.5 px-2 py-2.5 text-left transition-colors",
+                          "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
                           isCurrent
-                            ? "bg-secondary/60"
+                            ? "bg-secondary/70"
                             : isMockItem
                               ? "opacity-50"
                               : "hover:bg-secondary/40"
@@ -248,7 +233,7 @@ export function ChatHistory({
                       >
                         <span
                           className={cn(
-                            "truncate text-sm",
+                            "truncate text-xs",
                             isCurrent
                               ? "font-medium text-foreground"
                               : "text-foreground/80"
@@ -256,8 +241,8 @@ export function ChatHistory({
                         >
                           {agent.title}
                         </span>
-                        <span className="flex items-center gap-1 text-[0.625rem] text-muted-foreground">
-                          <Clock3Icon className="size-3" aria-hidden="true" />
+                        <span className="flex shrink-0 items-center gap-1 text-[9px] text-muted-foreground">
+                          <Clock3Icon className="size-2.5" aria-hidden="true" />
                           {formatRelativeTime(
                             agent.lastOpenedAt,
                             i18n.resolvedLanguage ?? "en"
@@ -273,18 +258,18 @@ export function ChatHistory({
                           aria-label={t("chat.removeLocalEntry")}
                           title={t("chat.removeLocalEntry")}
                           onClick={() => onRemoveAgent(agent.agentId)}
-                          className="mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                          className="absolute -right-1 top-1/2 -translate-y-1/2 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
                         >
                           <Trash2Icon
-                            className="size-3 text-destructive"
+                            className="size-2.5 text-destructive"
                             aria-hidden="true"
                           />
                         </Button>
                       ) : null}
-                    </motion.li>
+                    </div>
                   )
                 })}
-              </motion.ul>
+              </AnimatedList>
             </div>
           </motion.aside>
         </div>

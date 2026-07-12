@@ -22,20 +22,17 @@ export default function Longzhong() {
           leftSlot={
             <Button
               variant="ghost"
-              size="icon-lg"
+              size="icon-sm"
               aria-label={t("chat.history.title")}
               aria-expanded={historyOpen}
               aria-controls="chat-history-drawer"
               onClick={() => setHistoryOpen((open) => !open)}
               className={cn(
-                "rounded-full bg-wyse-paper shadow-wyse-soft ring-1 ring-wyse-line",
-                "hover:bg-wyse-paper-wash",
-                historyOpen
-                  ? "text-wyse-action ring-wyse-action/30"
-                  : "text-muted-foreground hover:text-foreground"
+                "text-muted-foreground hover:bg-wyse-paper/60 hover:text-foreground",
+                historyOpen && "text-wyse-action"
               )}
             >
-              <HistoryIcon className="size-5" aria-hidden="true" />
+              <HistoryIcon className="size-4" aria-hidden="true" />
             </Button>
           }
         />
