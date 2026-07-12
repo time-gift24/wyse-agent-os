@@ -90,6 +90,39 @@ describe("conversationReducer", () => {
     expect(state.messages[0]).toMatchObject({ businessSeq: 7, text: "history" })
   })
 
+  it("projects a persisted message that omits empty tool calls", () => {
+    const envelope = {
+      business_seq: 7,
+      run_id: "run-1",
+      timestamp: "2026-07-11T00:00:00Z",
+      event: {
+        type: "agent",
+        data: {
+          agent_id: "agent-1",
+          event: {
+            type: "message",
+            data: {
+              turn_id: "turn-1",
+              message: {
+                role: "user",
+                content: { type: "text", data: "persisted" },
+              },
+            },
+          },
+        },
+      },
+    } as unknown as StreamEnvelope
+
+    const state = conversationReducer(initialConversationState, {
+      type: "envelope_received",
+      envelope,
+    })
+
+    expect(state.messages).toMatchObject([
+      { role: "user", text: "persisted", toolCalls: [] },
+    ])
+  })
+
   it("accumulates assistant text and reasoning by LLM call without changing stable history", () => {
     const state = reduceAll(initialConversationState, [
       {

@@ -23,7 +23,7 @@ export type ToolCall = { call_id: string; name: string; arguments: unknown }
 export type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system"
   content: { type: "text"; data: string } | { type: "json"; data: unknown }
-  tool_calls: readonly ToolCall[]
+  tool_calls?: readonly ToolCall[]
   reasoning_content?: string
   tool_call_id?: string
 }

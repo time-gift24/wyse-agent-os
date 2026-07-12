@@ -138,7 +138,7 @@ function projectStableMessage(
         ? message.data.message.content.data
         : null,
     reasoning: message.data.message.reasoning_content ?? null,
-    toolCalls: message.data.message.tool_calls.map((toolCall) => ({
+    toolCalls: (message.data.message.tool_calls ?? []).map((toolCall) => ({
       callId: toolCall.call_id,
       name: toolCall.name,
       arguments: toolCall.arguments,
