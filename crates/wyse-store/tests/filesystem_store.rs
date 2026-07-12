@@ -5,11 +5,32 @@ use std::{collections::BTreeMap, sync::Arc};
 use chrono::Utc;
 use support::MemoryCasFilesystem;
 use wyse_core::{
-    AgentEvent, AgentId, ChatMessage, ChatRole, EventSource, HistoryQuery, RunId, RuntimeEvent,
-    StreamEnvelope, TokenUsage, TurnId,
+    AgentEvent, AgentId, ChatMessage, ChatRole, EventSource, HistoryQuery, ModelConfig, ModelId,
+    RunId, RuntimeEvent, StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{Entry, FILESYSTEM_CAS_RETRIES, VirtualPath};
-use wyse_store::{AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreError};
+use wyse_store::{
+    AGENT_STATE_VERSION, AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreError,
+};
+
+fn test_model_config() -> ModelConfig {
+    ModelConfig {
+        model: ModelId::new("openai", "test-model").expect("static model is valid"),
+        parameters: serde_json::Map::new(),
+    }
+}
+
+fn legacy_agent_state_without_model_config(agent_id: AgentId) -> serde_json::Value {
+    let mut state = serde_json::to_value(AgentState::new(agent_id, "a".to_owned()))
+        .expect("serialize legacy state");
+    let state = state.as_object_mut().expect("state object");
+    state.insert(
+        "state_version".to_owned(),
+        serde_json::Value::from(AGENT_STATE_VERSION - 1),
+    );
+    state.remove("model_config");
+    serde_json::Value::Object(state.clone())
+}
 
 fn message_envelope(agent_id: AgentId, run_id: RunId, turn_id: TurnId) -> StreamEnvelope {
     StreamEnvelope {
@@ -95,6 +116,24 @@ async fn initialize_and_append_create_exact_files_and_advance_last_seq() {
     assert_eq!(stored.business_seq(), Some(1));
     assert_eq!(stored, first);
     assert_eq!(store.load_agent().await.expect("state").last_seq, 1);
+}
+
+#[tokio::test]
+async fn write_model_config_if_missing_upgrades_legacy_state_once() {
+    let filesystem = Arc::new(MemoryCasFilesystem::default());
+    let root = VirtualPath::try_from("/agents/a").expect("valid root");
+    let store = FilesystemAgentStore::new(filesystem.clone(), root);
+    let agent_id = AgentId::new();
+    let legacy = legacy_agent_state_without_model_config(agent_id);
+    filesystem.insert_entry("/agents/a/agent.json", json_entry(&legacy));
+
+    let updated = store
+        .write_model_config_if_missing(test_model_config())
+        .await
+        .expect("migration succeeds");
+
+    assert_eq!(updated.model_config, Some(test_model_config()));
+    assert_eq!(updated.state_version, AGENT_STATE_VERSION);
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fmt, str::FromStr};
 use bon::Builder;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 pub use error::ModelIdParseError;
@@ -380,6 +380,15 @@ impl From<ModelId> for String {
     fn from(value: ModelId) -> Self {
         value.0
     }
+}
+
+/// Stable model selection and provider parameters for an agent turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Canonical provider-scoped model identity.
+    pub model: ModelId,
+    /// Provider-specific model parameters.
+    pub parameters: Map<String, Value>,
 }
 
 /// Source that owns a runtime stream event.

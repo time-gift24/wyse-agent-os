@@ -2,10 +2,11 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use wyse_core::{AgentId, RunId, TokenUsage, TurnId};
+use wyse_core::{AgentId, ModelConfig, RunId, TokenUsage, TurnId};
 
 /// Current serialized agent-state schema version.
-pub const AGENT_STATE_VERSION: u32 = 1;
+pub const AGENT_STATE_VERSION: u32 = 2;
+pub(crate) const LEGACY_AGENT_STATE_VERSION: u32 = AGENT_STATE_VERSION - 1;
 
 /// Maximum number of messages returned by one history page.
 pub const MAX_HISTORY_PAGE_SIZE: usize = 256;
@@ -36,6 +37,9 @@ pub struct AgentState {
     pub agent_id: AgentId,
     /// Human-readable agent name.
     pub name: String,
+    /// Stable model configuration, when persisted by a host-aware caller.
+    #[serde(default)]
+    pub model_config: Option<ModelConfig>,
     /// Current runtime status.
     pub status: AgentStatus,
     /// Active workflow run, when any.
@@ -57,9 +61,28 @@ impl AgentState {
     #[must_use]
     pub fn new(agent_id: AgentId, name: String) -> Self {
         Self {
+            state_version: LEGACY_AGENT_STATE_VERSION,
+            agent_id,
+            name,
+            model_config: None,
+            status: AgentStatus::Idle,
+            run_id: None,
+            turn_id: None,
+            next_iteration: 0,
+            usage: TokenUsage::default(),
+            last_seq: 0,
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// Creates idle state for a new host-configured agent.
+    #[must_use]
+    pub fn new_configured(agent_id: AgentId, name: String, model_config: ModelConfig) -> Self {
+        Self {
             state_version: AGENT_STATE_VERSION,
             agent_id,
             name,
+            model_config: Some(model_config),
             status: AgentStatus::Idle,
             run_id: None,
             turn_id: None,
@@ -76,9 +99,27 @@ mod tests {
     use std::collections::BTreeSet;
 
     use serde_json::json;
-    use wyse_core::AgentId;
+    use wyse_core::{AgentId, ModelConfig, ModelId};
 
     use super::*;
+
+    fn test_model_config() -> ModelConfig {
+        ModelConfig {
+            model: ModelId::new("openai", "test-model").expect("static model is valid"),
+            parameters: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn agent_state_serializes_model_config() {
+        let state =
+            AgentState::new_configured(AgentId::new(), "writer".to_owned(), test_model_config());
+
+        assert_eq!(
+            serde_json::to_value(state).expect("state serializes")["model_config"]["model"],
+            "openai:test-model"
+        );
+    }
 
     #[test]
     fn agent_state_serializes_only_approved_fields() {
@@ -97,6 +138,7 @@ mod tests {
             BTreeSet::from([
                 "agent_id".to_owned(),
                 "last_seq".to_owned(),
+                "model_config".to_owned(),
                 "name".to_owned(),
                 "next_iteration".to_owned(),
                 "run_id".to_owned(),

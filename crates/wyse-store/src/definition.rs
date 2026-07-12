@@ -1,7 +1,9 @@
 //! Agent store interface.
 
 use async_trait::async_trait;
-use wyse_core::{HistoryPage, HistoryQuery, RunId, StreamEnvelope, TokenUsage, TurnId};
+use wyse_core::{
+    HistoryPage, HistoryQuery, ModelConfig, RunId, StreamEnvelope, TokenUsage, TurnId,
+};
 
 use crate::{AgentState, AgentStatus, StoreError};
 
@@ -27,6 +29,27 @@ pub trait AgentStore: Send + Sync {
         turn_id: Option<TurnId>,
         usage: TokenUsage,
     ) -> Result<AgentState, StoreError>;
+
+    /// Starts a turn with its stable model configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state update cannot be committed.
+    async fn start_turn(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        model_config: ModelConfig,
+    ) -> Result<AgentState, StoreError> {
+        let _ = model_config;
+        self.update_state(
+            AgentStatus::Running,
+            Some(run_id),
+            Some(turn_id),
+            TokenUsage::default(),
+        )
+        .await
+    }
 
     /// Atomically advances the durable iteration frontier for the active turn.
     ///
