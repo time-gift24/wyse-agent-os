@@ -80,6 +80,10 @@ default = "openai:test-model"
 api_key = "test-key"
 models = ["test-model"]
 
+[llm.deepseek]
+api_key = "test-key"
+models = ["test-model"]
+
 [api]
 bind = "127.0.0.1:0"
 allowed_origins = ["http://localhost:5173"]
@@ -222,6 +226,14 @@ prompt = "be helpful"
 "#,
                 self.model
             ),
+        )
+        .expect("template is written");
+    }
+
+    async fn write_template(&self, name: &str, source: &str) {
+        fs::write(
+            self.root.join("templates").join(format!("{name}.toml")),
+            source,
         )
         .expect("template is written");
     }
@@ -432,7 +444,11 @@ impl ConfigurableLlmProvider for TestProvider {
     }
 
     fn default_model_config(&self) -> ModelConfig {
-        ModelConfig::new(self.model_id(), Map::new())
+        let mut parameters = Map::new();
+        if self.0.provider_name() == "deepseek" {
+            parameters.insert("provider_default".to_owned(), json!("deepseek"));
+        }
+        ModelConfig::new(self.model_id(), parameters)
     }
 
     fn configure(&self, parameters: &Map<String, Value>) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -2206,6 +2222,106 @@ async fn models_lists_configured_models_with_provider_schema() {
     .expect("models body is json");
     assert_eq!(body["models"][0]["parameters_schema"]["type"], "object");
     assert!(body["models"][0].get("default_parameters").is_none());
+}
+
+#[tokio::test]
+async fn agent_templates_list_resolved_default_configuration() {
+    let fixture = Fixture::new().await;
+    fixture
+        .write_template("coding-agent", "prompt = \"be helpful\"")
+        .await;
+    fixture
+        .write_template("zebra-agent", "prompt = \"be helpful\"")
+        .await;
+
+    let (_, response) = fixture
+        .request(
+            Request::get("/v1/agent/templates")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("template body is json");
+    assert_eq!(body["agents"][0]["agent_name"], "coding-agent");
+    assert_eq!(body["agents"][1]["agent_name"], "zebra-agent");
+    assert_eq!(
+        body["agents"][0]["model_config"]["model"],
+        "openai:test-model"
+    );
+    let mut fields = body["agents"][0]
+        .as_object()
+        .expect("template view is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    fields.sort_unstable();
+    assert_eq!(fields, ["agent_name", "model_config"]);
+}
+
+#[tokio::test]
+async fn agent_templates_list_provider_default_configuration_for_template_model() {
+    let fixture = Fixture::new().await;
+    fixture
+        .write_template(
+            "deepseek-agent",
+            "model = \"deepseek:test-model\"\nprompt = \"be helpful\"",
+        )
+        .await;
+
+    let (_, response) = fixture
+        .request(
+            Request::get("/v1/agent/templates")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("template body is json");
+    assert_eq!(body["agents"][0]["agent_name"], "deepseek-agent");
+    assert_eq!(
+        body["agents"][0]["model_config"]["model"],
+        "deepseek:test-model"
+    );
+    assert_eq!(
+        body["agents"][0]["model_config"]["parameters"]["provider_default"],
+        "deepseek"
+    );
+}
+
+#[tokio::test]
+async fn agent_templates_return_unprocessable_entity_for_invalid_template() {
+    let fixture = Fixture::new().await;
+    fixture.write_template("broken-agent", "model = [").await;
+
+    let (_, response) = fixture
+        .request(
+            Request::get("/v1/agent/templates")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_agent_template");
 }
 
 #[tokio::test]

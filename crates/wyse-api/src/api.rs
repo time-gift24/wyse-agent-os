@@ -71,6 +71,16 @@ pub struct AgentView {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Public projection of a resolved agent template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct AgentTemplateView {
+    /// Template name.
+    pub agent_name: String,
+    /// Resolved provider model and default parameters.
+    pub model_config: ModelConfig,
+}
+
 /// Response returned after a run is durably accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -112,6 +122,11 @@ struct ModelsResponse {
     models: Vec<wyse_llm::ModelDescriptor>,
 }
 
+#[derive(Serialize)]
+struct AgentTemplatesResponse {
+    agents: Vec<AgentTemplateView>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApprovalRequest {
@@ -142,6 +157,7 @@ pub fn router(state: Arc<HostState>) -> Router {
         .collect::<Vec<_>>();
     let router = Router::new()
         .route("/v1/models", get(get_models))
+        .route("/v1/agent/templates", get(get_agent_templates))
         .route("/v1/agents", post(create_agent))
         .route("/v1/agents/{agent_id}", get(get_agent))
         .route(
@@ -237,6 +253,14 @@ async fn get_models(State(state): State<Arc<HostState>>) -> Json<ModelsResponse>
     Json(ModelsResponse {
         models: state.models(),
     })
+}
+
+async fn get_agent_templates(
+    State(state): State<Arc<HostState>>,
+) -> Result<Json<AgentTemplatesResponse>, HostError> {
+    Ok(Json(AgentTemplatesResponse {
+        agents: state.agent_templates().await?,
+    }))
 }
 
 async fn get_messages(

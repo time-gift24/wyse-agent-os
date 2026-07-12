@@ -24,7 +24,7 @@ use wyse_llm::{LlmError, LlmProviderManager, ModelDescriptor};
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus};
 use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 
-use crate::{AgentCleanupError, HostError};
+use crate::{AgentCleanupError, AgentTemplateView, HostError};
 
 const HISTORY_ROOT: &str = "/history";
 const TEMPLATE_ROOT: &str = "/templates";
@@ -299,6 +299,45 @@ impl HostState {
     #[must_use]
     pub fn models(&self) -> Vec<ModelDescriptor> {
         self.providers.models()
+    }
+
+    /// Lists every resolved agent template and its provider default model configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError`] when template discovery, decoding, resolution, or provider lookup
+    /// fails. No partial list is returned.
+    pub async fn agent_templates(&self) -> Result<Vec<AgentTemplateView>, HostError> {
+        let template_root = VirtualPath::try_from(TEMPLATE_ROOT).map_err(|source| {
+            FilesystemError::InvalidVirtualPath {
+                path: TEMPLATE_ROOT.to_owned(),
+                source,
+            }
+        })?;
+        let mut entries = self.filesystem.list_dir(&template_root).await?;
+        entries.sort_unstable_by(|left, right| left.file_name.cmp(&right.file_name));
+
+        let mut templates = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            let Some(stem) = entry.file_name.strip_suffix(".toml") else {
+                continue;
+            };
+            let agent_name: AgentName = stem.parse()?;
+            let source = self.filesystem.read_file(&entry.path).await?;
+            let source = std::str::from_utf8(&source)
+                .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
+            let definition = self.config.resolve_template(agent_name, source)?;
+            let model_config = self.providers.default_model_config(&definition.model)?;
+            templates.push(AgentTemplateView {
+                agent_name: definition.agent_name.as_str().to_owned(),
+                model_config,
+            });
+        }
+
+        Ok(templates)
     }
 
     /// Starts a message using the persisted or requested model configuration.
