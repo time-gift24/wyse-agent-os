@@ -121,11 +121,11 @@
   --page-gutter: clamp(1rem, 2vw, 2rem);
   --content-width: min(
     calc(100vw - var(--page-gutter) * 2),
-    clamp(48rem, 70vw, 64rem)
+    clamp(40rem, 58vw, 64rem)
   );
-  --layout-gap: clamp(1rem, 1.5vw, 1.5rem);
-  --history-width: 18rem;
-  --text-body: clamp(1rem, 0.12vw + 0.96rem, 1.0625rem);
+  --layout-gap: clamp(0.75rem, 1.25vw, 1.5rem);
+  --history-width: clamp(13rem, 16vw, 18rem);
+  --text-body: clamp(0.9375rem, 0.12vw + 0.9rem, 1.0625rem);
   --z-grain: 60;
 
   --background: var(--wyse-canvas);
@@ -378,8 +378,8 @@
     width: 100%;
   }
 
-  @media (min-width: 1680px) {
-    /* ponytail: keep the rail out of the chat flow only when it fits beside the centered canvas */
+  @media (min-width: 1200px) {
+    /* ponytail: keep the rail out of the chat flow once the compact canvas still fits beside it */
     .wyse-history-rail {
       position: absolute;
       top: 0;
