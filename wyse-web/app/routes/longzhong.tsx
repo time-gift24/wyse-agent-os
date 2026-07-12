@@ -1,6 +1,6 @@
-import { ChatWorkspace } from "~/components/chat-workspace"
-import { RouteTransition } from "~/components/route-transition"
-import { SiteNavbar } from "~/components/site-navbar"
+import { ChatWorkspace } from "~/components/stratum/chat-workspace"
+import { RouteTransition } from "~/components/stratum/route-transition"
+import { SiteNavbar } from "~/components/stratum/site-navbar"
 
 export default function Longzhong() {
   return (

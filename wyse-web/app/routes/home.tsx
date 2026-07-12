@@ -2,9 +2,9 @@ import { ArrowRightIcon } from "lucide-react"
 import { Link } from "react-router"
 import { useTranslation } from "react-i18next"
 
-import { SiteNavbar } from "~/components/site-navbar"
-import { StratumMark } from "~/components/stratum-mark"
-import { RouteTransition } from "~/components/route-transition"
+import { RouteTransition } from "~/components/stratum/route-transition"
+import { SiteNavbar } from "~/components/stratum/site-navbar"
+import { StratumMark } from "~/components/stratum/stratum-mark"
 import { Button, buttonVariants } from "~/components/ui/button"
 
 export default function Home() {

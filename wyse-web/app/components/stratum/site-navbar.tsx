@@ -6,9 +6,9 @@ import gsap from "gsap"
 import { Link, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
-import { LanguageToggle } from "~/components/language-toggle"
-import { StratumMark } from "~/components/stratum-mark"
-import { ThemeToggle } from "~/components/theme-toggle"
+import { LanguageToggle } from "~/components/stratum/language-toggle"
+import { StratumMark } from "~/components/stratum/stratum-mark"
+import { ThemeToggle } from "~/components/stratum/theme-toggle"
 import { Button } from "~/components/ui/button"
 import {
   NavigationMenu,

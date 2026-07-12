@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 
-import { AgentApprovalCard } from "~/components/agent-approval-card"
+import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
 import {
   PromptInput,
   PromptInputBody,
@@ -19,8 +19,8 @@ import {
 import {
   finishApprovalSubmission,
   startApprovalSubmission,
-} from "~/components/agent-approval-submissions"
-import { AgentMessageList } from "~/components/agent-message-list"
+} from "~/components/stratum/agent-approval-submissions"
+import { AgentMessageList } from "~/components/stratum/agent-message-list"
 import { Card, CardContent } from "~/components/ui/card"
 import { useAgentConversation } from "~/hooks/use-agent-conversation"
 

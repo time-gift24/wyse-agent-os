@@ -10,3 +10,8 @@
 ## Frontend test policy
 
 - Do not add, restore, or maintain frontend test files under `wyse-web`.
+
+## Component ownership
+
+- Stratum-owned components live in `app/components/stratum/`.
+- Keep third-party components in `app/components/react-bits/`, `app/components/ui/`, or `app/components/ai-elements/`.
