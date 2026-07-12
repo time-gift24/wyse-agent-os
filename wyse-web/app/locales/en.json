@@ -41,6 +41,7 @@
     "ready": "Connected",
     "continue": "Continue",
     "cancel": "Cancel",
+    "scrollToBottom": "Scroll to bottom",
     "reconnect": "Reconnect",
     "missingConversation": "Conversation is missing",
     "removeLocalEntry": "Remove local entry",

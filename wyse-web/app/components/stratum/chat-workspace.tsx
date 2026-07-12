@@ -1,12 +1,12 @@
 "use client"
 
-import { useRef, useState } from "react"
-import { ArrowUpIcon } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { ArrowDownIcon, ArrowUpIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
+import { useStickToBottom } from "use-stick-to-bottom"
 
-import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
 import {
   PromptInput,
   PromptInputBody,
@@ -20,6 +20,7 @@ import {
   finishApprovalSubmission,
   startApprovalSubmission,
 } from "~/components/stratum/agent-approval-submissions"
+import { AgentApprovalCard } from "~/components/stratum/agent-approval-card"
 import { AgentMessageList } from "~/components/stratum/agent-message-list"
 import { Card, CardContent } from "~/components/ui/card"
 import { useAgentConversation } from "~/hooks/use-agent-conversation"
@@ -36,9 +37,25 @@ export function ChatWorkspace() {
   >(() => new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const submitButtonRef = useRef<HTMLDivElement>(null)
+  const messageListRef = useRef<HTMLDivElement>(null)
   const { state } = conversation
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
+
+  const { scrollRef, contentRef, scrollToBottom, isAtBottom } =
+    useStickToBottom({
+      initial: "smooth",
+      resize: "smooth",
+    })
+
+  useEffect(() => {
+    if (typeof document === "undefined") return
+    scrollRef(document.documentElement)
+    return () => {
+      scrollRef(null as unknown as HTMLElement)
+    }
+  }, [scrollRef])
+
   useGSAP(
     () => {
       const btn = submitButtonRef.current
@@ -101,6 +118,10 @@ export function ChatWorkspace() {
       <div className="wyse-content-width mx-auto">
         <div data-slot="chat-main" className="flex min-w-0 flex-col">
           <div
+            ref={(node) => {
+              messageListRef.current = node
+              contentRef(node)
+            }}
             data-slot="chat-message-list"
             className="w-full px-1 py-6 md:px-6"
           >
@@ -108,7 +129,6 @@ export function ChatWorkspace() {
               messages={state.messages}
               drafts={state.drafts}
               tools={state.tools}
-              failure={state.failure}
             />
             {Object.values(state.approvals).map((approval) => (
               <div
@@ -128,10 +148,21 @@ export function ChatWorkspace() {
         </div>
       </div>
 
+      {!isAtBottom && (
+        <button
+          type="button"
+          onClick={() => scrollToBottom()}
+          className="fixed bottom-28 left-1/2 z-50 -translate-x-1/2 rounded-full border border-border bg-background/90 p-2 text-foreground shadow-wyse-soft backdrop-blur-sm transition-transform hover:scale-105"
+          aria-label={t("chat.scrollToBottom")}
+        >
+          <ArrowDownIcon className="size-4" aria-hidden="true" />
+        </button>
+      )}
+
       <div className="fixed inset-x-0 bottom-4 z-40 px-4 md:bottom-6 md:px-8">
         <Card
           size="sm"
-          className="wyse-content-width mx-auto bg-transparent ring-0"
+          className="wyse-content-width prompt-input-glass mx-auto bg-transparent ring-0"
         >
           <CardContent>
             <PromptInput

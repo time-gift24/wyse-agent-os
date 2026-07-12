@@ -18,7 +18,6 @@ import {
 } from "~/components/ai-elements/tool"
 import { CodeBlock } from "~/components/ai-elements/code-block"
 import type {
-  ConversationFailure,
   StableMessage,
   ToolProgress,
 } from "~/features/agent-conversation/types"
@@ -27,7 +26,6 @@ type AgentMessageListProps = {
   messages: readonly StableMessage[]
   drafts: Readonly<Record<string, { text: string; reasoning: string }>>
   tools: Readonly<Record<string, ToolProgress>>
-  failure?: ConversationFailure | null
 }
 
 function toToolStatus(status: ToolProgress["status"]): ToolStatus {
@@ -47,7 +45,6 @@ export function AgentMessageList({
   messages,
   drafts,
   tools,
-  failure = null,
 }: AgentMessageListProps) {
   const { t, i18n } = useTranslation()
   const dateTimeFormat = new Intl.DateTimeFormat(i18n.resolvedLanguage, {
@@ -150,24 +147,6 @@ export function AgentMessageList({
         </div>
       ) : null}
 
-      {failure ? (
-        <div className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2">
-          <Message from="assistant">
-            <MessageContent>
-              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                <p className="font-medium">{t("chat.failure.title")}</p>
-                <p className="mt-1 text-destructive/80">{failure.text}</p>
-              </div>
-            </MessageContent>
-            <time
-              dateTime={failure.timestamp}
-              className="px-1 text-[0.625rem] text-muted-foreground"
-            >
-              {dateTimeFormat.format(new Date(failure.timestamp))}
-            </time>
-          </Message>
-        </div>
-      ) : null}
     </>
   )
 }

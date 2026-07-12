@@ -35,7 +35,7 @@ export function RouteTransition({ children }: RouteTransitionProps) {
           autoAlpha: 1,
           duration: reduceMotion ? 0 : 0.32,
           ease: "power3.out",
-          clearProps: "willChange",
+          clearProps: "transform,willChange",
         }
       )
     },

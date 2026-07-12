@@ -41,6 +41,7 @@
     "ready": "已连接",
     "continue": "继续",
     "cancel": "取消",
+    "scrollToBottom": "滚动到底部",
     "reconnect": "重新连接",
     "missingConversation": "对话不存在",
     "removeLocalEntry": "移除本地记录",
