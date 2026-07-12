@@ -4,7 +4,9 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::time::timeout;
-use wyse_core::{AgentEvent, AgentId, ReplayStart, RuntimeEvent, StreamEnvelope, TokenUsage};
+use wyse_core::{
+    AgentEvent, AgentId, ModelConfig, ReplayStart, RuntimeEvent, StreamEnvelope, TokenUsage,
+};
 use wyse_infra::{EventStream, EventStreamBus, EventStreamBusError};
 
 use crate::{AgentStatus, AgentStore};
@@ -15,13 +17,32 @@ const COMMITTED_FORWARD_GRACE: Duration = Duration::from_secs(1);
 pub struct StoreEventStreamBus {
     store: Arc<dyn AgentStore>,
     inner: Arc<dyn EventStreamBus>,
+    model_config: Option<ModelConfig>,
 }
 
 impl StoreEventStreamBus {
     /// Creates a store-backed event stream bus decorator.
     #[must_use]
     pub fn new(store: Arc<dyn AgentStore>, inner: Arc<dyn EventStreamBus>) -> Self {
-        Self { store, inner }
+        Self {
+            store,
+            inner,
+            model_config: None,
+        }
+    }
+
+    /// Creates a store-backed event stream bus decorator for a configured host agent.
+    #[must_use]
+    pub fn with_model_config(
+        store: Arc<dyn AgentStore>,
+        inner: Arc<dyn EventStreamBus>,
+        model_config: ModelConfig,
+    ) -> Self {
+        Self {
+            store,
+            inner,
+            model_config: Some(model_config),
+        }
     }
 
     async fn forward_committed(&self, envelope: StreamEnvelope) {
@@ -60,15 +81,22 @@ impl EventStreamBus for StoreEventStreamBus {
                 event: AgentEvent::Started { turn_id },
                 ..
             } => {
-                self.store
-                    .update_state(
-                        AgentStatus::Running,
-                        Some(envelope.run_id),
-                        Some(*turn_id),
-                        TokenUsage::default(),
-                    )
-                    .await
-                    .map_err(EventStreamBusError::persistence)?;
+                if let Some(model_config) = &self.model_config {
+                    self.store
+                        .start_turn(envelope.run_id, *turn_id, model_config.clone())
+                        .await
+                        .map_err(EventStreamBusError::persistence)?;
+                } else {
+                    self.store
+                        .update_state(
+                            AgentStatus::Running,
+                            Some(envelope.run_id),
+                            Some(*turn_id),
+                            TokenUsage::default(),
+                        )
+                        .await
+                        .map_err(EventStreamBusError::persistence)?;
+                }
                 self.forward_committed(envelope).await;
                 Ok(())
             }

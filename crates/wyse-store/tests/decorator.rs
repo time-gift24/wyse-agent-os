@@ -9,8 +9,8 @@ use futures_util::future;
 use tokio::time::{Duration, timeout};
 use wyse_core::{
     AgentEvent, AgentId, ChatMessage, EventCursor, EventSource, HistoryPage, HistoryQuery,
-    LlmCallId, LlmCallRole, LlmEvent, NodeId, ReplayStart, RunId, RuntimeEvent, StreamEnvelope,
-    TokenUsage, TurnId,
+    LlmCallId, LlmCallRole, LlmEvent, ModelConfig, ModelId, NodeId, ReplayStart, RunId,
+    RuntimeEvent, StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_infra::{EventStream, EventStreamBus, EventStreamBusError};
 use wyse_store::{AgentState, AgentStatus, AgentStore, StoreError, StoreEventStreamBus};
@@ -81,6 +81,20 @@ impl AgentStore for RecordingStore {
         state.run_id = run_id;
         state.turn_id = turn_id;
         state.usage = usage;
+        Ok(state.clone())
+    }
+
+    async fn start_turn(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        model_config: ModelConfig,
+    ) -> Result<AgentState, StoreError> {
+        let mut state = self.state.lock().expect("state lock");
+        state.status = AgentStatus::Running;
+        state.run_id = Some(run_id);
+        state.turn_id = Some(turn_id);
+        state.model_config = Some(model_config);
         Ok(state.clone())
     }
 
@@ -193,6 +207,31 @@ fn envelope(agent_id: AgentId, run_id: RunId, event: AgentEvent) -> StreamEnvelo
         event: RuntimeEvent::Agent { agent_id, event },
         metadata: BTreeMap::new(),
     }
+}
+
+fn test_model_config() -> ModelConfig {
+    ModelConfig::new(
+        ModelId::new("openai", "test-model").expect("static model is valid"),
+        serde_json::Map::new(),
+    )
+}
+
+#[tokio::test]
+async fn started_event_persists_config_with_running_state() {
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let store = Arc::new(RecordingStore::new(agent_id));
+    let inner = Arc::new(RecordingBus::new());
+    let bus = StoreEventStreamBus::with_model_config(store.clone(), inner, test_model_config());
+
+    bus.publish(envelope(agent_id, run_id, AgentEvent::Started { turn_id }))
+        .await
+        .expect("started commits");
+
+    let state = store.load_agent().await.expect("state loads");
+    assert_eq!(state.status, AgentStatus::Running);
+    assert_eq!(state.model_config, Some(test_model_config()));
 }
 
 #[tokio::test]
