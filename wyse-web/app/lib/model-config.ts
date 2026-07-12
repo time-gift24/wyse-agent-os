@@ -13,6 +13,15 @@ export type AgentTemplateView = {
   model_config: ModelConfig
 }
 
+type ModelConfigMenuDisabledInput = {
+  metadataLoading: boolean
+  metadataError: boolean
+  turnRunning: boolean
+  existingAgent: boolean
+  currentModelConfig: ModelConfig | null
+  commandPending: boolean
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
@@ -86,4 +95,21 @@ export function pendingConfigAfterAcceptance(
   accepted: ModelConfig
 ): ModelConfig | null {
   return pending === accepted ? null : pending
+}
+
+export function isModelConfigMenuDisabled({
+  metadataLoading,
+  metadataError,
+  turnRunning,
+  existingAgent,
+  currentModelConfig,
+  commandPending,
+}: ModelConfigMenuDisabledInput): boolean {
+  return (
+    metadataLoading ||
+    metadataError ||
+    turnRunning ||
+    commandPending ||
+    (existingAgent && currentModelConfig === null)
+  )
 }

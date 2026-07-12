@@ -15,20 +15,32 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu"
 import type { ComposerConfiguration } from "~/hooks/use-agent-conversation"
-import { supportsThinkingControls } from "~/lib/model-config"
+import {
+  isModelConfigMenuDisabled,
+  supportsThinkingControls,
+} from "~/lib/model-config"
 
 type ModelConfigMenuProps = {
   configuration: ComposerConfiguration
+  commandPending: boolean
 }
 
-export function ModelConfigMenu({ configuration }: ModelConfigMenuProps) {
+type ModelConfigMenuContentProps = Pick<ModelConfigMenuProps, "configuration">
+
+export function ModelConfigMenu({
+  configuration,
+  commandPending,
+}: ModelConfigMenuProps) {
   const { t } = useTranslation()
   const current = configuration.currentModelConfig
-  const disabled =
-    configuration.metadataLoading ||
-    configuration.metadataError !== null ||
-    configuration.turnRunning ||
-    (configuration.existingAgent && current === null)
+  const disabled = isModelConfigMenuDisabled({
+    metadataLoading: configuration.metadataLoading,
+    metadataError: configuration.metadataError !== null,
+    turnRunning: configuration.turnRunning,
+    existingAgent: configuration.existingAgent,
+    currentModelConfig: current,
+    commandPending,
+  })
   const triggerText = configuration.metadataLoading
     ? t("chat.composer.loadingConfiguration")
     : configuration.agentName === null || current === null
@@ -56,7 +68,7 @@ export function ModelConfigMenu({ configuration }: ModelConfigMenuProps) {
   )
 }
 
-function NewAgentMenu({ configuration }: ModelConfigMenuProps) {
+function NewAgentMenu({ configuration }: ModelConfigMenuContentProps) {
   const { t } = useTranslation()
   const current = configuration.currentModelConfig
 
@@ -101,7 +113,7 @@ function NewAgentMenu({ configuration }: ModelConfigMenuProps) {
   )
 }
 
-function ExistingAgentMenu({ configuration }: ModelConfigMenuProps) {
+function ExistingAgentMenu({ configuration }: ModelConfigMenuContentProps) {
   const { t } = useTranslation()
   const selected = configuration.selectedModelConfig
   const selectedDescriptor = configuration.models.find(

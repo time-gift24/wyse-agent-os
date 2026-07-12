@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   configForModel,
   configForTemplate,
+  isModelConfigMenuDisabled,
   nextDisplayedConfig,
   pendingConfigAfterAcceptance,
   schemaDefault,
@@ -44,6 +45,19 @@ describe("model configuration helpers", () => {
 
     expect(pendingConfigAfterAcceptance(submitted, submitted)).toBeNull()
     expect(pendingConfigAfterAcceptance(newer, submitted)).toBe(newer)
+  })
+
+  it("disables model selection while a command is awaiting confirmation", () => {
+    expect(
+      isModelConfigMenuDisabled({
+        metadataLoading: false,
+        metadataError: false,
+        turnRunning: false,
+        existingAgent: true,
+        currentModelConfig: { model: "openai:test", parameters: {} },
+        commandPending: true,
+      })
+    ).toBe(true)
   })
 
   it("displays the selected Agent template configuration before creation", () => {

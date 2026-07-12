@@ -33,3 +33,27 @@
 - `cargo fmt --all -- --check` — passed
 - `cargo test -p wyse-api --test api` — 77 passed
 - `cargo clippy --workspace --all-targets -- -D warnings` — passed
+
+## Selector pending-state and documentation cleanup
+
+### Changes
+
+- Passed `ChatWorkspace` command-pending state (`isSubmitting`) to `ModelConfigMenu`.
+- Added the command-pending condition to the selector disabled predicate, covering the interval after message acceptance and before the SSE `started` event updates `turnRunning`.
+- Added a pure regression test for the command-pending disabled predicate.
+- Removed the two prohibited committed process documents:
+  - `docs/superpowers/plans/2026-07-12-host-model-config.md`
+  - `docs/superpowers/specs/2026-07-12-host-model-config-design.md`
+
+### Verification
+
+- `npm test` — 1 file, 9 tests passed.
+- `npm run typecheck` — passed.
+- `npm exec prettier -- --check app/lib/model-config.ts app/lib/model-config.test.ts app/components/stratum/model-config-menu.tsx app/components/stratum/chat-workspace.tsx` — passed.
+- `git diff --check` — passed.
+- Confirmed both prohibited process-document paths are absent.
+
+### Concerns
+
+- `config.docker.toml` was already modified before this fix and was deliberately left unstaged and uncommitted. It contains a credential-looking value and should be reviewed and rotated outside this change.
+- No Rust check was run: this change only affects TypeScript and documentation deletion.

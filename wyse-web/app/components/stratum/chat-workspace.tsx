@@ -310,6 +310,7 @@ export function ChatWorkspace({
                 >
                   <ModelConfigMenu
                     configuration={conversation.composerConfiguration}
+                    commandPending={isSubmitting}
                   />
                   <PromptInputSubmit
                     aria-label={t("chat.composer.send")}
