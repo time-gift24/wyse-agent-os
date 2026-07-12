@@ -60,6 +60,7 @@ export function ChatWorkspace() {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const historyContentRef = useRef<HTMLDivElement>(null)
   const submitButtonRef = useRef<HTMLDivElement>(null)
+  const historyInitialized = useRef(false)
   const { state } = conversation
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
@@ -83,6 +84,15 @@ export function ChatWorkspace() {
       const reduceMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
       ).matches
+
+      if (!historyInitialized.current) {
+        historyInitialized.current = true
+        gsap.set(wrapper, {
+          height: isHistoryOpen ? "auto" : 0,
+          opacity: isHistoryOpen ? 1 : 0,
+        })
+        return
+      }
 
       if (reduceMotion) {
         gsap.set(wrapper, {
@@ -149,7 +159,8 @@ export function ChatWorkspace() {
   )
 
   const renderConversationEntry = (
-    agent: (typeof conversation.recentAgents)[number]
+    agent: (typeof conversation.recentAgents)[number],
+    onSelect?: () => void
   ) => {
     const isCurrent = agent.agentId === state.agentId
     const isMissing = state.phase === "missing" && isCurrent
@@ -160,7 +171,10 @@ export function ChatWorkspace() {
           variant={isCurrent ? "secondary" : "ghost"}
           size="lg"
           className="h-auto min-w-0 flex-1 justify-start py-2 text-left"
-          onClick={() => conversation.selectAgent(agent.agentId)}
+          onClick={() => {
+            conversation.selectAgent(agent.agentId)
+            onSelect?.()
+          }}
         >
           <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
             <span className="w-full truncate">{agent.title}</span>
@@ -292,7 +306,6 @@ export function ChatWorkspace() {
               ref={historyContentRef}
               className="overflow-hidden"
               aria-hidden={!isHistoryOpen}
-              style={{ height: 0, opacity: 0 }}
             >
               <Separator
                 data-slot="history-divider"
@@ -305,7 +318,9 @@ export function ChatWorkspace() {
               >
                 {historicalAgents.map((agent) => (
                   <div key={agent.agentId} data-history-item>
-                    {renderConversationEntry(agent)}
+                    {renderConversationEntry(agent, () =>
+                      setIsHistoryOpen(false)
+                    )}
                   </div>
                 ))}
               </CardContent>

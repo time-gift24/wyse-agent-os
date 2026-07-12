@@ -144,9 +144,10 @@ describe("ChatWorkspace", () => {
     // History items stay mounted for the expand animation but are collapsed.
     expect(html).toContain("Newer history")
     expect(html).toContain("Older history")
-    // The wrapper div is collapsed: aria-hidden + height:0 + opacity:0.
+    // The wrapper div is collapsed (aria-hidden). GSAP manages height/opacity
+    // at runtime, so no inline style in SSR.
     expect(html).toMatch(
-      /<div[^>]*overflow-hidden[^>]*aria-hidden="true"[^>]*style="height:0;opacity:0"[^>]*>/
+      /<div[^>]*overflow-hidden[^>]*aria-hidden="true"[^>]*>/
     )
   })
 
