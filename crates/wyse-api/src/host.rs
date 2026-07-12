@@ -16,7 +16,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use wyse_agent::{Agent, AgentError};
-use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
+use wyse_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
 use wyse_core::{AgentId, ChatMessage, DangerLevel, ModelConfig, ToolKind};
 use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath};
 use wyse_infra::EventStreamBus;
@@ -707,6 +707,9 @@ async fn ensure_directory(
 
 fn map_model_parameter_error(error: HostError) -> HostError {
     match error {
+        HostError::Llm(LlmError::ProviderNotFound { model }) => {
+            HostError::Config(ConfigError::ModelNotConfigured { model })
+        }
         HostError::Llm(LlmError::InvalidModelParameters { .. }) => {
             HostError::InvalidModelParameters
         }

@@ -2304,6 +2304,94 @@ async fn invalid_model_parameters_return_422_without_mutating_state() {
 }
 
 #[tokio::test]
+async fn unavailable_message_model_returns_422_without_mutating_state() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Finished)
+        .await;
+    let host = fixture.restore_host().await.expect("host restores");
+    let before = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+
+    let response = router(Arc::clone(&host))
+        .oneshot(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "text": "next",
+                        "model_config": {
+                            "model": "anthropic:unregistered-model",
+                            "parameters": {}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("error body is json");
+    assert_eq!(body["error"]["code"], "model_not_configured");
+    let after = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(after.model_config, before.model_config);
+}
+
+#[tokio::test]
+async fn message_model_config_rejects_unknown_fields() {
+    let fixture = Fixture::new().await;
+    let agent_id = fixture
+        .persist_agent("coding-agent", AgentStatus::Idle)
+        .await;
+
+    let (_, response) = fixture
+        .request(
+            Request::post(format!("/v1/agents/{agent_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "text": "next",
+                        "model_config": {
+                            "model": "openai:test-model",
+                            "parameters": {},
+                            "paramters": {}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("request builds"),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is readable"),
+    )
+    .expect("error body is json");
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
 async fn history_uses_a_fixed_barrier_across_pages() {
     let fixture = Fixture::new().await;
     let agent_id = fixture

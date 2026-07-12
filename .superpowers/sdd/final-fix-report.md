@@ -13,3 +13,23 @@
 - `pnpm --dir wyse-web test -- reducer.test.ts` — 41 passed
 - `pnpm --dir wyse-web typecheck` — passed
 - `pnpm --dir wyse-web build` — passed
+
+## Host model configuration final-review fixes
+
+- P1: an unavailable message `model_config.model` now returns `422` with
+  `model_not_configured`, without changing the persisted model configuration.
+- P2: the HTTP-only nested `model_config` request schema denies unknown fields,
+  returning `400 invalid_request` for misspellings such as `paramters`.
+
+### TDD evidence
+
+- Before the implementation, `unavailable_message_model_returns_422_without_mutating_state`
+  failed with `500` instead of `422`; `message_model_config_rejects_unknown_fields` failed with
+  `202` instead of `400`.
+- After the implementation, both exact regression tests passed.
+
+### Verification
+
+- `cargo fmt --all -- --check` — passed
+- `cargo test -p wyse-api --test api` — 77 passed
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed

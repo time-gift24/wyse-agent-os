@@ -28,7 +28,7 @@ use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalDecision, ApprovalId, EventCursor, EventRecord, HistoryPage,
-    HistoryQuery, ModelConfig, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
+    HistoryQuery, ModelConfig, ModelId, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
 };
 use wyse_infra::EventStreamBusError;
 use wyse_store::{AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE, StoreError};
@@ -91,7 +91,20 @@ struct CreateAgentRequest {
 struct MessageRequest {
     text: String,
     #[serde(default)]
-    model_config: Option<ModelConfig>,
+    model_config: Option<MessageModelConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageModelConfig {
+    model: ModelId,
+    parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+impl From<MessageModelConfig> for ModelConfig {
+    fn from(config: MessageModelConfig) -> Self {
+        Self::new(config.model, config.parameters)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -345,7 +358,11 @@ async fn post_message(
     record_agent_id(agent_id);
     let request = json_request(request)?;
     let run_id = state
-        .start_message(agent_id, request.text, request.model_config)
+        .start_message(
+            agent_id,
+            request.text,
+            request.model_config.map(ModelConfig::from),
+        )
         .await?;
     Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
