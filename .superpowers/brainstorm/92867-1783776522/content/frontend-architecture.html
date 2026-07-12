@@ -1,0 +1,38 @@
+<h2>Wyse 前端：原生事件优先</h2>
+<p class="subtitle">不引入 AI SDK；展示层不拥有协议与持久化事实。</p>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">模块边界</div>
+    <div class="mockup-body" style="display:grid;gap:14px">
+      <div style="border:1px solid #86a2af;border-radius:10px;padding:16px;background:#f6fafb">
+        <strong>ChatWorkspace（现有布局）</strong><br>
+        消息流、输入框、取消、恢复、审批卡片、左侧本地最近会话
+      </div>
+      <div style="text-align:center;font-size:24px;color:#4b718b">↕ 只接收 ViewModel 与 actions</div>
+      <div style="border:1px solid #86a2af;border-radius:10px;padding:16px;background:#f6fafb">
+        <strong>useAgentConversation</strong><br>
+        React reducer + 恢复编排；把 API DTO / StreamEnvelope 投影为 UI 状态
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div style="border:1px solid #b8c8cf;border-radius:10px;padding:14px"><strong>wyse-api client</strong><br>HTTP 请求、SSE 解码、API 错误</div>
+        <div style="border:1px solid #b8c8cf;border-radius:10px;padding:14px"><strong>recent agents</strong><br>localStorage，仅保存本机入口</div>
+      </div>
+      <div style="text-align:center;font-size:24px;color:#4b718b">↕ 原样保留 Wyse 契约</div>
+      <div style="border:1px solid #4b718b;border-radius:10px;padding:16px;background:#edf4f6">
+        <strong>wyse-api</strong><br>
+        AgentView · HistoryPage · 原生 StreamEnvelope SSE · message / resume / cancel / approval
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>状态归属</h3>
+  <div class="pros-cons">
+    <div class="pros"><h4>服务端事实</h4><ul><li>完整消息与 business_seq</li><li>Agent 状态、run / turn</li><li>原生过程事件与 transport cursor</li><li>工具审批的有效性</li></ul></div>
+    <div class="cons"><h4>浏览器投影</h4><ul><li>稳定消息的渲染顺序</li><li>进行中的文本 / reasoning / 工具片段</li><li>未完成审批的界面状态</li><li>本机最近访问过的 Agent</li></ul></div>
+  </div>
+</div>
+
+<p class="subtitle">后续只从 AI Elements 选择视觉组件源码；它们必须接收这里定义的 ViewModel，绝不接入 AI SDK 类型或 transport。</p>

@@ -1,0 +1,85 @@
+<style>
+  .legend { display:flex; gap:12px; flex-wrap:wrap; margin:18px 0 26px; }
+  .chip { border:1px solid rgba(255,255,255,.16); border-radius:999px; padding:7px 12px; font-size:13px; }
+  .chip.stable { background:#173d32; color:#a7f3d0; }
+  .chip.live { background:#33275b; color:#d8ccff; }
+  .chip.transport { background:#3d3420; color:#fde68a; }
+  .flow { display:grid; grid-template-columns:160px 1fr; gap:0; border:1px solid rgba(255,255,255,.12); border-radius:16px; overflow:hidden; }
+  .lane { padding:17px 16px; border-bottom:1px solid rgba(255,255,255,.09); background:rgba(255,255,255,.025); font-weight:700; }
+  .lane-body { padding:15px 18px; border-bottom:1px solid rgba(255,255,255,.09); }
+  .lane:last-of-type, .lane-body:last-child { border-bottom:0; }
+  .step { display:flex; align-items:flex-start; gap:12px; margin:9px 0; }
+  .num { flex:0 0 26px; width:26px; height:26px; display:grid; place-items:center; border-radius:50%; background:#294c72; color:#dbeafe; font-size:12px; font-weight:800; }
+  .arrow { color:#8aa4bf; font-weight:700; padding:0 4px; }
+  code { color:#c4e5ff; }
+  .timeline { display:flex; align-items:center; gap:7px; overflow-x:auto; padding:14px 0 6px; }
+  .event { min-width:112px; padding:10px 12px; border-radius:10px; text-align:center; font-size:12px; border:1px solid rgba(255,255,255,.14); }
+  .event.stable { background:#173d32; color:#a7f3d0; }
+  .event.live { background:#33275b; color:#d8ccff; }
+  .note { margin-top:22px; padding:15px 17px; border-left:3px solid #f59e0b; background:rgba(245,158,11,.08); border-radius:8px; }
+  .invariant { margin-top:18px; padding:16px; border:1px solid rgba(52,211,153,.3); background:rgba(16,185,129,.07); border-radius:12px; }
+  .muted { color:#9fb0c1; }
+</style>
+
+<h2>Checkpoint history → JetStream replay → live subscription</h2>
+<p class="subtitle">No <code>MessageCommitted</code>. The same stable event is stored in <code>messages/{seq}.json</code> and published to JetStream with its business <code>seq</code>.</p>
+
+<div class="legend">
+  <span class="chip stable">Stable event · has business seq · checkpointed</span>
+  <span class="chip live">Realtime event · no business seq · JetStream only</span>
+  <span class="chip transport">JetStream stream sequence · transport cursor only</span>
+</div>
+
+<div class="section">
+  <div class="label">Example JetStream timeline</div>
+  <div class="timeline">
+    <div class="event stable">user event<br><strong>seq 40</strong></div><span class="arrow">→</span>
+    <div class="event live">llm_started<br>JS #801</div><span class="arrow">→</span>
+    <div class="event live">reason_delta<br>JS #802</div><span class="arrow">→</span>
+    <div class="event live">text_delta<br>JS #803</div><span class="arrow">→</span>
+    <div class="event stable">assistant event<br><strong>seq 41</strong></div><span class="arrow">→</span>
+    <div class="event live">next delta<br>JS #805</div>
+  </div>
+  <p class="muted">Business seq 40/41 is Agent-lifetime stable history. JS #801…#805 is assigned by JetStream to every retained event.</p>
+</div>
+
+<div class="flow">
+  <div class="lane">Client</div>
+  <div class="lane-body">
+    <div class="step"><span class="num">1</span><div>Send <code>front_seq = F</code> to the recovery endpoint.</div></div>
+    <div class="step"><span class="num">6</span><div>Apply stable history first, then fold replayed deltas by existing <code>run_id</code>, <code>llm_call_id</code>, and <code>tool_call_id</code>; continue on the same consumer as live traffic arrives.</div></div>
+  </div>
+
+  <div class="lane">Recovery API</div>
+  <div class="lane-body">
+    <div class="step"><span class="num">2</span><div>Read <code>agent.json.last_seq = L</code> as the stable barrier.</div></div>
+    <div class="step"><span class="num">3</span><div>Page checkpoint events from the mounted filesystem for the missing stable range.</div></div>
+    <div class="step"><span class="num">4</span><div>Resolve the JetStream transport position of the stable event carrying business <code>seq = L</code>.</div></div>
+    <div class="step"><span class="num">5</span><div>Create an ordered consumer at <code>JS(anchor L) + 1</code>. It first replays retained transient events after the stable barrier, then naturally becomes the live subscription.</div></div>
+  </div>
+
+  <div class="lane">Mounted filesystem</div>
+  <div class="lane-body">
+    <div><code>agent.json</code> is authoritative for <code>last_seq</code>.</div>
+    <div><code>messages/{seq}.json</code> stores the exact stable event returned by history pagination.</div>
+  </div>
+
+  <div class="lane">JetStream</div>
+  <div class="lane-body">
+    <div>Retains both stable seq-bearing events and unsequenced deltas/lifecycle events.</div>
+    <div>The anchor lookup maps business <code>seq = L</code> to JetStream's internal stream sequence; the client never mixes those counters.</div>
+  </div>
+</div>
+
+<div class="invariant">
+  <strong>Integration rule</strong><br>
+  A later stable event with <code>seq</code> is authoritative. It replaces the provisional content assembled from its preceding realtime deltas. No extra commit event is introduced.
+</div>
+
+<div class="note">
+  <strong>Interval correction:</strong> we previously defined <code>last_seq</code> as the last committed seq (inclusive). If <code>front_seq</code> means “the last seq already held by the client,” the missing range is <code>(front_seq, last_seq]</code>, not <code>[front_seq, last_seq)</code>. The latter only works if one of the two fields is redefined as an exclusive cursor.
+</div>
+
+<div class="note">
+  <strong>Retention boundary:</strong> if the JetStream anchor for <code>last_seq</code> has expired, stable history still recovers from the filesystem, but exact transient replay is impossible. The server must return a reset/gap signal and start from the earliest retained event or from live traffic.
+</div>

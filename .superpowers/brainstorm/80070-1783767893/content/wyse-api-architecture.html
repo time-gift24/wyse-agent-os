@@ -1,0 +1,58 @@
+<h2>wyse-api：Session-first，单 Agent 实现</h2>
+<p class="subtitle">外部协议以 Session 为中心；首版内部每个 Session 只绑定一个 Agent，保留未来多 Agent 扩展空间。</p>
+
+<div class="mockup">
+  <div class="mockup-header">请求与状态边界</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:1fr auto 1.35fr auto 1.1fr;gap:14px;align-items:center">
+      <div style="padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface)">
+        <div class="label">Browser</div>
+        <h3 style="margin-top:8px">wyse-web</h3>
+        <p>Session 切换、消息分页、SSE、取消与审批</p>
+      </div>
+      <div style="font-size:26px">→</div>
+      <div style="padding:18px;border:2px solid var(--accent);border-radius:14px;background:var(--surface)">
+        <div class="label">New crate</div>
+        <h3 style="margin-top:8px">wyse-api</h3>
+        <p>HTTP 契约、SessionRegistry、错误映射、SSE 桥接</p>
+        <div style="margin-top:12px;padding:10px;border-radius:10px;background:var(--surface-2)"><strong>SessionId → AgentHandle</strong><br><small>首版一对一，协议不暴露该限制</small></div>
+      </div>
+      <div style="font-size:26px">→</div>
+      <div style="padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface)">
+        <div class="label">Runtime</div>
+        <h3 style="margin-top:8px">Agent</h3>
+        <p>run_turn、resume、stop、resolve_tool_approval</p>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:22px">
+      <div style="padding:18px;border:1px solid var(--border);border-radius:14px">
+        <div class="label">Durable history</div>
+        <h3 style="margin-top:8px">AgentStore</h3>
+        <p><code>AgentState</code> + 固定范围的 <code>history_page</code></p>
+        <p style="margin-top:8px"><strong>永久保证：</strong>完整 user / assistant / tool 消息</p>
+      </div>
+      <div style="padding:18px;border:1px solid var(--border);border-radius:14px">
+        <div class="label">Recent + live stream</div>
+        <h3 style="margin-top:8px">EventStreamBus → NATS</h3>
+        <p><code>subscribe_agent(agent_id, ReplayStart)</code></p>
+        <p style="margin-top:8px"><strong>SSE id：</strong>opaque transport cursor</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:28px">
+  <h3>Session 切换 / 恢复顺序</h3>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px">
+    <div style="padding:15px;border-radius:12px;background:var(--surface-2)"><strong>1. Load state</strong><br><small>读取 session 与 AgentState</small></div>
+    <div style="padding:15px;border-radius:12px;background:var(--surface-2)"><strong>2. Page history</strong><br><small>固定 through_seq 分页完整消息</small></div>
+    <div style="padding:15px;border-radius:12px;background:var(--surface-2)"><strong>3. Decide resume</strong><br><small>仅 running 且需要时续接 turn</small></div>
+    <div style="padding:15px;border-radius:12px;background:var(--surface-2)"><strong>4. Attach SSE</strong><br><small>Last-Event-ID 续接，否则选择近期/新事件</small></div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:26px">
+  <div class="label">Dependency rule</div>
+  <p><strong>wyse-api 负责组合与 HTTP；不复制事件模型，不把 NATS payload 转成另一套聊天协议。</strong>客户端直接消费类型化的 <code>StreamEnvelope</code>，稳定历史仍来自 <code>AgentStore</code>。</p>
+</div>

@@ -1,0 +1,104 @@
+<style>
+  .legend { display:flex; gap:10px; flex-wrap:wrap; margin:16px 0 24px; }
+  .tag { border-radius:999px; padding:6px 11px; font-size:12px; font-weight:700; border:1px solid rgba(255,255,255,.14); }
+  .live { background:#352858; color:#ddd2ff; }
+  .stable { background:#173f34; color:#a7f3d0; }
+  .gap { background:#512a2a; color:#fecaca; }
+  .neutral { background:#263747; color:#d7e7f4; }
+  .tree { display:grid; grid-template-columns:1fr 1.15fr 1.25fr; gap:14px; align-items:start; }
+  .column { border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:15px; background:rgba(255,255,255,.025); }
+  .column h3 { margin:0 0 12px; }
+  .node { padding:9px 10px; border-radius:9px; border:1px solid rgba(255,255,255,.11); margin:7px 0; font-size:13px; }
+  .node code { color:inherit; }
+  .path { margin:20px 0; padding:15px 17px; background:rgba(59,130,246,.08); border:1px solid rgba(96,165,250,.25); border-radius:12px; }
+  .pathline { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-weight:700; }
+  .arrow { color:#8fa8bd; }
+  .envelope { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:7px; margin-top:12px; }
+  .field { padding:10px 8px; border-radius:8px; text-align:center; background:#263747; color:#d7e7f4; font-size:12px; }
+  .issues { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:20px; }
+  .issue { border:1px solid rgba(248,113,113,.25); background:rgba(127,29,29,.12); border-radius:12px; padding:14px; }
+  .issue strong { color:#fecaca; }
+  .small { color:#9fb0c1; font-size:12px; }
+  @media (max-width:900px) { .tree,.issues { grid-template-columns:1fr; } .envelope { grid-template-columns:repeat(2,1fr); } }
+</style>
+
+<h2>Current Wyse event model</h2>
+<p class="subtitle">What exists today, how Agent events are actually wrapped, and where the checkpoint-recovery gap is.</p>
+
+<div class="legend">
+  <span class="tag neutral">Current structure</span>
+  <span class="tag live">Realtime / JetStream event</span>
+  <span class="tag stable">Contains stable data candidate</span>
+  <span class="tag gap">Missing stable event shape</span>
+</div>
+
+<div class="section">
+  <div class="label">Top-level envelope — every current event has all six fields</div>
+  <div class="envelope">
+    <div class="field">run_id</div>
+    <div class="field">seq: u64</div>
+    <div class="field">timestamp</div>
+    <div class="field">source</div>
+    <div class="field">RuntimeEvent</div>
+    <div class="field">metadata</div>
+  </div>
+</div>
+
+<div class="path">
+  <div class="label">Actual Agent publishing path</div>
+  <div class="pathline">
+    <code>StreamEnvelope</code><span class="arrow">→</span>
+    <code>RuntimeEvent::Agent</code><span class="arrow">→</span>
+    <code>AgentEvent::Llm</code><span class="arrow">→</span>
+    <code>LlmEvent</code>
+  </div>
+  <p class="small">Although <code>RuntimeEvent::Llm</code> exists, the current Agent loop does not use it. It nests LLM events beneath the Agent.</p>
+</div>
+
+<div class="tree">
+  <div class="column">
+    <h3>RuntimeEvent</h3>
+    <div class="node neutral"><code>RunStarted</code></div>
+    <div class="node neutral"><code>RunFinished</code></div>
+    <div class="node neutral"><code>RunFailed</code></div>
+    <div class="node neutral"><code>RunCancelled</code></div>
+    <div class="node neutral"><code>NodeStarted / Output / Finished / Failed</code></div>
+    <div class="node neutral"><code>Llm { llm_call_id, event }</code></div>
+    <div class="node live"><code>Agent { agent_id, event }</code><br><span class="small">actual Agent path</span></div>
+    <div class="node neutral"><code>PlanUpdated</code></div>
+  </div>
+
+  <div class="column">
+    <h3>AgentEvent</h3>
+    <div class="node live"><code>Started</code><br><span class="small">lifecycle only</span></div>
+    <div class="node live"><code>Finished { finish_reason, usage }</code><br><span class="small">lifecycle only</span></div>
+    <div class="node live"><code>Failed { error_text }</code></div>
+    <div class="node live"><code>Cancelled</code></div>
+    <div class="node live"><code>Llm { llm_call_id, event }</code><br><span class="small">wraps every LLM event below</span></div>
+    <div class="node gap"><strong>No user-message event</strong><br><span class="small">the user ChatMessage only enters checkpoint history</span></div>
+  </div>
+
+  <div class="column">
+    <h3>LlmEvent</h3>
+    <div class="node live"><code>Started</code></div>
+    <div class="node live"><code>TextDelta { role, delta }</code></div>
+    <div class="node live"><code>ReasoningDelta { delta }</code></div>
+    <div class="node live"><code>ToolCallStarted</code></div>
+    <div class="node live"><code>ToolCallDelta</code></div>
+    <div class="node stable"><code>ToolCallFinished { call_id, result }</code><br><span class="small">has a complete result, but is not a ChatMessage</span></div>
+    <div class="node live"><code>ToolCallFailed</code></div>
+    <div class="node gap"><code>Finished { finish_reason, usage }</code><br><span class="small">does not contain aggregated text, reasoning, or tool calls</span></div>
+    <div class="node live"><code>Failed { error_text }</code></div>
+  </div>
+</div>
+
+<div class="issues">
+  <div class="issue"><strong>All events consume seq today</strong><p class="small">Every delta calls the same <code>reserve_event_seq()</code>.</p></div>
+  <div class="issue"><strong>No exact checkpoint event</strong><p class="small">Checkpoint stores a separate <code>Vec&lt;ChatMessage&gt;</code> BLOB, not these envelopes.</p></div>
+  <div class="issue"><strong>No recovery anchor</strong><p class="small">The stable ChatMessage and its JetStream delta sequence are not tied by an event carrying business seq.</p></div>
+</div>
+
+<div style="margin-top:22px;padding:15px 17px;border-left:3px solid #60a5fa;background:rgba(59,130,246,.08);border-radius:8px">
+  <strong>Design question exposed by the current tree</strong><br>
+  We need stable, seq-bearing semantic events for user / assistant / tool history. The decision is whether to enrich existing semantic events or introduce one neutral message event — without adding a separate <code>MessageCommitted</code> lifecycle event.
+</div>

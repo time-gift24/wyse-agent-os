@@ -1,0 +1,45 @@
+<h2>Agent 对话恢复：NATS cache-first</h2>
+<p class="subtitle">同一个 JetStream subscription 从 retained 进入 live；AgentStore 只补稳定消息缺口。</p>
+
+<div class="mockup">
+  <div class="mockup-header">首次连接：GET /v1/agents/{agent_id}/events</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;align-items:stretch">
+      <div style="padding:14px;border-radius:12px;background:var(--surface-2)"><div class="label">1</div><strong>Subscribe All</strong><p style="margin-top:7px">创建持续订阅并取得 initial_pending</p></div>
+      <div style="padding:14px;border-radius:12px;background:var(--surface-2)"><div class="label">2</div><strong>Drain retained</strong><p style="margin-top:7px">精确消费 initial_pending 条记录</p></div>
+      <div style="padding:14px;border-radius:12px;background:var(--surface-2)"><div class="label">3</div><strong>Index stable</strong><p style="margin-top:7px">按 business_seq 收集 message</p></div>
+      <div style="padding:14px;border-radius:12px;background:var(--surface-2)"><div class="label">4</div><strong>Find gaps</strong><p style="margin-top:7px">读取 AgentState.last_seq 并计算缺口</p></div>
+      <div style="padding:14px;border-radius:12px;background:var(--surface-2)"><div class="label">5</div><strong>Fill only gaps</strong><p style="margin-top:7px">仅缺失区间调用 history_page</p></div>
+      <div style="padding:14px;border-radius:12px;background:var(--surface-2)"><div class="label">6</div><strong>Continue live</strong><p style="margin-top:7px">保留同一订阅，无切换窗口</p></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.3fr .7fr;gap:18px;margin-top:24px">
+      <div style="padding:18px;border:2px solid var(--accent);border-radius:14px">
+        <div class="label">Cache hit path</div>
+        <h3 style="margin-top:8px">NATS 覆盖 1..=last_seq</h3>
+        <p>不读取任何 message 文件；只读取一次 AgentState。retained 过程事件继续按 transport cursor 输出。</p>
+      </div>
+      <div style="padding:18px;border:1px solid var(--border);border-radius:14px">
+        <div class="label">Fallback path</div>
+        <h3 style="margin-top:8px">存在 prefix / gap</h3>
+        <p>AgentStore 只返回缺失的 business_seq 范围。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:26px">
+  <h3>SSE 输出阶段</h3>
+  <div style="display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:14px;align-items:center;margin-top:14px">
+    <div style="padding:16px;border-radius:12px;background:var(--surface-2)"><strong>history_page</strong><p style="margin-top:7px">合并后的稳定消息；无 SSE id</p></div>
+    <div style="font-size:24px">→</div>
+    <div style="padding:16px;border-radius:12px;background:var(--surface-2)"><strong>retained process events</strong><p style="margin-top:7px">跳过已投影的稳定 message；保留 cursor id</p></div>
+    <div style="font-size:24px">→</div>
+    <div style="padding:16px;border-radius:12px;background:var(--surface-2)"><strong>live events</strong><p style="margin-top:7px">所有新事件，包括新稳定 message</p></div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:26px">
+  <div class="label">EventStreamBus change</div>
+  <p><code>subscribe_agent(...)</code> 返回 <code>EventSubscription { initial_pending, events }</code>。不新增独立 NATS 历史分页接口。</p>
+</div>

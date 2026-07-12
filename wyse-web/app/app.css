@@ -375,10 +375,7 @@
   }
 
   .prompt-input-glass {
-    background: var(--wyse-canvas);
-    box-shadow:
-      0 -1.5rem 2.5rem color-mix(in oklch, var(--wyse-canvas) 60%, transparent),
-      var(--wyse-shadow-soft);
+    box-shadow: 0 -0.5rem 1.5rem color-mix(in oklch, var(--wyse-canvas) 40%, transparent);
   }
 
 }

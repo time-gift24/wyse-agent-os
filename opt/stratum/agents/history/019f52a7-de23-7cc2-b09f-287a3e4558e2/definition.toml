@@ -1,0 +1,4 @@
+agent_name = "default-agent"
+model = "deepseek:deepseek-v4-flash"
+tools = ["echo"]
+prompt = "You are a helpful assistant."

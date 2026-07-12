@@ -114,6 +114,7 @@ export function ChatWorkspace({
   )
 
   // 输入框位置切换动画：居中 <-> 底部
+  // 只用 bottom 属性控制，避免 top/bottom 切换导致的跳动
   useGSAP(
     () => {
       const container = inputContainerRef.current
@@ -124,20 +125,18 @@ export function ChatWorkspace({
       ).matches
 
       if (state.agentId === null) {
-        // 居中状态
+        // 居中状态 - bottom: 50% + translateY(-50%) 实现垂直居中
         gsap.to(container, {
+          bottom: "50%",
           yPercent: -50,
-          top: "50%",
-          bottom: "auto",
           duration: reduceMotion ? 0 : 0.5,
           ease: "sine.inOut",
         })
       } else {
-        // 底部状态 - 直接向下移动，无宽度变化
+        // 底部状态 - bottom: 0, translateY: 0
         gsap.to(container, {
-          yPercent: 0,
-          top: "auto",
           bottom: 0,
+          yPercent: 0,
           duration: reduceMotion ? 0 : 0.5,
           ease: "sine.inOut",
         })
@@ -263,12 +262,7 @@ export function ChatWorkspace({
 
       <div
         ref={inputContainerRef}
-        className={cn(
-          "fixed inset-x-0 z-40 mb-0 wyse-content-width mx-auto px-4 md:px-0",
-          state.agentId === null
-            ? "top-1/2 -translate-y-1/2"
-            : "bottom-0"
-        )}
+        className="fixed inset-x-0 z-40 wyse-content-width mx-auto px-4 md:px-0"
       >
         <Card
           size="sm"

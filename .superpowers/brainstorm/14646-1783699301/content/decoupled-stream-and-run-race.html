@@ -1,0 +1,47 @@
+<style>
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .panel { border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:16px; background:rgba(255,255,255,.025); }
+  .lane { display:grid; grid-template-columns:120px 1fr; border:1px solid rgba(255,255,255,.1); border-radius:11px; overflow:hidden; margin:10px 0; }
+  .who { padding:12px; background:#263747; font-weight:800; }
+  .what { padding:12px 14px; }
+  .step { display:flex; align-items:flex-start; gap:10px; margin:11px 0; }
+  .num { width:25px; height:25px; flex:0 0 25px; display:grid; place-items:center; border-radius:50%; background:#294c72; color:#dbeafe; font-size:12px; font-weight:800; }
+  .good { border-left:3px solid #34d399; padding:12px 14px; background:rgba(16,185,129,.08); border-radius:8px; margin-top:13px; }
+  .warn { border-left:3px solid #f59e0b; padding:12px 14px; background:rgba(245,158,11,.08); border-radius:8px; margin-top:13px; }
+  .subject { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; padding:9px 11px; border-radius:8px; background:#1f3344; color:#d7efff; margin:7px 0; }
+  .state { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
+  .pill { border-radius:999px; padding:7px 11px; background:#3c341f; color:#fde68a; border:1px solid rgba(253,230,138,.2); font-size:12px; }
+  code { color:#cae8ff; }
+  @media (max-width:850px){ .grid{grid-template-columns:1fr;} }
+</style>
+
+<h2>Decoupled JetStream + concurrent send handling</h2>
+<p class="subtitle">JetStream durability is useful, but it is not part of the checkpoint commit. Agent CAS independently prevents two processes from starting overlapping LLM runs.</p>
+
+<div class="grid">
+  <div class="panel">
+    <h3>Two independent durable planes</h3>
+    <div class="lane"><div class="who">Filesystem</div><div class="what"><code>agent.json</code> and <code>messages/{seq}.json</code> are the authoritative stable history.</div></div>
+    <div class="lane"><div class="who">JetStream</div><div class="what">File-backed retained runtime log. It persists every event that NATS accepted, including deltas.</div></div>
+    <div class="step"><span class="num">1</span><div>Commit the stable message using filesystem CAS only.</div></div>
+    <div class="step"><span class="num">2</span><div>Publish the same seq-bearing message event to JetStream independently.</div></div>
+    <div class="step"><span class="num">3</span><div>If publish fails, keep the checkpoint; refresh recovers stable history. No rollback and no anchor requirement.</div></div>
+    <div class="good">A client with a JetStream consumer cursor can resume retained events. A hard refresh can load checkpoint history and begin a fresh live consumer; losing a rare in-flight draft is acceptable.</div>
+    <div class="subject">events.agent.&lt;agent_id&gt;.&gt;</div>
+    <p>No new <code>wyse.</code> prefix in subjects, stream names, inboxes, or storage paths.</p>
+  </div>
+
+  <div class="panel">
+    <h3>Two users send to the same Agent</h3>
+    <div class="state">
+      <span class="pill">status = idle</span><span class="pill">last_seq = N</span>
+    </div>
+    <div class="step"><span class="num">1</span><div>A and B both read the same idle Agent version and both target <code>N + 1</code>.</div></div>
+    <div class="step"><span class="num">2</span><div>Only A wins <code>put(messages/N+1.json, Absent)</code>. B cannot overwrite it.</div></div>
+    <div class="step"><span class="num">3</span><div>A CAS-updates <code>agent.json</code> in one write: <code>last_seq=N+1</code>, <code>status=running</code>, and A's <code>run_id/turn_id</code>.</div></div>
+    <div class="step"><span class="num">4</span><div>B re-reads after the conflict, sees <code>status=running</code>, does not persist its own message and does not start another stream. It returns Agent-busy/retry.</div></div>
+    <div class="step"><span class="num">5</span><div>Assistant/tool appends must match the active <code>run_id/turn_id</code>; stale writers fail closed.</div></div>
+    <div class="good">Result: one Agent has at most one active LLM stream across processes. No interleaved histories and no speculative queue.</div>
+    <div class="warn">If the winning process crashes after the running state is committed, ordinary sends still see busy. Explicit runtime recovery must resume that persisted run; <code>last_seq</code> alone cannot distinguish “alive” from “crashed.”</div>
+  </div>
+</div>

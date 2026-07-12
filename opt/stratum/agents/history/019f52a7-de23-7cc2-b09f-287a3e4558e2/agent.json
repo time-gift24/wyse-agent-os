@@ -1,0 +1,1 @@
+{"state_version":1,"agent_id":"019f52a7-de23-7cc2-b09f-287a3e4558e2","name":"default-agent","status":"finished","run_id":"019f52bc-e8c5-7130-83fd-9aa4357f05b9","turn_id":"019f52bc-e8c5-7130-83fd-9abdccf185c1","next_iteration":1,"usage":{"input_tokens":322,"output_tokens":194,"total_tokens":516},"last_seq":6,"updated_at":"2026-07-11T19:52:23.213412263Z"}

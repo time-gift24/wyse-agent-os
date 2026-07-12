@@ -1,0 +1,65 @@
+<style>
+  .subject { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; padding:11px 13px; border-radius:9px; background:#1f3344; color:#d7efff; margin:8px 0; overflow:auto; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .panel { border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:16px; background:rgba(255,255,255,.025); }
+  .steps { counter-reset:step; }
+  .step { position:relative; margin:12px 0 12px 38px; min-height:28px; }
+  .step:before { counter-increment:step; content:counter(step); position:absolute; left:-38px; top:-2px; width:25px; height:25px; border-radius:50%; display:grid; place-items:center; background:#294c72; color:#dbeafe; font-size:12px; font-weight:800; }
+  .ok { border-left:3px solid #34d399; padding:12px 14px; background:rgba(16,185,129,.08); border-radius:8px; margin-top:14px; }
+  .warn { border-left:3px solid #f59e0b; padding:12px 14px; background:rgba(245,158,11,.08); border-radius:8px; margin-top:14px; }
+  .bad { border-left:3px solid #f87171; padding:12px 14px; background:rgba(239,68,68,.08); border-radius:8px; margin-top:14px; }
+  .timeline { display:flex; align-items:center; gap:8px; overflow:auto; padding:14px 0 5px; }
+  .box { min-width:116px; text-align:center; border-radius:10px; padding:10px; border:1px solid rgba(255,255,255,.13); font-size:12px; }
+  .fs { background:#173f34; color:#a7f3d0; }
+  .js { background:#352858; color:#ddd2ff; }
+  .cas { background:#3c341f; color:#fde68a; }
+  .arrow { color:#8fa8bd; font-weight:800; }
+  code { color:#cceaff; }
+  @media (max-width:850px){ .grid{grid-template-columns:1fr;} }
+</style>
+
+<h2>JetStream anchor protocol</h2>
+<p class="subtitle">The checkpointed <code>AgentEvent::Message { seq, ... }</code> is the anchor. No extra commit event.</p>
+
+<div class="section">
+  <div class="label">Agent-scoped subjects</div>
+  <div class="subject">wyse.events.agent.&lt;agent_id&gt;.message.&lt;seq&gt;</div>
+  <div class="subject">wyse.events.agent.&lt;agent_id&gt;.run.&lt;run_id&gt;.realtime</div>
+  <p>Subscribe to <code>wyse.events.agent.&lt;agent_id&gt;.&gt;</code> for the whole Agent lifetime. The exact message subject lets the server resolve business <code>seq</code> to JetStream's internal stream sequence.</p>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h3>Stable message write</h3>
+    <div class="timeline">
+      <div class="box fs">1 · put message<br><strong>Absent</strong></div><span class="arrow">→</span>
+      <div class="box js">2 · publish same event<br><strong>wait for ack</strong></div><span class="arrow">→</span>
+      <div class="box cas">3 · CAS agent.json<br><strong>last_seq = N</strong></div>
+    </div>
+    <div class="steps">
+      <div class="step"><code>messages/N.json</code> stores the exact seq-bearing envelope.</div>
+      <div class="step">Publish it to the exact message subject with deterministic <code>Nats-Msg-Id = agent_id:N</code>.</div>
+      <div class="step">Only after JetStream ack, CAS-advance <code>agent.json.last_seq</code>.</div>
+    </div>
+    <div class="ok"><strong>Invariant:</strong> if <code>agent.json.last_seq = N</code>, both the checkpoint file and its JetStream anchor have existed.</div>
+    <div class="warn">A live subscriber can briefly see message N before <code>last_seq</code> advances. The seq-bearing event is already staged in the filesystem; another writer can help finish its CAS commit.</div>
+  </div>
+
+  <div class="panel">
+    <h3>Client recovery from front_seq = F</h3>
+    <div class="steps">
+      <div class="step">Read a fixed barrier <code>agent.json.last_seq = L</code>.</div>
+      <div class="step">Direct-get subject <code>...message.L</code>; extract JetStream stream sequence <code>J</code>.</div>
+      <div class="step">Immediately create an ordered Agent consumer at <code>J + 1</code>; buffer its events.</div>
+      <div class="step">Page stable checkpoint history <code>(F, L]</code> from <code>messages/</code>.</div>
+      <div class="step">After history is applied, drain buffered JetStream events, then keep the same consumer open for live traffic.</div>
+    </div>
+    <div class="ok">Messages committed concurrently after barrier L arrive through JetStream, so they are not duplicated in the fixed history page and are not missed.</div>
+    <div class="warn">If anchor L has expired under retention, stable recovery still succeeds from files, but transient replay cannot be exact. Return a reset/gap signal and begin from live traffic.</div>
+  </div>
+</div>
+
+<div class="bad">
+  <strong>Why publish cannot remain warning-only for seq-bearing events:</strong>
+  advancing <code>last_seq</code> before JetStream acknowledges the same event can leave a committed checkpoint with no stream anchor. Realtime-only events may remain best-effort; checkpoint message events may not.
+</div>

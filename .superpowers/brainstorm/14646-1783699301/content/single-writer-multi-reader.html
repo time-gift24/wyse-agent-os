@@ -1,0 +1,68 @@
+<style>
+  .topology { display:grid; grid-template-columns:1fr 1.25fr 1fr; gap:14px; align-items:stretch; }
+  .box { border:1px solid rgba(255,255,255,.12); border-radius:14px; padding:16px; background:rgba(255,255,255,.025); }
+  .writer { background:rgba(16,185,129,.08); border-color:rgba(52,211,153,.25); }
+  .store { background:rgba(59,130,246,.07); border-color:rgba(96,165,250,.24); }
+  .readers { background:rgba(139,92,246,.08); border-color:rgba(167,139,250,.25); }
+  .arrow { display:grid; place-items:center; color:#8fa8bd; font-weight:800; }
+  .flow { margin-top:20px; border:1px solid rgba(255,255,255,.11); border-radius:14px; padding:16px; }
+  .step { display:grid; grid-template-columns:28px 1fr; gap:10px; margin:11px 0; align-items:start; }
+  .num { width:25px; height:25px; display:grid; place-items:center; border-radius:50%; background:#294c72; color:#dbeafe; font-size:12px; font-weight:800; }
+  .timeline { display:flex; align-items:center; gap:7px; overflow:auto; padding:14px 0 5px; }
+  .event { min-width:120px; padding:10px; text-align:center; border-radius:9px; border:1px solid rgba(255,255,255,.13); font-size:12px; }
+  .history { background:#173f34; color:#a7f3d0; }
+  .buffer { background:#352858; color:#ddd2ff; }
+  .good { border-left:3px solid #34d399; padding:12px 14px; background:rgba(16,185,129,.08); border-radius:8px; margin-top:14px; }
+  .note { border-left:3px solid #60a5fa; padding:12px 14px; background:rgba(59,130,246,.08); border-radius:8px; margin-top:14px; }
+  code { color:#cceaff; }
+  ul { margin-bottom:0; }
+  @media(max-width:850px){ .topology{grid-template-columns:1fr;} .arrow{display:none;} }
+</style>
+
+<h2>Single writer, concurrent readers</h2>
+<p class="subtitle">The Agent creator owns writes. Other users can read history and subscribe concurrently, but cannot append messages or start an LLM run.</p>
+
+<div class="topology">
+  <div class="box writer">
+    <h3>Creator / writer</h3>
+    <ul>
+      <li>Only principal allowed to append</li>
+      <li>At most one active run</li>
+      <li>CAS protects stale process/retry writes</li>
+    </ul>
+  </div>
+  <div class="box store">
+    <h3>Agent durable state</h3>
+    <p><code>agent.json</code><br><code>messages/{seq}.json</code></p>
+    <p>JetStream remains an independent, file-backed runtime log.</p>
+  </div>
+  <div class="box readers">
+    <h3>Concurrent readers</h3>
+    <ul>
+      <li>History pagination</li>
+      <li>JetStream replay/live subscription</li>
+      <li>No CAS write path</li>
+    </ul>
+  </div>
+</div>
+
+<div class="flow">
+  <h3>Reader recovery while last_seq changes</h3>
+  <div class="timeline">
+    <div class="event buffer">Open consumer<br><strong>buffer live</strong></div><span>→</span>
+    <div class="event history">Read barrier<br><strong>L = 40</strong></div><span>→</span>
+    <div class="event history">Page history<br><strong>(front, 40]</strong></div><span>→</span>
+    <div class="event buffer">Writer commits<br><strong>seq 41</strong></div><span>→</span>
+    <div class="event buffer">Drain buffer<br><strong>then live</strong></div>
+  </div>
+  <div class="step"><span class="num">1</span><div>Create the Agent-scoped JetStream consumer first and buffer incoming events.</div></div>
+  <div class="step"><span class="num">2</span><div>Read a fixed checkpoint barrier <code>last_seq = L</code>.</div></div>
+  <div class="step"><span class="num">3</span><div>Page only stable history <code>(front_seq, L]</code>. Later changes do not move this barrier.</div></div>
+  <div class="step"><span class="num">4</span><div>If the writer commits <code>L + 1</code> during pagination, its event is already buffered by the consumer.</div></div>
+  <div class="step"><span class="num">5</span><div>After history is applied, discard buffered seq-bearing message events <code>&lt;= L</code>, fold remaining retained realtime events, and continue live.</div></div>
+  <div class="good">No business-seq ↔ JetStream-sequence anchor is required, and checkpoint commit does not depend on NATS availability.</div>
+</div>
+
+<div class="note">
+  <strong>CAS purpose in this model:</strong> protect creator writes across process retries, crash recovery, and stale snapshots. It is not a normal multi-user arbitration mechanism; authorization prevents other users from entering the write path.
+</div>

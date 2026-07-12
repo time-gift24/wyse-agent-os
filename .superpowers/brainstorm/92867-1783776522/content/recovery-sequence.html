@@ -1,0 +1,32 @@
+<h2>恢复与实时合并</h2>
+<p class="subtitle">严格遵循已批准的 Web 恢复契约：SSE 先建立，历史后读取，消息按业务序号去重。</p>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">打开 / 刷新某个 Agent</div>
+    <div class="mockup-body" style="display:grid;gap:10px">
+      <div style="display:grid;grid-template-columns:36px 1fr;gap:12px;align-items:start"><strong style="color:#4b718b">1</strong><div><strong>先建立 SSE</strong><br><span class="subtitle">首次：<code>replay=all</code>；刷新：按该 agent 保存的 <code>after_cursor</code>。立即把 retained + live 事件按到达顺序暂存。</span></div></div>
+      <div style="display:grid;grid-template-columns:36px 1fr;gap:12px;align-items:start"><strong style="color:#4b718b">2</strong><div><strong>读取 AgentView</strong><br><span class="subtitle">取得状态与 <code>last_seq</code>，固定这次历史的上界。</span></div></div>
+      <div style="display:grid;grid-template-columns:36px 1fr;gap:12px;align-items:start"><strong style="color:#4b718b">3</strong><div><strong>分页读取 HistoryPage</strong><br><span class="subtitle">持续请求 <code>after_seq</code> + 固定 <code>through_seq=last_seq</code>，构建完整稳定消息。</span></div></div>
+      <div style="display:grid;grid-template-columns:36px 1fr;gap:12px;align-items:start"><strong style="color:#4b718b">4</strong><div><strong>投影并排空 SSE 缓冲</strong><br><span class="subtitle">以 <code>(agent_id, business_seq)</code> 去重稳定消息；过程事件只更新暂态 UI。之后同一条 SSE 直接进入 reducer。</span></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">稳定事实</div>
+    <div class="mockup-body"><ul><li><strong>HistoryPage / AgentEvent::Message</strong> → 按 business_seq 排序的对话消息</li><li><strong>AgentView</strong> → status、run/turn、usage、last_seq</li><li>已确认的文本、reasoning、tool calls 由完整消息承载</li></ul></div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">运行中投影</div>
+    <div class="mockup-body"><ul><li><strong>Llm TextDelta / ReasoningDelta</strong> → 当前草稿</li><li><strong>ToolCall*</strong> → 工具过程详情</li><li><strong>ToolApprovalRequested</strong> → 待处理审批卡</li><li><strong>Finished / Failed / Cancelled</strong> → 状态与操作可用性</li></ul></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="pros-cons">
+    <div class="pros"><h4>cursor 过期（410）</h4><p>清除该 agent 的 localStorage cursor，关闭旧流，重新走完整恢复；不猜测或补造事件。</p></div>
+    <div class="cons"><h4>流内错误（stream_error）</h4><p>保留已投影内容，标为连接错误并关闭；用户触发重连时使用最新保存的 cursor。</p></div>
+  </div>
+</div>

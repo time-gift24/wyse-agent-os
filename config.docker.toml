@@ -1,12 +1,12 @@
 [agent]
-storage_root = "/var/lib/wyse/agents"
+storage_root = "/var/lib/stratum/agents"
 
 [llm]
 default = "deepseek:deepseek-v4-flash"
 
 [llm.deepseek]
 # Replace this placeholder before sending real agent requests.
-api_key = "replace-with-deepseek-api-key"
+api_key = "sk-39ef2450d7a44453ba08dd6643e32453"
 models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 
 [api]

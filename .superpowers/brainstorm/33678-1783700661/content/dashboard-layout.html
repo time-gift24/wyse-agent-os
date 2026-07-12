@@ -1,0 +1,37 @@
+<h2>Dashboard information hierarchy</h2>
+<p class="subtitle">After the hero scrolls away, which dashboard frame should become the default working surface?</p>
+
+<div class="cards">
+  <div class="card" data-choice="workspace" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Workspace-first</div>
+        <div class="mockup-body" style="display:grid;grid-template-columns:28% 1fr;gap:12px;min-height:230px">
+          <div class="mock-sidebar" style="padding:16px">Overview<br><br>Agents<br><br>Workflows<br><br>Runs</div>
+          <div class="mock-content" style="padding:16px">
+            <div class="label">Today</div>
+            <h3 style="margin-top:8px">Choose what to run next</h3>
+            <div class="placeholder" style="height:64px;margin-top:18px">Primary launch action</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px"><div class="placeholder">Recent agents</div><div class="placeholder">Draft workflows</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>Workspace-first</h3><p>A calm sidebar plus an action-led overview. Best when users begin with an agent or workflow.</p></div>
+  </div>
+
+  <div class="card" data-choice="runs" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Run-first</div>
+        <div class="mockup-body" style="min-height:230px;padding:16px">
+          <div class="label">Runtime overview</div>
+          <h3 style="margin-top:8px">What is executing now</h3>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:18px"><div class="placeholder">Active</div><div class="placeholder">Queued</div><div class="placeholder">Needs review</div></div>
+          <div class="placeholder" style="height:80px;margin-top:8px">Recent execution timeline</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>Run-first</h3><p>A live operations landing view. Best when monitoring existing agent work is the dominant daily task.</p></div>
+  </div>
+</div>

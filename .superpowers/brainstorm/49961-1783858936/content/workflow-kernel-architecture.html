@@ -1,0 +1,45 @@
+<h2>Wyse Workflow Kernel · 首期架构</h2>
+<p class="subtitle">严格 TOML DSL → 校验/编译 → 单进程可靠 DAG 调度；已有 Agent runtime 是一个可嵌入节点。</p>
+
+<div class="section">
+  <div class="mockup">
+    <div class="mockup-header">定义、运行与事件流</div>
+    <div class="mockup-body">
+      <svg viewBox="0 0 1160 520" width="100%" role="img" aria-label="Wyse workflow kernel architecture">
+        <defs>
+          <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#78a6ff"/></marker>
+          <style>
+            .box { fill:#182033; stroke:#78a6ff; stroke-width:2; rx:14; }
+            .box2 { fill:#162720; stroke:#71d49b; stroke-width:2; rx:14; }
+            .box3 { fill:#2a1f37; stroke:#c69cff; stroke-width:2; rx:14; }
+            .label { fill:#eef3ff; font:600 19px system-ui,sans-serif; }
+            .small { fill:#afbdd5; font:14px system-ui,sans-serif; }
+            .arrow { stroke:#78a6ff; stroke-width:3; fill:none; marker-end:url(#arrow); }
+            .arrow2 { stroke:#71d49b; stroke-width:3; fill:none; marker-end:url(#arrow); }
+          </style>
+        </defs>
+        <rect class="box" x="34" y="67" width="220" height="115"/><text class="label" x="62" y="112">workflow.toml</text><text class="small" x="62" y="140">typed nodes · edges</text><text class="small" x="62" y="163">inputs · retry policy</text>
+        <path class="arrow" d="M254 124 H340"/>
+        <rect class="box" x="340" y="67" width="245" height="115"/><text class="label" x="369" y="112">Validate & Compile</text><text class="small" x="369" y="140">acyclic graph · schemas</text><text class="small" x="369" y="163">resolved execution plan</text>
+        <path class="arrow" d="M585 124 H665"/>
+        <rect class="box2" x="665" y="50" width="275" height="150"/><text class="label" x="697" y="98">WorkflowRun</text><text class="small" x="697" y="126">ready queue · dependency count</text><text class="small" x="697" y="149">bounded JoinSet · cancellation</text><text class="small" x="697" y="172">retry/backoff · final output</text>
+        <path class="arrow2" d="M803 200 V277 H255 V325"/><path class="arrow2" d="M803 200 V277 H570 V325"/><path class="arrow2" d="M803 200 V277 H885 V325"/>
+        <rect class="box3" x="100" y="325" width="235" height="115"/><text class="label" x="128" y="368">Deterministic</text><text class="small" x="128" y="395">input · condition</text><text class="small" x="128" y="418">template · output</text>
+        <rect class="box3" x="415" y="325" width="235" height="115"/><text class="label" x="443" y="368">AI Nodes</text><text class="small" x="443" y="395">LLM · embedded Agent</text><text class="small" x="443" y="418">streaming values</text>
+        <rect class="box3" x="730" y="325" width="235" height="115"/><text class="label" x="758" y="368">Tool Node</text><text class="small" x="758" y="395">registered tools</text><text class="small" x="758" y="418">approval-aware execution</text>
+        <path class="arrow" d="M940 124 H1020"/>
+        <rect class="box" x="1020" y="67" width="112" height="115"/><text class="label" x="1042" y="112">SSE</text><text class="small" x="1034" y="140">run/node</text><text class="small" x="1034" y="163">events</text>
+      </svg>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>关键边界</h3>
+  <div class="pros-cons">
+    <div class="pros"><h4>首期保证</h4><ul><li>图与类型在运行前 fail-fast</li><li>独立分支在上限内真正并发</li><li>取消向所有运行节点传播</li><li>节点级重试与可诊断事件</li></ul></div>
+    <div class="cons"><h4>明确不做</h4><ul><li>进程重启后的 workflow 恢复</li><li>多实例接管与分布式队列</li><li>可视化编辑器、RAG 与插件市场</li><li>任意代码执行节点</li></ul></div>
+  </div>
+</div>
+
+<p class="subtitle">这张图只表达边界与数据流；下一步会在终端确认节点数据模型和运行语义。</p>
