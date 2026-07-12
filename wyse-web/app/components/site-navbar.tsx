@@ -1,9 +1,9 @@
 "use client"
 
-import { useRef } from "react"
+import { useRef, type MouseEvent } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
-import { Link } from "react-router"
+import { Link, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
 import GlassSurface from "~/components/GlassSurface"
@@ -31,12 +31,59 @@ type SiteNavbarProps = {
 
 export function SiteNavbar({ activeSection }: SiteNavbarProps) {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const navRef = useRef<HTMLElement>(null)
   const glassRef = useRef<HTMLDivElement>(null)
   const sectionNavRef = useRef<HTMLDivElement>(null)
   const overviewLinkRef = useRef<HTMLAnchorElement>(null)
   const longzhongLinkRef = useRef<HTMLAnchorElement>(null)
   const indicatorRef = useRef<HTMLSpanElement>(null)
+  const { contextSafe } = useGSAP({ scope: navRef })
+
+  const navigateWithTransition = contextSafe(
+    (
+      event: MouseEvent<HTMLAnchorElement>,
+      to: string,
+      direction: "forward" | "back"
+    ) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      )
+        return
+
+      event.preventDefault()
+      if (
+        (to === "/" && activeSection === "overview") ||
+        (to === "/longzhong" && activeSection === "longzhong")
+      )
+        return
+
+      document.documentElement.dataset.navigationDirection = direction
+      const page = document.querySelector<HTMLElement>("[data-route-page]")
+      const reduceMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)"
+      ).matches
+      if (!page || reduceMotion) {
+        navigate(to)
+        return
+      }
+
+      gsap.to(page, {
+        xPercent: direction === "forward" ? -6 : 6,
+        autoAlpha: 0,
+        willChange: "transform, opacity",
+        duration: 0.18,
+        ease: "power2.in",
+        overwrite: true,
+        onComplete: () => navigate(to),
+      })
+    }
+  )
 
   useGSAP(
     (_, contextSafe) => {
@@ -134,10 +181,7 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
 
         <Link
           to="/"
-          viewTransition
-          onClick={() => {
-            document.documentElement.dataset.navigationDirection = "back"
-          }}
+          onClick={(event) => navigateWithTransition(event, "/", "back")}
           className="relative z-10 flex min-w-0 items-center gap-2 text-sm font-medium md:text-base"
           aria-label={`运筹 ${t("brand.home")}`}
         >
@@ -155,11 +199,9 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
                       <Link
                         ref={overviewLinkRef}
                         to="/"
-                        viewTransition
-                        onClick={() => {
-                          document.documentElement.dataset.navigationDirection =
-                            "back"
-                        }}
+                        onClick={(event) =>
+                          navigateWithTransition(event, "/", "back")
+                        }
                       />
                     }
                     className={cn(
@@ -177,11 +219,9 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
                       <Link
                         ref={longzhongLinkRef}
                         to="/longzhong"
-                        viewTransition
-                        onClick={() => {
-                          document.documentElement.dataset.navigationDirection =
-                            "forward"
-                        }}
+                        onClick={(event) =>
+                          navigateWithTransition(event, "/longzhong", "forward")
+                        }
                       />
                     }
                     className={cn(
