@@ -493,9 +493,66 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+
   .animate-in,
   .animate-out {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+@keyframes wyse-page-enter-from-right {
+  from {
+    transform: translateX(8%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes wyse-page-exit-to-left {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-8%);
+  }
+}
+
+@keyframes wyse-page-enter-from-left {
+  from {
+    transform: translateX(-8%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes wyse-page-exit-to-right {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(8%);
+  }
+}
+
+html[data-navigation-direction="forward"]::view-transition-old(root) {
+  animation: 0.28s both wyse-page-exit-to-left;
+}
+
+html[data-navigation-direction="forward"]::view-transition-new(root) {
+  animation: 0.28s both wyse-page-enter-from-right;
+}
+
+html[data-navigation-direction="back"]::view-transition-old(root) {
+  animation: 0.28s both wyse-page-exit-to-right;
+}
+
+html[data-navigation-direction="back"]::view-transition-new(root) {
+  animation: 0.28s both wyse-page-enter-from-left;
 }

@@ -1,10 +1,9 @@
 "use client"
 
-import { useRef, type MouseEvent } from "react"
+import { useRef } from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
-import { ScrollToPlugin } from "gsap/ScrollToPlugin"
-import { ScrollTrigger } from "gsap/ScrollTrigger"
+import { Link } from "react-router"
 import { useTranslation } from "react-i18next"
 
 import GlassSurface from "~/components/GlassSurface"
@@ -22,11 +21,15 @@ import {
 import { Separator } from "~/components/ui/separator"
 import { cn } from "~/lib/utils"
 
-gsap.registerPlugin(useGSAP, ScrollTrigger, ScrollToPlugin)
+gsap.registerPlugin(useGSAP)
 
-const NAV_DURATION = 0.4
+type SiteSection = "overview" | "longzhong"
 
-export function SiteNavbar() {
+type SiteNavbarProps = {
+  activeSection: SiteSection
+}
+
+export function SiteNavbar({ activeSection }: SiteNavbarProps) {
   const { t } = useTranslation()
   const navRef = useRef<HTMLElement>(null)
   const glassRef = useRef<HTMLDivElement>(null)
@@ -34,188 +37,73 @@ export function SiteNavbar() {
   const overviewLinkRef = useRef<HTMLAnchorElement>(null)
   const longzhongLinkRef = useRef<HTMLAnchorElement>(null)
   const indicatorRef = useRef<HTMLSpanElement>(null)
-  const setActiveSectionRef = useRef<
-    ((section: "overview" | "longzhong") => void) | null
-  >(null)
-
-  const handleSectionNavigation = (event: MouseEvent<HTMLAnchorElement>) => {
-    event.preventDefault()
-
-    const section = event.currentTarget.hash.slice(1) as
-      | "overview"
-      | "longzhong"
-    const target = document.getElementById(section)
-
-    if (!target) {
-      return
-    }
-
-    const reduceMotion = window.matchMedia(
-      "(prefers-reduced-motion: reduce)"
-    ).matches
-    const horizontalTrigger = ScrollTrigger.getById("home-horizontal")
-    const targetY = horizontalTrigger
-      ? horizontalTrigger.start +
-        (horizontalTrigger.end - horizontalTrigger.start) *
-          (section === "overview" ? 0 : 1)
-      : target.getBoundingClientRect().top + window.scrollY
-
-    if (reduceMotion) {
-      window.scrollTo(0, targetY)
-    } else {
-      gsap.to(window, {
-        scrollTo: targetY,
-        duration: NAV_DURATION,
-        ease: "circ.inOut",
-      })
-    }
-
-    window.history.replaceState(null, "", `#${section}`)
-    setActiveSectionRef.current?.(section)
-  }
 
   useGSAP(
     (_, contextSafe) => {
       const glass = glassRef.current
-
       const sectionNav = sectionNavRef.current
       const overviewLink = overviewLinkRef.current
       const longzhongLink = longzhongLinkRef.current
       const indicator = indicatorRef.current
-
       if (
         !glass ||
         !sectionNav ||
         !overviewLink ||
         !longzhongLink ||
         !indicator
-      ) {
+      )
         return
-      }
 
       const reduceMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
       ).matches
-      const showGlass = () => {
-        gsap.to(glass, {
-          autoAlpha: 1,
-          scale: 1,
-          duration: reduceMotion ? 0 : 0.28,
-          ease: "power2.out",
-          overwrite: true,
-        })
-      }
-      const hideGlass = () => {
-        gsap.to(glass, {
-          autoAlpha: 0,
-          scale: 0.985,
-          duration: reduceMotion ? 0 : 0.2,
-          ease: "power2.out",
-          overwrite: true,
-        })
-      }
+      const activeLink =
+        activeSection === "overview" ? overviewLink : longzhongLink
+      const navBounds = sectionNav.getBoundingClientRect()
+      const linkBounds = activeLink.getBoundingClientRect()
 
-      let activeSection: "overview" | "longzhong" | null = null
+      overviewLink.dataset.active = String(activeSection === "overview")
+      longzhongLink.dataset.active = String(activeSection === "longzhong")
+      overviewLink.toggleAttribute("aria-current", activeSection === "overview")
+      longzhongLink.toggleAttribute(
+        "aria-current",
+        activeSection === "longzhong"
+      )
 
-      const setActiveSection = (
-        section: "overview" | "longzhong",
-        instant = false
-      ) => {
-        const target = section === "overview" ? overviewLink : longzhongLink
-        const navBounds = sectionNav.getBoundingClientRect()
-        const linkBounds = target.getBoundingClientRect()
-        const wasSame = section === activeSection
-
-        // Skip when same section and not forced instant — prevents
-        // ScrollTrigger.onEnter from disrupting the click-driven animation
-        if (wasSame && !instant) {
-          return
-        }
-
-        activeSection = section
-        overviewLink.dataset.active = String(section === "overview")
-        longzhongLink.dataset.active = String(section === "longzhong")
-        if (section === "overview") {
-          overviewLink.setAttribute("aria-current", "page")
-          longzhongLink.removeAttribute("aria-current")
-        } else {
-          overviewLink.removeAttribute("aria-current")
-          longzhongLink.setAttribute("aria-current", "page")
-        }
-
-        if (instant) {
-          gsap.set(indicator, {
-            x: linkBounds.left - navBounds.left,
-            scaleX: linkBounds.width,
-          })
-          return
-        }
-
-        gsap.to(indicator, {
-          x: linkBounds.left - navBounds.left,
-          scaleX: linkBounds.width,
-          duration: reduceMotion ? 0 : NAV_DURATION,
-          ease: "power3.in",
-          overwrite: "auto",
-        })
-      }
-
-      setActiveSectionRef.current = setActiveSection
-
-      let glassVisible = window.scrollY > 12
-
-      const setGlassVisible = (nextVisible: boolean) => {
-        if (nextVisible === glassVisible) {
-          return
-        }
-
-        glassVisible = nextVisible
-        if (nextVisible) {
-          showGlass()
-        } else {
-          hideGlass()
-        }
-      }
-
-      gsap.set(glass, {
-        autoAlpha: glassVisible ? 1 : 0,
-        scale: glassVisible ? 1 : 0.985,
-        transformOrigin: "50% 50%",
-      })
       gsap.set(indicator, {
+        x: linkBounds.left - navBounds.left,
         scaleX: 0,
         transformOrigin: "left center",
       })
-      setActiveSection("overview")
-
-      ScrollTrigger.create({
-        id: "site-navbar-glass",
-        start: 0,
-        end: "max",
-        onRefresh: () => setGlassVisible(window.scrollY > 12),
-        onUpdate: () => setGlassVisible(window.scrollY > 12),
+      gsap.to(indicator, {
+        scaleX: linkBounds.width,
+        duration: reduceMotion ? 0 : 0.28,
+        ease: "power2.out",
       })
 
-      const handleHorizontalSectionChange = contextSafe((event: Event) => {
-        const section = (event as CustomEvent<"overview" | "longzhong">).detail
-        if (section === "overview" || section === "longzhong") {
-          setActiveSection(section)
-        }
+      const setGlassVisible = contextSafe((visible: boolean) => {
+        gsap.to(glass, {
+          autoAlpha: visible ? 1 : 0,
+          scale: visible ? 1 : 0.985,
+          duration: reduceMotion ? 0 : visible ? 0.28 : 0.2,
+          ease: visible ? "power2.out" : "power2.in",
+          overwrite: true,
+        })
       })
-      window.addEventListener(
-        "wyse:horizontal-section",
-        handleHorizontalSectionChange
+      const updateGlass = contextSafe(() =>
+        setGlassVisible(window.scrollY > 12)
       )
 
-      return () => {
-        window.removeEventListener(
-          "wyse:horizontal-section",
-          handleHorizontalSectionChange
-        )
-        setActiveSectionRef.current = null
-      }
+      gsap.set(glass, {
+        autoAlpha: window.scrollY > 12 ? 1 : 0,
+        scale: window.scrollY > 12 ? 1 : 0.985,
+        transformOrigin: "50% 50%",
+      })
+      window.addEventListener("scroll", updateGlass, { passive: true })
+
+      return () => window.removeEventListener("scroll", updateGlass)
     },
-    { scope: navRef }
+    { dependencies: [activeSection], scope: navRef, revertOnUpdate: true }
   )
 
   return (
@@ -244,14 +132,18 @@ export function SiteNavbar() {
           />
         </div>
 
-        <a
-          href="/"
+        <Link
+          to="/"
+          viewTransition
+          onClick={() => {
+            document.documentElement.dataset.navigationDirection = "back"
+          }}
           className="relative z-10 flex min-w-0 items-center gap-2 text-sm font-medium md:text-base"
           aria-label={`运筹 ${t("brand.home")}`}
         >
           <StratumMark animated={false} variant="compact" className="size-7" />
           <span className="truncate font-heading font-semibold">运筹</span>
-        </a>
+        </Link>
 
         <div className="relative z-10 ml-auto flex items-center gap-3">
           <div ref={sectionNavRef} className="relative hidden md:block">
@@ -260,18 +152,21 @@ export function SiteNavbar() {
                 <NavigationMenuItem>
                   <NavigationMenuLink
                     render={
-                      <a
+                      <Link
                         ref={overviewLinkRef}
-                        href="#overview"
-                        onClick={handleSectionNavigation}
+                        to="/"
+                        viewTransition
+                        onClick={() => {
+                          document.documentElement.dataset.navigationDirection =
+                            "back"
+                        }}
                       />
                     }
                     className={cn(
                       navigationMenuTriggerStyle(),
                       "text-muted-foreground data-[active=true]:text-foreground"
                     )}
-                    data-active="true"
-                    aria-current="page"
+                    data-active={activeSection === "overview"}
                   >
                     {t("nav.overview")}
                   </NavigationMenuLink>
@@ -279,17 +174,21 @@ export function SiteNavbar() {
                 <NavigationMenuItem>
                   <NavigationMenuLink
                     render={
-                      <a
+                      <Link
                         ref={longzhongLinkRef}
-                        href="#longzhong"
-                        onClick={handleSectionNavigation}
+                        to="/longzhong"
+                        viewTransition
+                        onClick={() => {
+                          document.documentElement.dataset.navigationDirection =
+                            "forward"
+                        }}
                       />
                     }
                     className={cn(
                       navigationMenuTriggerStyle(),
                       "text-muted-foreground data-[active=true]:text-foreground"
                     )}
-                    data-active="false"
+                    data-active={activeSection === "longzhong"}
                   >
                     {t("nav.longzhong")}
                   </NavigationMenuLink>
