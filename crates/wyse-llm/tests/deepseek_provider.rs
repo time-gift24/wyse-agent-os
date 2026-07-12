@@ -231,6 +231,33 @@ async fn deepseek_configure_applies_enabled_thinking() {
     assert_eq!(body["reasoning_effort"], "high");
 }
 
+#[tokio::test]
+async fn deepseek_configure_accepts_enabled_thinking_without_reasoning_effort() {
+    let server = TestServer::spawn(TestResponse::ok(json!({
+        "choices": [{
+            "message": {"role": "assistant", "content": "done"},
+            "finish_reason": "stop"
+        }]
+    })));
+    let provider = test_provider(server.base_url("v1"));
+    let configured = provider
+        .configure(&Map::from_iter([(
+            "thinking".to_owned(),
+            json!({"type": "enabled"}),
+        )]))
+        .expect("parameters should configure provider");
+
+    configured
+        .chat(ChatRequest::new(DeepSeekModel::V4Pro.model_id()))
+        .await
+        .expect("chat should succeed");
+
+    let request = server.request();
+    let body: Value = serde_json::from_slice(&request.body).expect("request body should be json");
+    assert_eq!(body["thinking"], json!({"type": "enabled"}));
+    assert!(body.get("reasoning_effort").is_none());
+}
+
 #[test]
 fn deepseek_rejects_unknown_thinking_parameters() {
     let error = test_provider("https://example.test/v1").configure(&Map::from_iter([(

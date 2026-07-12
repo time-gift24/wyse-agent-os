@@ -2665,7 +2665,7 @@ async fn resume_accepts_a_persisted_running_turn_and_clears_marker() {
 }
 
 #[tokio::test]
-async fn resume_reconciles_started_only_state_after_message_write_failure() {
+async fn resume_preserves_switched_model_after_message_write_failure() {
     let fixture = Fixture::new().await;
     let agent_id = fixture
         .persist_agent("coding-agent", AgentStatus::Finished)
@@ -2677,6 +2677,11 @@ async fn resume_reconciles_started_only_state_after_message_write_failure() {
     let mut providers = LlmProviderManager::new();
     providers
         .register(Arc::new(TestProvider(fixture.model.clone())))
+        .expect("provider registers");
+    providers
+        .register(Arc::new(TestProvider(
+            fixture.deepseek_model_config().model,
+        )))
         .expect("provider registers");
     let host = HostState::restore(
         fixture.config.clone(),
@@ -2704,7 +2709,13 @@ async fn resume_reconciles_started_only_state_after_message_write_failure() {
         .oneshot(
             Request::post(format!("/v1/agents/{agent_id}/messages"))
                 .header("content-type", "application/json")
-                .body(Body::from(json!({"text": "lost preamble"}).to_string()))
+                .body(Body::from(
+                    json!({
+                        "text": "lost preamble",
+                        "model_config": fixture.deepseek_model_config(),
+                    })
+                    .to_string(),
+                ))
                 .expect("request builds"),
         )
         .await
@@ -2718,6 +2729,10 @@ async fn resume_reconciles_started_only_state_after_message_write_failure() {
         .await
         .expect("state loads");
     assert_eq!(started_only.status, AgentStatus::Running);
+    assert_eq!(
+        started_only.model_config,
+        Some(fixture.deepseek_model_config())
+    );
     assert_eq!(started_only.last_seq, before.through_seq);
 
     let reconciled = app
@@ -2758,6 +2773,14 @@ async fn resume_reconciles_started_only_state_after_message_write_failure() {
         .await
         .expect("request completes");
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+    let current = host
+        .agent(agent_id)
+        .expect("agent exists")
+        .store
+        .load_agent()
+        .await
+        .expect("state loads");
+    assert_eq!(current.model_config, Some(fixture.deepseek_model_config()));
     let after = host
         .agent(agent_id)
         .expect("agent exists")
@@ -3331,7 +3354,7 @@ async fn concurrent_same_approval_id_accepts_once_and_conflicts_once() {
         .await
         .expect("body is readable");
     let body: Value = serde_json::from_slice(&body).expect("error body is json");
-    assert_eq!(body["error"]["code"], "agent_busy");
+    assert_eq!(body["error"]["code"], "approval_not_active");
 }
 
 fn event_record(agent_id: AgentId, cursor: u64, event: AgentEvent) -> EventRecord {

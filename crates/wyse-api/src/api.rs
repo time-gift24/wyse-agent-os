@@ -494,7 +494,6 @@ async fn resolve_approval(
     record_agent_id(agent_id);
     let request = json_request(request)?;
     let hosted = find_agent(&state, agent_id)?;
-    let _transition = hosted.begin_transition()?;
     hosted
         .agent()
         .resolve_tool_approval(approval_id, request.decision)

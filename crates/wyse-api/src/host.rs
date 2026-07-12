@@ -353,6 +353,7 @@ impl HostState {
                     () = shutdown.cancelled() => return Err(HostError::HostShuttingDown),
                 };
                 if requires_resume {
+                    hosted.replace_agent(candidate);
                     hosted.mark_needs_resume();
                 }
                 return Err(error.into());
