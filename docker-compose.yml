@@ -39,7 +39,7 @@ services:
       context: ./wyse-web
       args:
         VITE_WYSE_API_BASE_URL: ${VITE_WYSE_API_BASE_URL:-http://127.0.0.1:18080}
-        VITE_DEFAULT_AGENT_NAME: ${VITE_DEFAULT_AGENT_NAME:-coding-agent}
+        VITE_DEFAULT_AGENT_NAME: ${VITE_DEFAULT_AGENT_NAME:-default-agent}
     depends_on:
       - wyse-api
     ports:
