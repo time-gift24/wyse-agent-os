@@ -283,12 +283,12 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
             <GlassSurface
               width="100%"
               height="100%"
-              borderRadius={999}
-              backgroundOpacity={isDark ? 0.35 : 0.15}
-              saturation={isDark ? 1.6 : 1.2}
-              brightness={isDark ? 28 : 55}
-              opacity={isDark ? 0.78 : 0.95}
-              blur={isDark ? 16 : 11}
+              borderRadius={2}
+              backgroundOpacity={isDark ? 0.35 : 0.1}
+              saturation={isDark ? 1.6 : 1.1}
+              brightness={isDark ? 28 : 78}
+              opacity={isDark ? 0.78 : 0.72}
+              blur={isDark ? 16 : 14}
               displace={4}
               className="navbar-glass"
             />
