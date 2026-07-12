@@ -7,11 +7,6 @@ import { Link, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
 import GlassSurface from "~/components/react-bits/GlassSurface"
-
-const isDarkMode = () => {
-  if (typeof document === "undefined") return false
-  return document.documentElement.classList.contains("dark")
-}
 import { LanguageToggle } from "~/components/stratum/language-toggle"
 import { StratumMark } from "~/components/stratum/stratum-mark"
 import { ThemeToggle } from "~/components/stratum/theme-toggle"
@@ -27,6 +22,11 @@ import { Separator } from "~/components/ui/separator"
 import { cn } from "~/lib/utils"
 
 gsap.registerPlugin(useGSAP)
+
+const isDarkMode = () => {
+  if (typeof document === "undefined") return false
+  return document.documentElement.classList.contains("dark")
+}
 
 type SiteSection = "overview" | "longzhong"
 
@@ -284,7 +284,7 @@ export function SiteNavbar({ activeSection }: SiteNavbarProps) {
               width="100%"
               height="100%"
               borderRadius={999}
-              backgroundOpacity={isDark ? 0.35 : 0.15}
+              backgroundOpacity={isDark ? 0.35 : 0}
               saturation={isDark ? 1.6 : 1.2}
               brightness={isDark ? 28 : 55}
               opacity={isDark ? 0.78 : 0.95}
