@@ -10,8 +10,8 @@ export function OntologyNode({ data, selected }: NodeProps<OntologyFlowNode>) {
   return (
     <div
       className={cn(
-        "w-44 rounded-lg border-2 bg-wyse-paper px-3 py-2.5 text-left text-foreground",
-        selected ? "border-wyse-action bg-wyse-paper" : "border-input"
+        "w-44 rounded-lg border bg-wyse-paper px-3 py-2.5 text-left text-foreground",
+        selected ? "border-2 border-wyse-action" : "border-input"
       )}
     >
       <Handle

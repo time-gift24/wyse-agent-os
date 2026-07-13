@@ -1,6 +1,11 @@
 "use client"
 
-import { useEffect, useMemo } from "react"
+import {
+  useEffect,
+  useMemo,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react"
 import {
   Background,
   BackgroundVariant,
@@ -21,8 +26,15 @@ import {
   type OntologyFlowNode,
   type OntologySelection,
 } from "~/lib/ontology-graph"
+import { cn } from "~/lib/utils"
 
 const nodeTypes = { ontology: OntologyNode }
+const flowStyle = {
+  "--xy-edge-stroke": "var(--wyse-ink-muted)",
+  "--xy-edge-stroke-selected": "var(--wyse-action)",
+  "--xy-edge-label-color": "var(--wyse-ink)",
+  "--xy-edge-label-background-color": "var(--wyse-canvas)",
+} as CSSProperties
 
 type OntologyGraphCanvasProps = {
   graph: OntologyGraph
@@ -42,16 +54,40 @@ function CanvasInner({
     () =>
       flow.nodes.map((node) => ({
         ...node,
+        className: cn(
+          node.className,
+          "rounded-lg focus-visible:outline-2! focus-visible:outline-offset-2! focus-visible:outline-ring!"
+        ),
         selected: selection?.kind === "node" && selection.id === node.id,
       })),
     [flow.nodes, selection]
   )
   const edges = useMemo(
     () =>
-      flow.edges.map((edge) => ({
-        ...edge,
-        selected: selection?.kind === "edge" && selection.id === edge.id,
-      })),
+      flow.edges.map((edge) => {
+        const selected = selection?.kind === "edge" && selection.id === edge.id
+        const markerColor = selected
+          ? "var(--wyse-action)"
+          : "var(--wyse-ink-muted)"
+
+        return {
+          ...edge,
+          selected,
+          style: {
+            ...edge.style,
+            strokeWidth: selected ? 2.5 : 1.25,
+          },
+          labelStyle: {
+            ...edge.labelStyle,
+            fontSize: 14,
+            fontWeight: 600,
+          },
+          markerEnd:
+            typeof edge.markerEnd === "object"
+              ? { ...edge.markerEnd, color: markerColor }
+              : edge.markerEnd,
+        }
+      }),
     [flow.edges, selection]
   )
   const { fitView, zoomIn, zoomOut } = useReactFlow<
@@ -81,6 +117,30 @@ function CanvasInner({
 
   const duration = reduceMotion ? 0 : 180
 
+  const handleElementKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Escape") {
+      return
+    }
+
+    const target = event.target
+    if (!(target instanceof Element)) return
+
+    const element = target.closest(".react-flow__node, .react-flow__edge")
+    const id = element?.getAttribute("data-id")
+    if (!element || !id) return
+
+    if (event.key === "Escape") {
+      onSelectionChange(null)
+      return
+    }
+
+    if (event.key === " ") event.preventDefault()
+    onSelectionChange({
+      kind: element.classList.contains("react-flow__node") ? "node" : "edge",
+      id,
+    })
+  }
+
   return (
     <div
       className="relative h-full min-h-0 w-full bg-wyse-canvas"
@@ -88,6 +148,8 @@ function CanvasInner({
       aria-label={t("ontology.canvas.label")}
     >
       <ReactFlow<OntologyFlowNode, OntologyFlowEdge>
+        className="[&_.react-flow\_\_edge.selectable:focus-visible_.react-flow\_\_edge-path]:[stroke-width:3px]"
+        style={flowStyle}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
@@ -97,9 +159,13 @@ function CanvasInner({
         maxZoom={2}
         nodesDraggable={false}
         nodesConnectable={false}
+        edgesReconnectable={false}
+        deleteKeyCode={null}
         elementsSelectable
         nodesFocusable
         edgesFocusable
+        defaultMarkerColor="var(--wyse-ink-muted)"
+        onKeyDownCapture={handleElementKeyDown}
         onNodeClick={(_, node) =>
           onSelectionChange({ kind: "node", id: node.id })
         }
