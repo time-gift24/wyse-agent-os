@@ -3332,6 +3332,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tracing",
  "uuid",
  "wyse-filesystem",
  "wyse-ontology",
