@@ -1,0 +1,1003 @@
+use std::{
+    io::{BufRead, Write},
+    sync::Arc,
+};
+
+use clap::Parser;
+use futures_util::StreamExt;
+use stratum_agent::{Agent, AgentError};
+use stratum_config::{Config, ConfigError, ResolvedAgentDefinition};
+use stratum_core::{
+    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatContent, ChatMessage, ChatRole,
+    DangerLevel, ModelConfig, ModelId, ReplayStart, RuntimeEvent, ToolKind, ToolName,
+};
+use stratum_filesystem::{
+    Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
+    VirtualPathError,
+};
+use stratum_infra::{
+    EventStream, EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus,
+};
+use stratum_llm::{
+    ApiKey, ConfigurableLlmProvider, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmError,
+    LlmProvider, OpenAICompatibleProvider,
+};
+use stratum_store::{
+    AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus,
+};
+use stratum_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolPermissionMode, ToolRegistry};
+use thiserror::Error;
+
+const CONFIG_PATH: &str = "config.toml";
+const DEFAULT_AGENT_NAME: &str = "default-agent";
+const DEFAULT_PROMPT: &str = "You are a helpful assistant.";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+
+#[derive(Parser)]
+#[command(name = "stratum-repl")]
+struct Args {
+    #[arg(long)]
+    resume: Option<AgentId>,
+    #[arg(long)]
+    debug: bool,
+}
+
+struct Session {
+    agent_id: AgentId,
+    agent: Agent,
+    store: Arc<dyn AgentStore>,
+    bus: Arc<dyn EventStreamBus>,
+    storage_root: std::path::PathBuf,
+}
+
+#[derive(Debug, Error)]
+enum ReplError {
+    #[error("failed to parse command line arguments")]
+    Args(#[from] clap::Error),
+    #[error("failed to read configuration")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse configuration")]
+    Config(#[from] ConfigError),
+    #[error("agent operation failed")]
+    Agent(#[from] AgentError),
+    #[error("agent store operation failed")]
+    Store(#[from] StoreError),
+    #[error("filesystem operation failed")]
+    Filesystem(#[from] FilesystemError),
+    #[error("invalid virtual path")]
+    VirtualPath(#[from] VirtualPathError),
+    #[error("event stream bus operation failed")]
+    EventStreamBus(#[from] EventStreamBusError),
+    #[error("llm operation failed")]
+    Llm(#[from] LlmError),
+    #[error("tool operation failed")]
+    Tool(#[from] ToolError),
+    #[error("json encoding failed")]
+    Json(#[from] serde_json::Error),
+    #[error("event stream closed before a terminal agent event")]
+    EventStreamClosed,
+    #[error("unsupported provider: {provider}")]
+    UnsupportedProvider { provider: String },
+    #[error("unsupported model: {model}")]
+    UnsupportedModel { model: ModelId },
+    #[error("missing provider configuration: {provider}")]
+    MissingProviderConfiguration { provider: &'static str },
+    #[error("persisted definition requests unsupported tools")]
+    UnsupportedDefinitionTools,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), ReplError> {
+    let args = Args::parse();
+    let config = Config::parse(&tokio::fs::read_to_string(CONFIG_PATH).await?)?;
+    let agent_id = args.resume.unwrap_or_else(AgentId::new);
+    let session = compose_session(&config, agent_id, args.resume.is_none()).await?;
+    let mut output = std::io::stdout();
+    writeln!(output, "agent id: {}", session.agent_id)?;
+    writeln!(output, "storage root: {}", session.storage_root.display())?;
+
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    restore_session(&session, &mut input, args.debug, &mut output).await?;
+    let mut line = String::new();
+    loop {
+        write!(output, "> ")?;
+        output.flush()?;
+        line.clear();
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let turn_input = line.trim_end_matches(['\r', '\n']);
+        if turn_input == "/quit" {
+            break;
+        }
+        drive_turn(&session, turn_input, &mut input, args.debug, &mut output).await?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
+async fn compose_session(
+    config: &Config,
+    agent_id: AgentId,
+    initialize: bool,
+) -> Result<Session, ReplError> {
+    let history_root = config.agent.storage_root.join("history");
+    tokio::fs::create_dir_all(&history_root).await?;
+    if initialize {
+        tokio::fs::create_dir(history_root.join(agent_id.to_string())).await?;
+    }
+    let filesystem: Arc<dyn Filesystem> = Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
+        root: config.agent.storage_root.clone(),
+        max_file_bytes: None,
+    })?);
+    let store = Arc::new(FilesystemAgentStore::new(filesystem, agent_root(agent_id)?));
+
+    let definition = if initialize {
+        let definition = config.resolve_template(
+            DEFAULT_AGENT_NAME.parse()?,
+            &format!("tools = [\"echo\"]\nprompt = {DEFAULT_PROMPT:?}"),
+        )?;
+        tokio::fs::write(
+            history_root
+                .join(agent_id.to_string())
+                .join("definition.toml"),
+            definition.encode()?,
+        )
+        .await?;
+        definition
+    } else {
+        ResolvedAgentDefinition::parse(
+            &tokio::fs::read_to_string(
+                history_root
+                    .join(agent_id.to_string())
+                    .join("definition.toml"),
+            )
+            .await?,
+        )?
+    };
+
+    let (provider, model_config) = select_provider(config, &definition.model)?;
+    if initialize {
+        store
+            .initialize_with_model_config(agent_id, DEFAULT_AGENT_NAME.to_owned(), model_config)
+            .await?;
+    } else {
+        store.load_agent().await?;
+    }
+
+    let store: Arc<dyn AgentStore> = store;
+    let bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
+        store.clone(),
+        Arc::new(InMemoryEventStreamBus::default()),
+    ));
+    let agent = Agent::builder()
+        .id(agent_id)
+        .name(definition.agent_name.as_str())
+        .system_prompt(definition.prompt)
+        .llm_provider(provider)
+        .tool_registry(definition_registry(&definition.tools)?)
+        .event_bus(bus.clone())
+        .store(store.clone())
+        .build()?;
+
+    Ok(Session {
+        agent_id,
+        agent,
+        store,
+        bus,
+        storage_root: history_root,
+    })
+}
+
+async fn restore_session<R: BufRead, W: Write>(
+    session: &Session,
+    input: &mut R,
+    debug: bool,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    let state = session.store.load_agent().await?;
+    if state.status == AgentStatus::Running {
+        let mut events = session
+            .bus
+            .subscribe_agent(session.agent_id, ReplayStart::New)
+            .await?;
+        session.agent.resume().await?;
+        consume_turn_events(session, &mut events, input, debug, output).await
+    } else {
+        session.agent.load_history().await?;
+        Ok(())
+    }
+}
+
+async fn drive_turn<R: BufRead, W: Write>(
+    session: &Session,
+    turn_input: &str,
+    input: &mut R,
+    debug: bool,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    let mut events = session
+        .bus
+        .subscribe_agent(session.agent_id, ReplayStart::New)
+        .await?;
+    session
+        .agent
+        .run_turn(ChatMessage::user(turn_input))
+        .await?;
+    consume_turn_events(session, &mut events, input, debug, output).await
+}
+
+async fn consume_turn_events<R: BufRead, W: Write>(
+    session: &Session,
+    events: &mut EventStream,
+    input: &mut R,
+    debug: bool,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    while let Some(record) = events.next().await {
+        let record = record?;
+        if debug {
+            serde_json::to_writer(&mut *output, &record.envelope)?;
+            output.write_all(b"\n")?;
+        }
+        let RuntimeEvent::Agent { event, .. } = &record.envelope.event else {
+            continue;
+        };
+        match event {
+            AgentEvent::ToolApprovalRequested {
+                approval_id,
+                tool_name,
+                arguments,
+                tool_kind,
+                danger_level,
+                ..
+            } => {
+                writeln!(
+                    output,
+                    "approval {approval_id}: tool {tool_name} ({tool_kind:?}, {danger_level:?})"
+                )?;
+                output.write_all(b"arguments: ")?;
+                serde_json::to_writer(&mut *output, arguments)?;
+                output.write_all(b"\n")?;
+                resolve_approval(&session.agent, *approval_id, input, output).await?;
+            }
+            AgentEvent::Message { message, .. } if message.role == ChatRole::Assistant => {
+                match &message.content {
+                    ChatContent::Text(text) => output.write_all(text.as_bytes())?,
+                    ChatContent::Json(value) => serde_json::to_writer(&mut *output, value)?,
+                    _ => continue,
+                }
+                output.write_all(b"\n")?;
+            }
+            AgentEvent::Failed { error_text, .. } => {
+                eprintln!("agent failed: {error_text}");
+                return Ok(());
+            }
+            AgentEvent::Cancelled { .. } => {
+                eprintln!("agent cancelled");
+                return Ok(());
+            }
+            AgentEvent::Finished { .. } => return Ok(()),
+            _ => {}
+        }
+    }
+    Err(ReplError::EventStreamClosed)
+}
+
+async fn resolve_approval<R: BufRead, W: Write>(
+    agent: &Agent,
+    approval_id: ApprovalId,
+    input: &mut R,
+    output: &mut W,
+) -> Result<(), ReplError> {
+    loop {
+        writeln!(output, "enter approve or reject")?;
+        output.flush()?;
+        let mut line = String::new();
+        let bytes_read = input.read_line(&mut line)?;
+        let decision = match line.trim() {
+            "approve" => ApprovalDecision::Approve,
+            "reject" => ApprovalDecision::Reject,
+            _ if bytes_read == 0 => ApprovalDecision::Reject,
+            _ => {
+                writeln!(output, "enter approve or reject")?;
+                continue;
+            }
+        };
+        agent.resolve_tool_approval(approval_id, decision).await?;
+        return Ok(());
+    }
+}
+
+fn definition_registry(tools: &[ToolName]) -> Result<Arc<dyn ToolRegistry>, ReplError> {
+    let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
+    for tool in tools {
+        if tool.as_str() != "echo" {
+            return Err(ReplError::UnsupportedDefinitionTools);
+        }
+        registry.register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)?;
+    }
+    Ok(Arc::new(registry))
+}
+
+fn agent_root(agent_id: AgentId) -> Result<VirtualPath, ReplError> {
+    VirtualPath::try_from(format!("/history/{agent_id}").as_str()).map_err(ReplError::from)
+}
+
+fn select_provider(
+    config: &Config,
+    model: &ModelId,
+) -> Result<(Arc<dyn LlmProvider>, ModelConfig), ReplError> {
+    match model.provider_name() {
+        "openai" => {
+            let provider = config
+                .llm
+                .openai
+                .as_ref()
+                .ok_or(ReplError::MissingProviderConfiguration { provider: "openai" })?;
+            if !provider
+                .models
+                .iter()
+                .any(|configured| configured == model.model_name())
+            {
+                return Err(ReplError::UnsupportedModel {
+                    model: model.clone(),
+                });
+            }
+            let provider = OpenAICompatibleProvider::new(
+                OPENAI_BASE_URL,
+                ApiKey::new(provider.api_key.clone()),
+                model.clone(),
+            );
+            let model_config = provider.default_model_config();
+            Ok((Arc::new(provider), model_config))
+        }
+        "deepseek" => {
+            let provider =
+                config
+                    .llm
+                    .deepseek
+                    .as_ref()
+                    .ok_or(ReplError::MissingProviderConfiguration {
+                        provider: "deepseek",
+                    })?;
+            if !provider
+                .models
+                .iter()
+                .any(|configured| configured == model.model_name())
+            {
+                return Err(ReplError::UnsupportedModel {
+                    model: model.clone(),
+                });
+            }
+            let deepseek_model = match model.model_name() {
+                "deepseek-v4-flash" => DeepSeekModel::V4Flash,
+                "deepseek-v4-pro" => DeepSeekModel::V4Pro,
+                _ => {
+                    return Err(ReplError::UnsupportedModel {
+                        model: model.clone(),
+                    });
+                }
+            };
+            let provider = DeepSeekProvider::new(
+                DEEPSEEK_BASE_URL,
+                ApiKey::new(provider.api_key.clone()),
+                deepseek_model,
+                DeepSeekThinking::Disabled,
+            );
+            let model_config = provider.default_model_config();
+            Ok((Arc::new(provider), model_config))
+        }
+        provider => Err(ReplError::UnsupportedProvider {
+            provider: provider.to_owned(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, io::Cursor, sync::Arc};
+
+    use super::{
+        Args, Config, ReplError, Session, agent_root, compose_session, consume_turn_events,
+        definition_registry, drive_turn, restore_session,
+    };
+    use clap::Parser;
+    use stratum_core::{
+        AgentEvent, AgentId, CallId, ChatContent, ChatRole, DangerLevel, ModelConfig, RuntimeEvent,
+        StreamEnvelope, ToolCallDelta, ToolKind, ToolName,
+    };
+    use stratum_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
+    use stratum_infra::{EventStream, EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
+    use stratum_llm::{ChatStreamEvent, FinishReason, LlmProvider, MockLlmProvider};
+    use stratum_store::{
+        AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus,
+    };
+
+    async fn test_session(
+        root: &std::path::Path,
+        agent_id: AgentId,
+        provider: MockLlmProvider,
+        initialize: bool,
+    ) -> Result<Session, ReplError> {
+        if initialize {
+            fs::create_dir_all(root.join("history").join(agent_id.to_string()))?;
+        }
+        let filesystem: Arc<dyn Filesystem> =
+            Arc::new(LocalFilesystem::new(LocalFilesystemConfig {
+                root: root.to_path_buf(),
+                max_file_bytes: None,
+            })?);
+        let store = Arc::new(FilesystemAgentStore::new(filesystem, agent_root(agent_id)?));
+        if initialize {
+            store
+                .initialize_with_model_config(
+                    agent_id,
+                    "test-agent".to_owned(),
+                    ModelConfig::new(provider.model_id(), Default::default()),
+                )
+                .await?;
+        }
+        let store: Arc<dyn AgentStore> = store;
+        let bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
+            store.clone(),
+            Arc::new(InMemoryEventStreamBus::default()),
+        ));
+        let agent = stratum_agent_builtin::build_default_agent(
+            agent_id,
+            store.clone(),
+            bus.clone(),
+            Arc::new(provider),
+            definition_registry(&[ToolName::from("echo")])?,
+        )?;
+
+        Ok(Session {
+            agent_id,
+            agent,
+            store,
+            bus,
+            storage_root: root.to_path_buf(),
+        })
+    }
+
+    #[test]
+    fn definition_registry_registers_echo_as_low_danger_read_tool() -> Result<(), ReplError> {
+        let registry = definition_registry(&[ToolName::from("echo")])?;
+
+        let specs = registry.specs();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name.as_str(), "echo");
+        assert_eq!(
+            registry.authorization(&ToolName::from("echo"))?,
+            Some((ToolKind::Read, DangerLevel::Low))
+        );
+
+        Ok(())
+    }
+
+    fn mock_response(text: &str) -> MockLlmProvider {
+        MockLlmProvider::new().with_stream_events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: text.to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ])
+    }
+
+    fn approval_provider() -> MockLlmProvider {
+        MockLlmProvider::new()
+            .with_stream_events(vec![
+                ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                    index: 0,
+                    call_id: Some(CallId::from("echo-1")),
+                    name: Some("echo".to_owned()),
+                    arguments_delta: r#"{"message":"hello"}"#.to_owned(),
+                }),
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::ToolCalls,
+                    usage: None,
+                },
+            ])
+            .with_stream_events(vec![
+                ChatStreamEvent::TextDelta {
+                    delta: "done".to_owned(),
+                },
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                },
+            ])
+    }
+
+    fn persisted_messages(
+        root: &std::path::Path,
+        agent_id: AgentId,
+        last_seq: u64,
+    ) -> Result<Vec<StreamEnvelope>, ReplError> {
+        (1..=last_seq)
+            .map(|seq| {
+                Ok(serde_json::from_slice(&fs::read(
+                    root.join("history")
+                        .join(agent_id.to_string())
+                        .join(format!("messages/{seq}.json")),
+                )?)?)
+            })
+            .collect()
+    }
+
+    fn assistant_messages(envelopes: &[StreamEnvelope]) -> Vec<StreamEnvelope> {
+        envelopes
+            .iter()
+            .filter(|envelope| {
+                matches!(
+                    &envelope.event,
+                    RuntimeEvent::Agent {
+                        event: AgentEvent::Message { message, .. },
+                        ..
+                    } if message.role == stratum_core::ChatRole::Assistant
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn approval_approves_echo_and_persists_the_tool_result() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, approval_provider(), true).await?;
+        let mut input = Cursor::new(b"approve\n");
+        let mut output = Vec::new();
+
+        drive_turn(&session, "use echo", &mut input, true, &mut output).await?;
+
+        let output = String::from_utf8(output).expect("renderer writes UTF-8");
+        assert!(output.contains("approval"));
+        assert!(output.contains("done"));
+        let envelopes = output
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(serde_json::from_str::<StreamEnvelope>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(envelopes.iter().any(|envelope| matches!(
+            envelope.event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalRequested { .. },
+                ..
+            }
+        )));
+        assert!(envelopes.iter().any(|envelope| matches!(
+            envelope.event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::ToolApprovalResolved {
+                    decision: stratum_core::ApprovalDecision::Approve,
+                    ..
+                },
+                ..
+            }
+        )));
+        let persisted = persisted_messages(&root, agent_id, 4)?;
+        assert!(matches!(
+            &persisted[2].event,
+            RuntimeEvent::Agent {
+                agent_id: persisted_agent_id,
+                event: AgentEvent::Message { message, .. },
+            } if *persisted_agent_id == agent_id
+                && message.role == ChatRole::Tool
+                && message.content == ChatContent::Json(serde_json::json!({ "message": "hello" }))
+                && message.tool_call_id == Some(CallId::from("echo-1"))
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_rejects_echo_and_persists_the_runtime_rejection() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, approval_provider(), true).await?;
+        let mut input = Cursor::new(b"reject\n");
+        let mut output = Vec::new();
+
+        drive_turn(&session, "use echo", &mut input, false, &mut output).await?;
+
+        let persisted = persisted_messages(&root, agent_id, 4)?;
+        assert!(matches!(
+            &persisted[2].event,
+            RuntimeEvent::Agent {
+                agent_id: persisted_agent_id,
+                event: AgentEvent::Message { message, .. },
+            } if *persisted_agent_id == agent_id
+                && message.role == ChatRole::Tool
+                && message.content == ChatContent::Json(serde_json::json!({
+                    "error": {
+                        "type": "approval_rejected",
+                        "message": "user rejected tool call"
+                    }
+                }))
+                && message.tool_call_id == Some(CallId::from("echo-1"))
+        ));
+        assert!(matches!(
+            &persisted[3].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Message { message, .. },
+                ..
+            } if message.role == ChatRole::Assistant && message.content == ChatContent::Text("done".to_owned())
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn approval_rejects_echo_when_input_reaches_eof() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, approval_provider(), true).await?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        drive_turn(&session, "use echo", &mut input, false, &mut output).await?;
+
+        let persisted = persisted_messages(&root, agent_id, 4)?;
+        assert!(matches!(
+            &persisted[2].event,
+            RuntimeEvent::Agent {
+                agent_id: persisted_agent_id,
+                event: AgentEvent::Message { message, .. },
+            } if *persisted_agent_id == agent_id
+                && message.role == ChatRole::Tool
+                && message.content == ChatContent::Json(serde_json::json!({
+                    "error": {
+                        "type": "approval_rejected",
+                        "message": "user rejected tool call"
+                    }
+                }))
+                && message.tool_call_id == Some(CallId::from("echo-1"))
+        ));
+        assert!(matches!(
+            &persisted[3].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Message { message, .. },
+                ..
+            } if message.role == ChatRole::Assistant && message.content == ChatContent::Text("done".to_owned())
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drive_turn_renders_bus_events_and_matches_persisted_messages() -> Result<(), ReplError>
+    {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let provider = MockLlmProvider::new()
+            .with_stream_events(vec![
+                ChatStreamEvent::TextDelta {
+                    delta: "first response".to_owned(),
+                },
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                },
+            ])
+            .with_stream_events(vec![
+                ChatStreamEvent::TextDelta {
+                    delta: "second response".to_owned(),
+                },
+                ChatStreamEvent::Finished {
+                    finish_reason: FinishReason::Stop,
+                    usage: None,
+                },
+            ]);
+        let session = test_session(&root, agent_id, provider, true).await?;
+        let mut output = Vec::new();
+        let mut input = Cursor::new(Vec::<u8>::new());
+
+        drive_turn(&session, "first input", &mut input, false, &mut output).await?;
+        drive_turn(&session, "second input", &mut input, false, &mut output).await?;
+
+        let output = String::from_utf8(output).expect("renderer writes UTF-8");
+        assert!(output.contains("first response"));
+        assert!(output.contains("second response"));
+        assert!(!output.lines().any(|line| line.starts_with('{')));
+
+        let state: AgentState = serde_json::from_slice(&fs::read(
+            root.join("history")
+                .join(agent_id.to_string())
+                .join("agent.json"),
+        )?)?;
+        assert_eq!(state.last_seq, 4);
+        let persisted = (1..=4)
+            .map(|seq| -> Result<StreamEnvelope, ReplError> {
+                Ok(serde_json::from_slice(&fs::read(
+                    root.join("history")
+                        .join(agent_id.to_string())
+                        .join(format!("messages/{seq}.json")),
+                )?)?)
+            })
+            .collect::<Result<Vec<_>, ReplError>>()?;
+        assert_eq!(
+            persisted
+                .iter()
+                .map(StreamEnvelope::business_seq)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2), Some(3), Some(4)]
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn drive_turn_debug_emits_assistant_envelope_from_bus() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, mock_response("debug response"), true).await?;
+        let mut output = Vec::new();
+        let mut input = Cursor::new(Vec::<u8>::new());
+
+        drive_turn(&session, "debug input", &mut input, true, &mut output).await?;
+
+        let envelopes = String::from_utf8(output)
+            .expect("debug renderer writes UTF-8")
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(serde_json::from_str::<StreamEnvelope>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let persisted: Vec<StreamEnvelope> = (1..=2)
+            .map(|seq| -> Result<StreamEnvelope, ReplError> {
+                Ok(serde_json::from_slice(&fs::read(
+                    root.join("history")
+                        .join(agent_id.to_string())
+                        .join(format!("messages/{seq}.json")),
+                )?)?)
+            })
+            .collect::<Result<_, ReplError>>()?;
+        assert_eq!(
+            assistant_messages(&envelopes),
+            assistant_messages(&persisted)
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_session_loads_finished_history_and_advances_existing_store()
+    -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let first = test_session(&root, agent_id, mock_response("first response"), true).await?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        drive_turn(&first, "first input", &mut input, false, &mut Vec::new()).await?;
+
+        let restored =
+            test_session(&root, agent_id, mock_response("resumed response"), false).await?;
+        restore_session(&restored, &mut input, false, &mut Vec::new()).await?;
+        drive_turn(
+            &restored,
+            "second input",
+            &mut input,
+            false,
+            &mut Vec::new(),
+        )
+        .await?;
+
+        let state: AgentState = serde_json::from_slice(&fs::read(
+            root.join("history")
+                .join(agent_id.to_string())
+                .join("agent.json"),
+        )?)?;
+        assert_eq!(state.last_seq, 4);
+        assert!(
+            root.join("history")
+                .join(agent_id.to_string())
+                .join("messages/1.json")
+                .is_file()
+        );
+        assert!(
+            root.join("history")
+                .join(agent_id.to_string())
+                .join("messages/4.json")
+                .is_file()
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_session_resumes_running_turn_to_terminal_completion() -> Result<(), ReplError>
+    {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let initial = test_session(&root, agent_id, MockLlmProvider::new(), true).await?;
+        let mut input = Cursor::new(Vec::<u8>::new());
+        drive_turn(
+            &initial,
+            "interrupted input",
+            &mut input,
+            false,
+            &mut Vec::new(),
+        )
+        .await?;
+        let state = initial.store.load_agent().await?;
+        assert_eq!(state.status, AgentStatus::Failed);
+        assert_eq!(state.last_seq, 1);
+        initial
+            .store
+            .update_state(
+                AgentStatus::Running,
+                state.run_id,
+                state.turn_id,
+                state.usage,
+            )
+            .await?;
+        assert_eq!(
+            initial.store.load_agent().await?.status,
+            AgentStatus::Running
+        );
+
+        let restored =
+            test_session(&root, agent_id, mock_response("resumed response"), false).await?;
+        let mut output = Vec::new();
+        restore_session(&restored, &mut input, false, &mut output).await?;
+
+        assert!(
+            String::from_utf8(output)
+                .expect("renderer writes UTF-8")
+                .contains("resumed response")
+        );
+        let state = restored.store.load_agent().await?;
+        assert_eq!(state.status, AgentStatus::Finished);
+        assert_eq!(state.last_seq, 2);
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn consume_turn_events_rejects_stream_closure_without_terminal_event()
+    -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(agent_id.to_string());
+        fs::create_dir(&root)?;
+        let session = test_session(&root, agent_id, MockLlmProvider::new(), true).await?;
+        let mut events: EventStream = Box::pin(futures_util::stream::empty());
+        let mut input = Cursor::new(Vec::<u8>::new());
+        let error = consume_turn_events(&session, &mut events, &mut input, false, &mut Vec::new())
+            .await
+            .expect_err("stream closure before terminal event must fail");
+
+        assert_eq!(
+            error.to_string(),
+            "event stream closed before a terminal agent event"
+        );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_resume_and_debug_arguments() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+
+        let args =
+            Args::try_parse_from(["stratum-repl", "--resume", &agent_id.to_string(), "--debug"])?;
+
+        assert_eq!(args.resume, Some(agent_id));
+        assert!(args.debug);
+        Ok(())
+    }
+
+    #[test]
+    fn config_accepts_shared_agent_and_llm_sections() -> Result<(), ReplError> {
+        let config = Config::parse(
+            r#"
+[agent]
+storage_root = "./.stratum/repl"
+
+[llm]
+default = "openai:gpt-4.1-mini"
+
+[llm.openai]
+api_key = "test-key"
+models = ["gpt-4.1-mini"]
+"#,
+        )?;
+
+        assert_eq!(config.llm.default.as_str(), "openai:gpt-4.1-mini");
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_unknown_agent_configuration() {
+        let result = Config::parse(
+            r#"
+[agent]
+storage_root = "./.stratum/repl"
+unexpected = true
+
+[llm]
+default = "openai:gpt-4.1-mini"
+
+[llm.openai]
+api_key = "test-key"
+models = ["gpt-4.1-mini"]
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn config_new_session_writes_api_compatible_definition() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+        let root = std::env::temp_dir().join(format!("stratum-repl-{agent_id}"));
+        let config = Config::parse(&format!(
+            r#"
+[agent]
+storage_root = {root:?}
+
+[llm]
+default = "openai:gpt-4.1-mini"
+
+[llm.openai]
+api_key = "test-key"
+models = ["gpt-4.1-mini"]
+"#,
+            root = root.to_string_lossy()
+        ))?;
+
+        let session = compose_session(&config, agent_id, true).await?;
+        let definition_path = root
+            .join("history")
+            .join(agent_id.to_string())
+            .join("definition.toml");
+        let definition =
+            stratum_config::ResolvedAgentDefinition::parse(&fs::read_to_string(&definition_path)?)?;
+
+        assert_eq!(session.storage_root, root.join("history"));
+        assert_eq!(definition.agent_name.as_str(), "default-agent");
+        assert_eq!(definition.model, config.llm.default);
+        assert_eq!(definition.prompt, "You are a helpful assistant.");
+        assert_eq!(definition.tools, vec![ToolName::from("echo")]);
+        assert_eq!(
+            session.store.load_agent().await?.model_config,
+            Some(ModelConfig::new(
+                config.llm.default.clone(),
+                Default::default()
+            ))
+        );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn scopes_agent_store_to_agent_root() -> Result<(), ReplError> {
+        let agent_id = AgentId::new();
+
+        assert_eq!(
+            agent_root(agent_id)?.as_str(),
+            format!("/history/{agent_id}")
+        );
+        Ok(())
+    }
+}

@@ -4,8 +4,8 @@ target
 **/target
 node_modules
 **/node_modules
-wyse-web/build
-wyse-web/.react-router
+stratum-web/build
+stratum-web/.react-router
 .DS_Store
 .env
 .env.*
