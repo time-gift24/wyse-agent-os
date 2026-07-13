@@ -4,7 +4,8 @@
   },
   "nav": {
     "overview": "概览",
-    "longzhong": "隆中对"
+    "longzhong": "隆中对",
+    "modeling": "建模"
   },
   "hero": {
     "title": "构建强类型智能体",
@@ -90,6 +91,58 @@
       "failed": "失败"
     },
     "unknownTool": "未知工具"
+  },
+  "ontology": {
+    "actions": { "close": "关闭面板" },
+    "source": {
+      "title": "模型来源",
+      "tag": "标签",
+      "draft": "草稿",
+      "revision": "修订",
+      "tagName": "标签名称",
+      "load": "加载",
+      "choose": "选择来源",
+      "search": "搜索类型或关系",
+      "index": "模型结构",
+      "objectTypes": "对象类型",
+      "linkTypes": "关系类型"
+    },
+    "node": {
+      "properties_one": "{{count}} 个属性",
+      "properties_other": "{{count}} 个属性"
+    },
+    "canvas": {
+      "label": "Ontology 模型画布",
+      "zoomOut": "缩小画布",
+      "zoomIn": "放大画布",
+      "fitView": "适配全部模型"
+    },
+    "inspector": {
+      "title": "详情",
+      "empty": "选择一个对象类型或关系类型以查看详情。",
+      "objectType": "对象类型",
+      "linkType": "关系类型",
+      "properties": "属性",
+      "relations": "关系",
+      "required": "必填",
+      "optional": "可选",
+      "source": "起点",
+      "target": "终点",
+      "cardinality": "基数"
+    },
+    "state": {
+      "demo": "当前显示示例模型",
+      "configuration_missing": "尚未配置 Ontology API。",
+      "connection_failed": "Ontology API 暂时不可用。",
+      "default_missing": "online 标签尚不存在。",
+      "invalid_response": "Ontology API 返回了无法识别的数据。",
+      "loading": "正在加载模型…",
+      "retry": "重试",
+      "emptyTitle": "这个模型还是空的",
+      "emptyDescription": "当前来源尚未定义对象类型；可切换到其他标签、草稿或修订。",
+      "errorTitle": "无法加载这个模型",
+      "errorDescription": "检查来源名称或选择其他模型来源后重试。"
+    }
   },
   "errors": {
     "unexpectedTitle": "出错了",

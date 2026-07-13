@@ -4,7 +4,8 @@
   },
   "nav": {
     "overview": "Overview",
-    "longzhong": "Longzhong"
+    "longzhong": "Longzhong",
+    "modeling": "Modeling"
   },
   "hero": {
     "title": "Build typed agents",
@@ -90,6 +91,58 @@
       "failed": "Failed"
     },
     "unknownTool": "Unknown tool"
+  },
+  "ontology": {
+    "actions": { "close": "Close panel" },
+    "source": {
+      "title": "Model source",
+      "tag": "Tag",
+      "draft": "Draft",
+      "revision": "Revision",
+      "tagName": "Tag name",
+      "load": "Load",
+      "choose": "Choose a source",
+      "search": "Search types or relations",
+      "index": "Model structure",
+      "objectTypes": "Object types",
+      "linkTypes": "Relation types"
+    },
+    "node": {
+      "properties_one": "{{count}} property",
+      "properties_other": "{{count}} properties"
+    },
+    "canvas": {
+      "label": "Ontology model canvas",
+      "zoomOut": "Zoom out",
+      "zoomIn": "Zoom in",
+      "fitView": "Fit the whole model"
+    },
+    "inspector": {
+      "title": "Details",
+      "empty": "Select an object type or relation type to inspect it.",
+      "objectType": "Object type",
+      "linkType": "Relation type",
+      "properties": "Properties",
+      "relations": "Relations",
+      "required": "Required",
+      "optional": "Optional",
+      "source": "Source",
+      "target": "Target",
+      "cardinality": "Cardinality"
+    },
+    "state": {
+      "demo": "Showing an example model",
+      "configuration_missing": "The Ontology API is not configured.",
+      "connection_failed": "The Ontology API is unavailable.",
+      "default_missing": "The online tag does not exist yet.",
+      "invalid_response": "The Ontology API returned unrecognized data.",
+      "loading": "Loading model…",
+      "retry": "Retry",
+      "emptyTitle": "This model is empty",
+      "emptyDescription": "This source has no object types; choose another tag, draft, or revision.",
+      "errorTitle": "This model could not be loaded",
+      "errorDescription": "Check the source name or choose another model source and retry."
+    }
   },
   "errors": {
     "unexpectedTitle": "Oops!",

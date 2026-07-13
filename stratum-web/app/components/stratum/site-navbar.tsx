@@ -34,7 +34,7 @@ const isDarkMode = () => {
   return document.documentElement.classList.contains("dark")
 }
 
-type SiteSection = "overview" | "longzhong"
+type SiteSection = "overview" | "longzhong" | "ontology"
 
 type SiteNavbarProps = {
   activeSection: SiteSection
@@ -56,6 +56,7 @@ export function SiteNavbar({
   const leftSlotRef = useRef<HTMLDivElement>(null)
   const overviewLinkRef = useRef<HTMLAnchorElement>(null)
   const longzhongLinkRef = useRef<HTMLAnchorElement>(null)
+  const ontologyLinkRef = useRef<HTMLAnchorElement>(null)
   const indicatorRef = useRef<HTMLSpanElement>(null)
   const { contextSafe } = useGSAP({ scope: navRef })
 
@@ -98,11 +99,13 @@ export function SiteNavbar({
         return
 
       event.preventDefault()
-      if (
-        (to === "/" && activeSection === "overview") ||
-        (to === "/longzhong" && activeSection === "longzhong")
-      )
-        return
+      const activePath =
+        activeSection === "overview"
+          ? "/"
+          : activeSection === "longzhong"
+            ? "/longzhong"
+            : "/ontology"
+      if (to === activePath) return
 
       document.documentElement.dataset.navigationDirection = direction
       const page = document.querySelector<HTMLElement>("[data-route-page]")
@@ -131,24 +134,37 @@ export function SiteNavbar({
       const sectionNav = sectionNavRef.current
       const overviewLink = overviewLinkRef.current
       const longzhongLink = longzhongLinkRef.current
+      const ontologyLink = ontologyLinkRef.current
       const indicator = indicatorRef.current
-      if (!sectionNav || !overviewLink || !longzhongLink || !indicator) return
+      if (
+        !sectionNav ||
+        !overviewLink ||
+        !longzhongLink ||
+        !ontologyLink ||
+        !indicator
+      )
+        return
 
       const reduceMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
       ).matches
-      const activeLink =
-        activeSection === "overview" ? overviewLink : longzhongLink
+      const links = [
+        ["overview", overviewLink],
+        ["longzhong", longzhongLink],
+        ["ontology", ontologyLink],
+      ] as const
+      const activeLink = links.find(
+        ([section]) => section === activeSection
+      )?.[1]
+      if (!activeLink) return
       const navBounds = sectionNav.getBoundingClientRect()
       const linkBounds = activeLink.getBoundingClientRect()
 
-      overviewLink.dataset.active = String(activeSection === "overview")
-      longzhongLink.dataset.active = String(activeSection === "longzhong")
-      overviewLink.toggleAttribute("aria-current", activeSection === "overview")
-      longzhongLink.toggleAttribute(
-        "aria-current",
-        activeSection === "longzhong"
-      )
+      for (const [section, link] of links) {
+        const active = section === activeSection
+        link.dataset.active = String(active)
+        link.toggleAttribute("aria-current", active)
+      }
 
       gsap.set(indicator, {
         x: linkBounds.left - navBounds.left,
@@ -257,7 +273,11 @@ export function SiteNavbar({
                       ref={longzhongLinkRef}
                       to="/longzhong"
                       onClick={(event) =>
-                        navigateWithTransition(event, "/longzhong", "forward")
+                        navigateWithTransition(
+                          event,
+                          "/longzhong",
+                          activeSection === "ontology" ? "back" : "forward"
+                        )
                       }
                     />
                   }
@@ -268,6 +288,26 @@ export function SiteNavbar({
                   data-active={activeSection === "longzhong"}
                 >
                   {t("nav.longzhong")}
+                </NavigationMenuLink>
+              </NavigationMenuItem>
+              <NavigationMenuItem>
+                <NavigationMenuLink
+                  render={
+                    <Link
+                      ref={ontologyLinkRef}
+                      to="/ontology"
+                      onClick={(event) =>
+                        navigateWithTransition(event, "/ontology", "forward")
+                      }
+                    />
+                  }
+                  className={cn(
+                    navigationMenuTriggerStyle(),
+                    "text-muted-foreground data-[active=true]:text-foreground"
+                  )}
+                  data-active={activeSection === "ontology"}
+                >
+                  {t("nav.modeling")}
                 </NavigationMenuLink>
               </NavigationMenuItem>
             </NavigationMenuList>
