@@ -2,7 +2,7 @@
 
 ## 状态
 
-设计已确认，等待书面 spec 审阅。本文件定义 Ontology Service 的第一个端到端切片，刻意独立于 memory、租户、workspace、授权、业务领域和前端。
+第一个端到端切片已实现：核心领域、Filesystem draft、MySQL 8 仓储、Axum router 与 `/ontology` 建模界面均有对应测试。Axum router 尚未组合进 Rust 应用 host，也尚未部署；前端当前连接配置的 Ontology API，未配置时使用演示数据。本文件记录当前实现边界，仍刻意独立于 memory、租户、workspace、授权和业务领域。
 
 ## 目标
 
