@@ -39,7 +39,7 @@ export function AgentConfigMenu({
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label={triggerText}
-        className="inline-flex h-8 max-w-40 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+        className="inline-flex h-8 max-w-36 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
         disabled={menuDisabled(configuration, commandPending)}
       >
         <span className="truncate">{triggerText}</span>
@@ -91,7 +91,7 @@ export function ModelConfigMenu({
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label={triggerText}
-        className="inline-flex h-8 max-w-56 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
+        className="inline-flex h-8 max-w-52 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
         disabled={
           configuration.currentModelConfig === null ||
           menuDisabled(configuration, commandPending)

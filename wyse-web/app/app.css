@@ -104,14 +104,14 @@
   --radius-wyse-panel: 0.75rem;
   --radius-wyse-shell: 1rem;
   --radius-wyse-field: 0.5rem;
-  --page-gutter: clamp(1rem, 2vw, 2rem);
+  --page-gutter: clamp(0.75rem, 2vw, 2rem);
   --content-width: min(
     calc(100vw - var(--page-gutter) * 2),
-    clamp(36rem, 58vw, 64rem)
+    clamp(42rem, 64vw, 56rem)
   );
   --content-half-width: min(
     calc(50vw - var(--page-gutter)),
-    clamp(18rem, 29vw, 32rem)
+    clamp(21rem, 32vw, 28rem)
   );
   --layout-gap: clamp(0.75rem, 1.25vw, 1.5rem);
   --history-width: clamp(12rem, 16vw, 18rem);
@@ -351,10 +351,7 @@
     .wyse-history-drawer {
       left: auto;
       right: calc(50% + var(--content-half-width) + 1rem);
-      width: min(
-        calc(50% - var(--content-half-width) - 2rem),
-        16rem
-      );
+      width: min(calc(50% - var(--content-half-width) - 2rem), 16rem);
     }
   }
 
@@ -384,11 +381,6 @@
   .navbar-glass.glass-surface {
     transition: none;
   }
-
-  .prompt-input-glass {
-    box-shadow: 0 -0.5rem 1.5rem color-mix(in oklch, var(--wyse-canvas) 40%, transparent);
-  }
-
 }
 
 @media (prefers-color-scheme: dark) {
