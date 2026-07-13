@@ -1,4 +1,4 @@
-# Wyse Agent OS Deferred Capabilities
+# Stratum Deferred Capabilities
 
 This ledger contains only capabilities that the current crates intentionally do
 not provide. It is not an execution plan, milestone list, or record of completed

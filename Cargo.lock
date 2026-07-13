@@ -1692,6 +1692,169 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "stratum-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "serde_json",
+ "stratum-core",
+ "stratum-infra",
+ "stratum-llm",
+ "stratum-store",
+ "stratum-tools",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "stratum-agent-builtin"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures-util",
+ "serde_json",
+ "stratum-agent",
+ "stratum-config",
+ "stratum-core",
+ "stratum-filesystem",
+ "stratum-infra",
+ "stratum-llm",
+ "stratum-store",
+ "stratum-tools",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "stratum-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "stratum-agent",
+ "stratum-config",
+ "stratum-core",
+ "stratum-filesystem",
+ "stratum-infra",
+ "stratum-llm",
+ "stratum-store",
+ "stratum-tools",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "stratum-config"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "serde",
+ "stratum-core",
+ "stratum-infra",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "stratum-core"
+version = "0.1.0"
+dependencies = [
+ "bon",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "stratum-filesystem"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "stratum-infra"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures-core",
+ "futures-util",
+ "serde_json",
+ "stratum-core",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "stratum-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bon",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "stratum-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "stratum-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "stratum-core",
+ "stratum-filesystem",
+ "stratum-infra",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "stratum-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "stratum-core",
+ "stratum-filesystem",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2425,169 +2588,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "wyse-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures-util",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "wyse-core",
- "wyse-infra",
- "wyse-llm",
- "wyse-store",
- "wyse-tools",
-]
-
-[[package]]
-name = "wyse-agent-builtin"
-version = "0.1.0"
-dependencies = [
- "clap",
- "futures-util",
- "serde_json",
- "thiserror",
- "tokio",
- "wyse-agent",
- "wyse-config",
- "wyse-core",
- "wyse-filesystem",
- "wyse-infra",
- "wyse-llm",
- "wyse-store",
- "wyse-tools",
-]
-
-[[package]]
-name = "wyse-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "futures-util",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http 0.7.0",
- "tracing",
- "tracing-subscriber",
- "wyse-agent",
- "wyse-config",
- "wyse-core",
- "wyse-filesystem",
- "wyse-infra",
- "wyse-llm",
- "wyse-store",
- "wyse-tools",
-]
-
-[[package]]
-name = "wyse-config"
-version = "0.1.0"
-dependencies = [
- "http",
- "serde",
- "thiserror",
- "toml",
- "wyse-core",
- "wyse-infra",
-]
-
-[[package]]
-name = "wyse-core"
-version = "0.1.0"
-dependencies = [
- "bon",
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "wyse-filesystem"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "wyse-infra"
-version = "0.1.0"
-dependencies = [
- "async-nats",
- "async-trait",
- "bytes",
- "chrono",
- "futures-core",
- "futures-util",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "wyse-core",
-]
-
-[[package]]
-name = "wyse-llm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bon",
- "bytes",
- "futures-core",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "wyse-core",
-]
-
-[[package]]
-name = "wyse-store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures-util",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "wyse-core",
- "wyse-filesystem",
- "wyse-infra",
-]
-
-[[package]]
-name = "wyse-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "wyse-core",
- "wyse-filesystem",
-]
 
 [[package]]
 name = "yoke"

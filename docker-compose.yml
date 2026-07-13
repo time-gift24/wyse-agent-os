@@ -1,4 +1,4 @@
-name: wyse-agent-os
+name: stratum
 
 services:
   nats:
@@ -15,33 +15,33 @@ services:
     volumes:
       - nats-data:/data
 
-  wyse-api:
+  stratum-api:
     build:
       context: .
       dockerfile: Dockerfile.rust
       args:
-        PACKAGE: wyse-api
-        BIN: wyse-api
+        PACKAGE: stratum-api
+        BIN: stratum-api
     depends_on:
       nats:
         condition: service_healthy
     ports:
       - "18080:8080"
     volumes:
-      - wyse-agent-data:/var/lib/stratum
+      - stratum-agent-data:/var/lib/stratum
       - ./templates:/var/lib/stratum/agents/templates:ro
       - ./config.docker.toml:/app/config.toml:ro
     environment:
       RUST_LOG: info
 
-  wyse-web:
+  stratum-web:
     build:
-      context: ./wyse-web
+      context: ./stratum-web
     depends_on:
-      - wyse-api
+      - stratum-api
     ports:
       - "5173:3000"
 
 volumes:
   nats-data:
-  wyse-agent-data:
+  stratum-agent-data:

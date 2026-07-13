@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现时优先保持模块化、强类型、可观测，并默认安全。
+Stratum 是一个 Rust-first 的 agent runtime 和工作流编排系统。实现时优先保持模块化、强类型、可观测，并默认安全。
 
 ## Rust 开发规范
 
@@ -122,7 +122,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 - agent、LLM、tool、MCP 相关测试使用 mock provider 和基于 trait 的依赖。
 - parser、validator、graph scheduling、schema conversion 优先考虑 property tests。
 - 需要真实外部依赖的集成测试放在对应 crate 的 `tests/` 目录，并默认标记 `#[ignore]`，避免普通 `cargo test --workspace --all-targets` 依赖容器。
-- 每个 crate 的集成测试容器使用独立的 `docker-compose.test.yml`；compose project name 使用 crate 名加 `-test`，例如 `wyse-infra-test`。
+- 每个 crate 的集成测试容器使用独立的 `docker-compose.test.yml`；compose project name 使用 crate 名加 `-test`，例如 `stratum-infra-test`。
 - 本地集成测试优先通过 crate 内 `Makefile` 运行；默认使用 `podman compose`，需要 Docker 时用 `COMPOSE="docker compose"` 覆盖。
 - CI 中普通单测和容器集成测试分成不同 job；集成测试 job 显式启动对应 crate 的 compose 测试栈，运行 ignored tests，最后 `down -v` 清理。
 
@@ -170,7 +170,7 @@ Wyse Agent OS 是一个 Rust-first 的 agent runtime 和工作流编排系统。
 前端设计约束由 impeccable skill 管理，两个文件构成完整上下文：
 
 - **`PRODUCT.md`**（worktree 根目录）：产品定位、目标用户、品牌人格、设计原则、反模式。回答"做什么、为谁做、为什么"。
-- **`wyse-web/DESIGN.md`**：视觉系统——色彩 token、字体、组件规范、布局、动效、反模式。回答"长什么样"。
+- **`stratum-web/DESIGN.md`**：视觉系统——色彩 token、字体、组件规范、布局、动效、反模式。回答"长什么样"。
 
 五个设计原则（PRODUCT.md 详述）：
 

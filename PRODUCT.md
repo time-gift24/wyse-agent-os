@@ -18,7 +18,7 @@ The web frontend serves both from one product. The chat surface leads for end-us
 
 ## Product Purpose
 
-Wyse Agent OS is a Rust-first agent runtime for composing agents, tools, and reliable execution paths. The web frontend, 运筹 Stratum, is the human surface of that runtime: end-users converse with agents through the Longzhong chat, and developers compose and deploy those agents through a future orchestration page.
+Stratum is a Rust-first agent runtime for composing agents, tools, and reliable execution paths. The web frontend, 运筹 Stratum, is the human surface of that runtime: end-users converse with agents through the Longzhong chat, and developers compose and deploy those agents through a future orchestration page.
 
 Success looks like trust through transparency. The user trusts the agent to handle a real task end-to-end, with the ability to see what is happening whenever they want to. Thinking, tool execution, and intermediate steps are collapsed by default — the user trusts the agent to proceed — but any step can be expanded on demand to inspect reasoning, tool calls, and results in detail.
 
@@ -38,7 +38,7 @@ Motion is purposeful and interaction-driven. GSAP-powered animations respond to 
 
 Generic SaaS chatbot UIs — ChatGPT-clones, Intercom-style support chat, reskinned "AI assistant" widgets. The product must not read as a chatbot with a skin on top. The Longzhong chat is a workspace for real work, not a support channel.
 
-Visual anti-references (detailed in `wyse-web/DESIGN.md`): no emoji, no Inter, no generic serif, no pure black, no purple/blue neon, no glow, no high-saturation gradients, no card-in-card, no three-equal-cards, no side-stripe borders.
+Visual anti-references (detailed in `stratum-web/DESIGN.md`): no emoji, no Inter, no generic serif, no pure black, no purple/blue neon, no glow, no high-saturation gradients, no card-in-card, no three-equal-cards, no side-stripe borders.
 
 Positive reference for the future orchestration page: Dify's visual workflow editor — a node-based composition surface where agent workflows are built by connecting typed components.
 

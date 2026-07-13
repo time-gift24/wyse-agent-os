@@ -57,9 +57,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - package: wyse-api
-            bin: wyse-api
-            image: wyse-api
+          - package: stratum-api
+            bin: stratum-api
+            image: stratum-api
 
     steps:
       - name: Checkout
@@ -138,22 +138,22 @@ jobs:
         if: steps.workspace.outputs.present == 'true'
         run: rustup toolchain install stable --profile minimal
 
-      - name: Run wyse-infra integration tests
+      - name: Run stratum-infra integration tests
         if: steps.workspace.outputs.present == 'true'
-        run: make -C crates/wyse-infra test-integration COMPOSE="docker compose"
+        run: make -C crates/stratum-infra test-integration COMPOSE="docker compose"
 
-      - name: Start wyse-tools test stack
+      - name: Start stratum-tools test stack
         if: steps.workspace.outputs.present == 'true'
         run: |
-          mkdir -p crates/wyse-tools/target/docker-sandbox
-          docker compose -f crates/wyse-tools/docker-compose.test.yml up -d
+          mkdir -p crates/stratum-tools/target/docker-sandbox
+          docker compose -f crates/stratum-tools/docker-compose.test.yml up -d
 
-      - name: Run wyse-tools integration tests
+      - name: Run stratum-tools integration tests
         if: steps.workspace.outputs.present == 'true'
         env:
-          WYSE_TOOLS_DOCKER_SANDBOX: ${{ github.workspace }}/crates/wyse-tools/target/docker-sandbox
-        run: cargo test -p wyse-tools --test apply_patch_docker -- --ignored --nocapture
+          STRATUM_TOOLS_DOCKER_SANDBOX: ${{ github.workspace }}/crates/stratum-tools/target/docker-sandbox
+        run: cargo test -p stratum-tools --test apply_patch_docker -- --ignored --nocapture
 
-      - name: Stop wyse-tools test stack
+      - name: Stop stratum-tools test stack
         if: always() && steps.workspace.outputs.present == 'true'
-        run: docker compose -f crates/wyse-tools/docker-compose.test.yml down -v
+        run: docker compose -f crates/stratum-tools/docker-compose.test.yml down -v

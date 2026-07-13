@@ -1,5 +1,5 @@
 [agent]
-storage_root = "./.wyse/agents"
+storage_root = "./.stratum/agents"
 
 [llm]
 default = "deepseek:deepseek-v4-flash"

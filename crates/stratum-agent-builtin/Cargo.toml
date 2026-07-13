@@ -1,0 +1,24 @@
+[package]
+name = "stratum-agent-builtin"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+stratum-agent.workspace = true
+stratum-config.workspace = true
+stratum-core.workspace = true
+stratum-filesystem.workspace = true
+stratum-infra.workspace = true
+stratum-llm.workspace = true
+stratum-store.workspace = true
+stratum-tools.workspace = true
+
+[lints]
+workspace = true

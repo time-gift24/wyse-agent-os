@@ -1,15 +1,15 @@
 [workspace]
 members = [
-    "crates/wyse-api",
-    "crates/wyse-agent",
-    "crates/wyse-agent-builtin",
-    "crates/wyse-store",
-    "crates/wyse-core",
-    "crates/wyse-config",
-    "crates/wyse-filesystem",
-    "crates/wyse-infra",
-    "crates/wyse-llm",
-    "crates/wyse-tools",
+    "crates/stratum-api",
+    "crates/stratum-agent",
+    "crates/stratum-agent-builtin",
+    "crates/stratum-store",
+    "crates/stratum-core",
+    "crates/stratum-config",
+    "crates/stratum-filesystem",
+    "crates/stratum-infra",
+    "crates/stratum-llm",
+    "crates/stratum-tools",
 ]
 resolver = "3"
 
@@ -41,15 +41,15 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 tower = { version = "0.5.2", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 uuid = { version = "1.23.4", features = ["serde", "std", "v7"] }
-wyse-core = { path = "crates/wyse-core" }
-wyse-config = { path = "crates/wyse-config" }
-wyse-filesystem = { path = "crates/wyse-filesystem" }
-wyse-agent = { path = "crates/wyse-agent" }
-wyse-store = { path = "crates/wyse-store" }
-wyse-infra = { path = "crates/wyse-infra" }
-wyse-llm = { path = "crates/wyse-llm" }
-wyse-tools = { path = "crates/wyse-tools" }
-wyse-api = { path = "crates/wyse-api" }
+stratum-core = { path = "crates/stratum-core" }
+stratum-config = { path = "crates/stratum-config" }
+stratum-filesystem = { path = "crates/stratum-filesystem" }
+stratum-agent = { path = "crates/stratum-agent" }
+stratum-store = { path = "crates/stratum-store" }
+stratum-infra = { path = "crates/stratum-infra" }
+stratum-llm = { path = "crates/stratum-llm" }
+stratum-tools = { path = "crates/stratum-tools" }
+stratum-api = { path = "crates/stratum-api" }
 
 [workspace.lints.clippy]
 correctness = "deny"
