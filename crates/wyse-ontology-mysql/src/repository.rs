@@ -131,7 +131,8 @@ impl OntologyRepository for SqlxOntologyRepository {
         id: &RevisionId,
     ) -> Result<Option<PublishedRevision>, OntologyError> {
         let row = sqlx::query(
-            "SELECT revision_id, schema_json FROM ontology_revisions WHERE revision_id = ?",
+            "SELECT revision_id, CAST(schema_json AS CHAR) AS schema_json \
+             FROM ontology_revisions WHERE revision_id = ?",
         )
         .bind(id.as_str())
         .fetch_optional(&self.pool)
@@ -141,13 +142,16 @@ impl OntologyRepository for SqlxOntologyRepository {
     }
 
     async fn list_revisions(&self) -> Result<Vec<PublishedRevision>, OntologyError> {
-        sqlx::query("SELECT revision_id, schema_json FROM ontology_revisions ORDER BY created_at, revision_id")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(sqlx_error)?
-            .into_iter()
-            .map(revision_from_row)
-            .collect()
+        sqlx::query(
+            "SELECT revision_id, CAST(schema_json AS CHAR) AS schema_json \
+             FROM ontology_revisions ORDER BY created_at, revision_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sqlx_error)?
+        .into_iter()
+        .map(revision_from_row)
+        .collect()
     }
 
     async fn put_tag(&self, name: &TagName, revision_id: &RevisionId) -> Result<(), OntologyError> {
@@ -233,13 +237,16 @@ impl OntologyRepository for SqlxOntologyRepository {
     }
 
     async fn get_object(&self, id: ObjectId) -> Result<Option<ObjectRecord>, OntologyError> {
-        sqlx::query("SELECT id, object_type_id, values_json, version FROM objects WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(sqlx_error)?
-            .map(object_from_row)
-            .transpose()
+        sqlx::query(
+            "SELECT id, object_type_id, CAST(values_json AS CHAR) AS values_json, version \
+             FROM objects WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sqlx_error)?
+        .map(object_from_row)
+        .transpose()
     }
 
     async fn page_objects(
@@ -257,7 +264,7 @@ impl OntologyRepository for SqlxOntologyRepository {
         let rows = match after {
             Some(after) => {
                 sqlx::query(
-                    "SELECT id, object_type_id, values_json, version FROM objects \
+                    "SELECT id, object_type_id, CAST(values_json AS CHAR) AS values_json, version FROM objects \
                  WHERE object_type_id = ? AND id > ? ORDER BY id LIMIT ?",
                 )
                 .bind(type_id.to_string())
@@ -268,7 +275,7 @@ impl OntologyRepository for SqlxOntologyRepository {
             }
             None => {
                 sqlx::query(
-                    "SELECT id, object_type_id, values_json, version FROM objects \
+                    "SELECT id, object_type_id, CAST(values_json AS CHAR) AS values_json, version FROM objects \
                  WHERE object_type_id = ? ORDER BY id LIMIT ?",
                 )
                 .bind(type_id.to_string())
@@ -302,7 +309,8 @@ impl OntologyRepository for SqlxOntologyRepository {
             .await
             .map_err(sqlx_error)?;
             if result.rows_affected() == 0 {
-                return Err(object_write_failure(&self.pool, object.id).await?);
+                let exists = object_exists(&mut transaction, object.id).await?;
+                return Err(object_write_failure_from_exists(object.id, exists));
             }
             transaction.commit().await.map_err(sqlx_error)?;
             Ok(ObjectRecord {
@@ -336,7 +344,8 @@ impl OntologyRepository for SqlxOntologyRepository {
                 .await
                 .map_err(|error| map_object_delete_error(id, error))?;
             if result.rows_affected() == 0 {
-                return Err(object_write_failure(&self.pool, id).await?);
+                let exists = object_exists(&mut transaction, id).await?;
+                return Err(object_write_failure_from_exists(id, exists));
             }
             transaction.commit().await.map_err(sqlx_error)
         }
@@ -421,7 +430,8 @@ impl OntologyRepository for SqlxOntologyRepository {
                 .await
                 .map_err(sqlx_error)?;
             if result.rows_affected() == 0 {
-                return Err(link_write_failure(&self.pool, id).await?);
+                let exists = link_exists(&mut transaction, id).await?;
+                return Err(link_write_failure_from_exists(id, exists));
             }
             transaction.commit().await.map_err(sqlx_error)
         }
@@ -433,13 +443,16 @@ impl OntologyRepository for SqlxOntologyRepository {
 async fn object_records_in_transaction(
     transaction: &mut Transaction<'_, MySql>,
 ) -> Result<Vec<ObjectRecord>, OntologyError> {
-    sqlx::query("SELECT id, object_type_id, values_json, version FROM objects ORDER BY id")
-        .fetch_all(&mut **transaction)
-        .await
-        .map_err(sqlx_error)?
-        .into_iter()
-        .map(object_from_row)
-        .collect()
+    sqlx::query(
+        "SELECT id, object_type_id, CAST(values_json AS CHAR) AS values_json, version \
+         FROM objects ORDER BY id",
+    )
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?
+    .into_iter()
+    .map(object_from_row)
+    .collect()
 }
 
 async fn link_records_in_transaction(
@@ -484,13 +497,16 @@ async fn revision_in_transaction(
     transaction: &mut Transaction<'_, MySql>,
     id: &RevisionId,
 ) -> Result<Option<PublishedRevision>, OntologyError> {
-    sqlx::query("SELECT revision_id, schema_json FROM ontology_revisions WHERE revision_id = ?")
-        .bind(id.as_str())
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(sqlx_error)?
-        .map(revision_from_row)
-        .transpose()
+    sqlx::query(
+        "SELECT revision_id, CAST(schema_json AS CHAR) AS schema_json \
+         FROM ontology_revisions WHERE revision_id = ?",
+    )
+    .bind(id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(sqlx_error)?
+    .map(revision_from_row)
+    .transpose()
 }
 
 async fn put_tag_transaction(
@@ -751,37 +767,24 @@ async fn object_exists(
         .map(|row| row.is_some())
 }
 
-async fn object_write_failure(
-    pool: &MySqlPool,
-    id: ObjectId,
-) -> Result<OntologyError, OntologyError> {
-    Ok(object_write_failure_from_exists(
-        id,
-        object_exists_pool(pool, id).await?,
-    ))
-}
-
-async fn link_write_failure(pool: &MySqlPool, id: LinkId) -> Result<OntologyError, OntologyError> {
-    let exists = sqlx::query("SELECT 1 FROM links WHERE id = ?")
+async fn link_exists(
+    transaction: &mut Transaction<'_, MySql>,
+    id: LinkId,
+) -> Result<bool, OntologyError> {
+    Ok(sqlx::query("SELECT 1 FROM links WHERE id = ?")
         .bind(id.to_string())
-        .fetch_optional(pool)
+        .fetch_optional(&mut **transaction)
         .await
         .map_err(sqlx_error)?
-        .is_some();
-    Ok(if exists {
+        .is_some())
+}
+
+fn link_write_failure_from_exists(id: LinkId, exists: bool) -> OntologyError {
+    if exists {
         OntologyError::LinkVersionConflict { id }
     } else {
         OntologyError::LinkMissing { id }
-    })
-}
-
-async fn object_exists_pool(pool: &MySqlPool, id: ObjectId) -> Result<bool, OntologyError> {
-    sqlx::query("SELECT 1 FROM objects WHERE id = ?")
-        .bind(id.to_string())
-        .fetch_optional(pool)
-        .await
-        .map_err(sqlx_error)
-        .map(|row| row.is_some())
+    }
 }
 
 fn object_write_failure_from_exists(id: ObjectId, exists: bool) -> OntologyError {
@@ -904,11 +907,9 @@ mod tests {
         sync::Notify,
         time::{Duration, timeout},
     };
-    use wyse_ontology::{
-        ObjectId, OntologyError, OntologyRepository, PublishedRevision, SchemaDocument, revision_id,
-    };
+    use wyse_ontology::{ObjectId, OntologyError};
 
-    use super::{InstanceWriteLock, SqlxOntologyRepository, object_write_failure_from_exists};
+    use super::{InstanceWriteLock, object_write_failure_from_exists};
 
     #[test]
     fn object_write_failure_distinguishes_missing_from_version_conflict() {
@@ -948,22 +949,10 @@ mod tests {
                 .is_cancelled()
         );
 
-        let schema = SchemaDocument {
-            schema_version: 1,
-            object_types: Vec::new(),
-            link_types: Vec::new(),
-        };
-        let revision = PublishedRevision {
-            id: revision_id(&schema)?,
-            schema,
-        };
-        let repository = SqlxOntologyRepository::new(pool);
-        timeout(
-            Duration::from_secs(2),
-            repository.publish_revision(revision),
-        )
-        .await
-        .map_err(|_| "named lock remained held after task cancellation")??;
+        let lock = timeout(Duration::from_secs(2), InstanceWriteLock::acquire(&pool))
+            .await
+            .map_err(|_| "named lock remained held after task cancellation")??;
+        lock.release().await?;
         Ok(())
     }
 }

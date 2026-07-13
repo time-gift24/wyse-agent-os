@@ -157,3 +157,25 @@ jobs:
       - name: Stop stratum-tools test stack
         if: always() && steps.workspace.outputs.present == 'true'
         run: docker compose -f crates/stratum-tools/docker-compose.test.yml down -v
+
+  ontology-mysql-integration:
+    name: ontology MySQL integration
+    runs-on: ubuntu-latest
+    needs: check
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install SQLx CLI
+        run: cargo install sqlx-cli --version 0.8.6 --no-default-features --features rustls,mysql --locked
+
+      - name: Run ontology MySQL integration tests
+        run: make -C crates/wyse-ontology-mysql test-integration COMPOSE="docker compose"
+
+      - name: Stop ontology MySQL test stack
+        if: always()
+        run: docker compose -f crates/wyse-ontology-mysql/docker-compose.test.yml down -v
