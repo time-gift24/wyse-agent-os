@@ -5,7 +5,8 @@
   "nav": {
     "overview": "Overview",
     "longzhong": "Longzhong",
-    "modeling": "Modeling"
+    "modeling": "Modeling",
+    "sectionLabel": "Switch page"
   },
   "hero": {
     "title": "Build typed agents",

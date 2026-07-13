@@ -5,7 +5,8 @@
   "nav": {
     "overview": "概览",
     "longzhong": "隆中对",
-    "modeling": "建模"
+    "modeling": "建模",
+    "sectionLabel": "切换页面"
   },
   "hero": {
     "title": "构建强类型智能体",

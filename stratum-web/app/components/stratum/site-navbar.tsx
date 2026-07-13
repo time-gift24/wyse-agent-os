@@ -1,6 +1,7 @@
 "use client"
 
 import {
+  type ChangeEvent,
   useEffect,
   useRef,
   useState,
@@ -47,7 +48,7 @@ export function SiteNavbar({
   leftSlot,
   rightSlot,
 }: SiteNavbarProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const navigate = useNavigate()
   const navRef = useRef<HTMLElement>(null)
   const shellRef = useRef<HTMLDivElement>(null)
@@ -61,6 +62,7 @@ export function SiteNavbar({
   const { contextSafe } = useGSAP({ scope: navRef })
 
   const isLongzhong = activeSection === "longzhong"
+  const resolvedLanguage = i18n.resolvedLanguage ?? i18n.language
   const [isDark, setIsDark] = useState(() => isDarkMode())
 
   useEffect(() => {
@@ -82,23 +84,8 @@ export function SiteNavbar({
     }
   }, [])
 
-  const navigateWithTransition = contextSafe(
-    (
-      event: MouseEvent<HTMLAnchorElement>,
-      to: string,
-      direction: "forward" | "back"
-    ) => {
-      if (
-        event.defaultPrevented ||
-        event.button !== 0 ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.shiftKey ||
-        event.altKey
-      )
-        return
-
-      event.preventDefault()
+  const transitionTo = contextSafe(
+    (to: string, direction: "forward" | "back") => {
       const activePath =
         activeSection === "overview"
           ? "/"
@@ -128,6 +115,45 @@ export function SiteNavbar({
       })
     }
   )
+
+  const navigateWithTransition = (
+    event: MouseEvent<HTMLAnchorElement>,
+    to: string,
+    direction: "forward" | "back"
+  ) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    )
+      return
+
+    event.preventDefault()
+    transitionTo(to, direction)
+  }
+
+  const selectSection = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextSection = event.currentTarget.value as SiteSection
+    const sections: readonly SiteSection[] = [
+      "overview",
+      "longzhong",
+      "ontology",
+    ]
+    const to =
+      nextSection === "overview"
+        ? "/"
+        : nextSection === "longzhong"
+          ? "/longzhong"
+          : "/ontology"
+    const direction =
+      sections.indexOf(nextSection) > sections.indexOf(activeSection)
+        ? "forward"
+        : "back"
+    transitionTo(to, direction)
+  }
 
   useGSAP(
     (_, contextSafe) => {
@@ -178,7 +204,11 @@ export function SiteNavbar({
         ease: "power2.out",
       })
     },
-    { dependencies: [activeSection], scope: navRef, revertOnUpdate: true }
+    {
+      dependencies: [activeSection, resolvedLanguage],
+      scope: navRef,
+      revertOnUpdate: true,
+    }
   )
 
   useGSAP(
@@ -229,7 +259,7 @@ export function SiteNavbar({
   )
 
   const NavContent = (
-    <div className="relative z-10 flex h-12 w-full items-center gap-4 px-3">
+    <div className="relative z-10 flex h-12 w-full items-center gap-2 px-2 md:gap-4 md:px-3">
       {leftSlot ? (
         <div className="flex items-center 2xl:hidden">{leftSlot}</div>
       ) : null}
@@ -240,10 +270,27 @@ export function SiteNavbar({
         aria-label={`运筹 ${t("brand.home")}`}
       >
         <StratumMark animated={false} variant="compact" className="size-7" />
-        <span className="truncate font-heading font-semibold">运筹</span>
+        <span className="hidden truncate font-heading font-semibold sm:inline">
+          运筹
+        </span>
       </Link>
 
-      <div className="relative z-10 ml-auto flex items-center gap-3">
+      <label className="relative ml-auto md:hidden">
+        <span className="sr-only">{t("nav.sectionLabel")}</span>
+        <select
+          data-slot="mobile-section-nav"
+          aria-label={t("nav.sectionLabel")}
+          value={activeSection}
+          onChange={selectSection}
+          className="h-11 w-28 rounded-lg border border-border bg-background px-2 pr-6 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+        >
+          <option value="overview">{t("nav.overview")}</option>
+          <option value="longzhong">{t("nav.longzhong")}</option>
+          <option value="ontology">{t("nav.modeling")}</option>
+        </select>
+      </label>
+
+      <div className="relative z-10 flex items-center gap-1 md:ml-auto md:gap-3">
         <div ref={sectionNavRef} className="relative hidden md:block">
           <NavigationMenu className="flex-none">
             <NavigationMenuList>
