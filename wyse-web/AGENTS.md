@@ -5,6 +5,9 @@
 - Overview (`/`) and Longzhong (`/longzhong`) are independent routes. Do not place them in a shared scrolling track.
 - Navbar tabs navigate between routes with a left/right view transition; they do not scroll to in-page anchors.
 - Chat messages use the document scroll. Do not add an internal message scroller.
+- Auto-follow is user-controlled: scrolling upward pauses it, content resize must preserve the reading
+  position, and it resumes only after the user reaches the actual bottom or activates the scroll-to-bottom
+  control.
 
 ## Longzhong chat layout constraints (hard)
 

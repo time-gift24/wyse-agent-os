@@ -1,11 +1,10 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ArrowDownIcon, ArrowUpIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
-import { useStickToBottom } from "use-stick-to-bottom"
 import { cn } from "~/lib/utils"
 
 import { ChatHistory } from "~/components/stratum/chat-history"
@@ -37,6 +36,28 @@ type ChatWorkspaceProps = {
   onHistoryOpenChange?(open: boolean): void
 }
 
+type AutoFollowScrollPosition = {
+  paused: boolean
+  previousScrollTop: number
+  scrollTop: number
+  targetScrollTop: number
+}
+
+const AUTO_FOLLOW_BOTTOM_EPSILON_PX = 1
+
+function resolveAutoFollowPaused({
+  paused,
+  previousScrollTop,
+  scrollTop,
+  targetScrollTop,
+}: AutoFollowScrollPosition) {
+  const atBottom = targetScrollTop - scrollTop <= AUTO_FOLLOW_BOTTOM_EPSILON_PX
+  if (paused) {
+    return !(atBottom && scrollTop > previousScrollTop)
+  }
+  return scrollTop < previousScrollTop && !atBottom
+}
+
 export function ChatWorkspace({
   historyOpen = false,
   onHistoryOpenChange,
@@ -45,6 +66,7 @@ export function ChatWorkspace({
   const conversation = useAgentConversation()
   const [composerText, setComposerText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [autoFollowPaused, setAutoFollowPaused] = useState(false)
   const [approvalSubmissions, setApprovalSubmissions] = useState<
     ReadonlyMap<string, ApprovalDecision>
   >(() => new Map())
@@ -53,6 +75,8 @@ export function ChatWorkspace({
   const workspaceRef = useRef<HTMLElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
   const inputContainerRef = useRef<HTMLDivElement>(null)
+  const autoFollowPausedRef = useRef(false)
+  const previousScrollTopRef = useRef(0)
 
   const { state, recentAgents, selectAgent, removeRecentAgent } = conversation
   const isNewConversation = state.agentId === null
@@ -68,19 +92,71 @@ export function ChatWorkspace({
     return () => clearTimeout(timer)
   }, [state.agentId])
 
-  const { scrollRef, contentRef, scrollToBottom, isAtBottom } =
-    useStickToBottom({
-      initial: "smooth",
-      resize: "smooth",
+  const scrollToBottom = useCallback((behavior: ScrollBehavior) => {
+    if (typeof document === "undefined") return
+    const scrollElement = document.documentElement
+    scrollElement.scrollTo({
+      top: Math.max(scrollElement.scrollHeight - scrollElement.clientHeight, 0),
+      behavior,
     })
+  }, [])
+
+  const resumeAutoFollow = useCallback(
+    (behavior: ScrollBehavior) => {
+      autoFollowPausedRef.current = false
+      setAutoFollowPaused(false)
+      scrollToBottom(behavior)
+    },
+    [scrollToBottom]
+  )
 
   useEffect(() => {
     if (typeof document === "undefined") return
-    scrollRef(document.documentElement)
-    return () => {
-      scrollRef(null as unknown as HTMLElement)
+    const scrollElement = document.documentElement
+    previousScrollTopRef.current = scrollElement.scrollTop
+
+    const handleScroll = () => {
+      const scrollTop = scrollElement.scrollTop
+      const previousScrollTop = previousScrollTopRef.current
+      const paused = resolveAutoFollowPaused({
+        paused: autoFollowPausedRef.current,
+        previousScrollTop,
+        scrollTop,
+        targetScrollTop: Math.max(
+          scrollElement.scrollHeight - scrollElement.clientHeight,
+          0
+        ),
+      })
+      previousScrollTopRef.current = scrollTop
+      if (paused !== autoFollowPausedRef.current) {
+        autoFollowPausedRef.current = paused
+        setAutoFollowPaused(paused)
+      }
     }
-  }, [scrollRef])
+
+    document.addEventListener("scroll", handleScroll, { passive: true })
+    return () => document.removeEventListener("scroll", handleScroll)
+  }, [])
+
+  useEffect(() => {
+    const messageList = messageListRef.current
+    if (!messageList || typeof ResizeObserver === "undefined") return
+    let scrollFrame: number | undefined
+    const resizeObserver = new ResizeObserver(() => {
+      if (autoFollowPausedRef.current) return
+      if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame)
+      scrollFrame = requestAnimationFrame(() => scrollToBottom("auto"))
+    })
+    resizeObserver.observe(messageList)
+    return () => {
+      if (scrollFrame !== undefined) cancelAnimationFrame(scrollFrame)
+      resizeObserver.disconnect()
+    }
+  }, [scrollToBottom])
+
+  useEffect(() => {
+    resumeAutoFollow("auto")
+  }, [resumeAutoFollow, state.agentId])
 
   // workspace 入场动画：与 navbar 收缩完全同步
   useGSAP(
@@ -221,12 +297,9 @@ export function ChatWorkspace({
       <div className="wyse-content-width mx-auto">
         <div data-slot="chat-main" className="flex min-w-0 flex-col">
           <div
-            ref={(node) => {
-              messageListRef.current = node
-              contentRef(node)
-            }}
+            ref={messageListRef}
             data-slot="chat-message-list"
-            className="w-full px-1 py-6 md:px-6"
+            className="w-full px-1 py-6 [overflow-anchor:none] md:px-6"
           >
             <AgentMessageList
               messages={state.messages}
@@ -243,11 +316,11 @@ export function ChatWorkspace({
         </div>
       </div>
 
-      {!isAtBottom && (
+      {autoFollowPaused && (
         <button
           type="button"
-          onClick={() => scrollToBottom()}
-          className="fixed bottom-28 left-1/2 z-50 -translate-x-1/2 rounded-full border border-border bg-background/90 p-2 text-foreground shadow-wyse-soft transition-transform hover:scale-105"
+          onClick={() => resumeAutoFollow("smooth")}
+          className="fixed bottom-36 left-1/2 z-50 -translate-x-1/2 rounded-full border border-border bg-background/90 p-2 text-foreground shadow-wyse-soft transition-transform hover:scale-105"
           aria-label={t("chat.scrollToBottom")}
         >
           <ArrowDownIcon className="size-4" aria-hidden="true" />
