@@ -10,7 +10,7 @@ use wyse_agent::{Agent, AgentError};
 use wyse_config::{Config, ConfigError, ResolvedAgentDefinition};
 use wyse_core::{
     AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatContent, ChatMessage, ChatRole,
-    DangerLevel, ModelId, ReplayStart, RuntimeEvent, ToolKind, ToolName,
+    DangerLevel, ModelConfig, ModelId, ReplayStart, RuntimeEvent, ToolKind, ToolName,
 };
 use wyse_filesystem::{
     Filesystem, FilesystemError, LocalFilesystem, LocalFilesystemConfig, VirtualPath,
@@ -20,8 +20,8 @@ use wyse_infra::{
     EventStream, EventStreamBus, EventStreamBusError, event_stream_bus::InMemoryEventStreamBus,
 };
 use wyse_llm::{
-    ApiKey, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmError, LlmProvider,
-    OpenAICompatibleProvider,
+    ApiKey, ConfigurableLlmProvider, DeepSeekModel, DeepSeekProvider, DeepSeekThinking, LlmError,
+    LlmProvider, OpenAICompatibleProvider,
 };
 use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus};
 use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolError, ToolPermissionMode, ToolRegistry};
@@ -159,9 +159,10 @@ async fn compose_session(
         )?
     };
 
+    let (provider, model_config) = select_provider(config, &definition.model)?;
     if initialize {
         store
-            .initialize(agent_id, DEFAULT_AGENT_NAME.to_owned())
+            .initialize_with_model_config(agent_id, DEFAULT_AGENT_NAME.to_owned(), model_config)
             .await?;
     } else {
         store.load_agent().await?;
@@ -176,7 +177,7 @@ async fn compose_session(
         .id(agent_id)
         .name(definition.agent_name.as_str())
         .system_prompt(definition.prompt)
-        .llm_provider(select_provider(config, &definition.model)?)
+        .llm_provider(provider)
         .tool_registry(definition_registry(&definition.tools)?)
         .event_bus(bus.clone())
         .store(store.clone())
@@ -326,7 +327,10 @@ fn agent_root(agent_id: AgentId) -> Result<VirtualPath, ReplError> {
     VirtualPath::try_from(format!("/history/{agent_id}").as_str()).map_err(ReplError::from)
 }
 
-fn select_provider(config: &Config, model: &ModelId) -> Result<Arc<dyn LlmProvider>, ReplError> {
+fn select_provider(
+    config: &Config,
+    model: &ModelId,
+) -> Result<(Arc<dyn LlmProvider>, ModelConfig), ReplError> {
     match model.provider_name() {
         "openai" => {
             let provider = config
@@ -343,11 +347,13 @@ fn select_provider(config: &Config, model: &ModelId) -> Result<Arc<dyn LlmProvid
                     model: model.clone(),
                 });
             }
-            Ok(Arc::new(OpenAICompatibleProvider::new(
+            let provider = OpenAICompatibleProvider::new(
                 OPENAI_BASE_URL,
                 ApiKey::new(provider.api_key.clone()),
                 model.clone(),
-            )))
+            );
+            let model_config = provider.default_model_config();
+            Ok((Arc::new(provider), model_config))
         }
         "deepseek" => {
             let provider =
@@ -376,12 +382,14 @@ fn select_provider(config: &Config, model: &ModelId) -> Result<Arc<dyn LlmProvid
                     });
                 }
             };
-            Ok(Arc::new(DeepSeekProvider::new(
+            let provider = DeepSeekProvider::new(
                 DEEPSEEK_BASE_URL,
                 ApiKey::new(provider.api_key.clone()),
                 deepseek_model,
                 DeepSeekThinking::Disabled,
-            )))
+            );
+            let model_config = provider.default_model_config();
+            Ok((Arc::new(provider), model_config))
         }
         provider => Err(ReplError::UnsupportedProvider {
             provider: provider.to_owned(),
@@ -399,12 +407,12 @@ mod tests {
     };
     use clap::Parser;
     use wyse_core::{
-        AgentEvent, AgentId, CallId, ChatContent, ChatRole, DangerLevel, RuntimeEvent,
+        AgentEvent, AgentId, CallId, ChatContent, ChatRole, DangerLevel, ModelConfig, RuntimeEvent,
         StreamEnvelope, ToolCallDelta, ToolKind, ToolName,
     };
     use wyse_filesystem::{Filesystem, LocalFilesystem, LocalFilesystemConfig};
     use wyse_infra::{EventStream, EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
-    use wyse_llm::{ChatStreamEvent, FinishReason, MockLlmProvider};
+    use wyse_llm::{ChatStreamEvent, FinishReason, LlmProvider, MockLlmProvider};
     use wyse_store::{
         AgentState, AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus,
     };
@@ -425,7 +433,13 @@ mod tests {
             })?);
         let store = Arc::new(FilesystemAgentStore::new(filesystem, agent_root(agent_id)?));
         if initialize {
-            store.initialize(agent_id, "test-agent".to_owned()).await?;
+            store
+                .initialize_with_model_config(
+                    agent_id,
+                    "test-agent".to_owned(),
+                    ModelConfig::new(provider.model_id(), Default::default()),
+                )
+                .await?;
         }
         let store: Arc<dyn AgentStore> = store;
         let bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
@@ -963,6 +977,13 @@ models = ["gpt-4.1-mini"]
         assert_eq!(definition.model, config.llm.default);
         assert_eq!(definition.prompt, "You are a helpful assistant.");
         assert_eq!(definition.tools, vec![ToolName::from("echo")]);
+        assert_eq!(
+            session.store.load_agent().await?.model_config,
+            Some(ModelConfig::new(
+                config.llm.default.clone(),
+                Default::default()
+            ))
+        );
         let _ = fs::remove_dir_all(root);
         Ok(())
     }

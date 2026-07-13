@@ -22,6 +22,9 @@ pub enum StoreError {
         /// Unsupported schema version.
         version: u32,
     },
+    /// A current state lacks the required model configuration.
+    #[error("current agent state is missing model configuration")]
+    MissingModelConfig,
     /// An iteration can only complete while the agent is running.
     #[error("agent is not running: {actual:?}")]
     AgentNotRunning {

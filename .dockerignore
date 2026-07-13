@@ -10,3 +10,4 @@ wyse-web/.react-router
 .env
 .env.*
 !.env.example
+.superpowers

@@ -109,7 +109,10 @@ export function ChatHistory({
   return (
     <AnimatePresence initial={false}>
       {open ? (
-        <div key="chat-history-drawer" className="fixed inset-0 z-40">
+        <div
+          key="chat-history-drawer"
+          className="pointer-events-none fixed inset-0 z-40"
+        >
           <div className="absolute inset-0 pointer-events-none" />
 
           <motion.aside
@@ -127,7 +130,7 @@ export function ChatHistory({
             }}
             className={cn(
               "wyse-history-drawer",
-              "flex flex-col gap-2 overflow-hidden",
+              "pointer-events-auto flex flex-col gap-2 overflow-hidden",
               "rounded-2xl border border-wyse-line bg-wyse-bg-paper shadow-wyse-soft",
               "max-h-[calc(100dvh-9rem)]"
             )}
@@ -186,7 +189,13 @@ export function ChatHistory({
               <Button
                 type="button"
                 variant="ghost"
-                className="h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium text-wyse-action hover:bg-wyse-action/5 hover:text-wyse-action"
+                aria-current={state.agentId === null ? "true" : undefined}
+                className={cn(
+                  "h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium",
+                  state.agentId === null
+                    ? "bg-wyse-action/10 text-wyse-action"
+                    : "text-wyse-action hover:bg-wyse-action/5"
+                )}
                 onClick={() => {
                   onNewConversation()
                 }}

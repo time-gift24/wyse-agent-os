@@ -104,10 +104,14 @@
   --radius-wyse-panel: 0.75rem;
   --radius-wyse-shell: 1rem;
   --radius-wyse-field: 0.5rem;
-  --page-gutter: clamp(1rem, 2vw, 2rem);
+  --page-gutter: clamp(0.75rem, 2vw, 2rem);
   --content-width: min(
     calc(100vw - var(--page-gutter) * 2),
-    clamp(36rem, 58vw, 64rem)
+    clamp(42rem, 64vw, 56rem)
+  );
+  --content-half-width: min(
+    calc(50vw - var(--page-gutter)),
+    clamp(21rem, 32vw, 28rem)
   );
   --layout-gap: clamp(0.75rem, 1.25vw, 1.5rem);
   --history-width: clamp(12rem, 16vw, 18rem);
@@ -346,8 +350,8 @@
   @media (min-width: 1536px) {
     .wyse-history-drawer {
       left: auto;
-      right: calc(50% + 33rem);
-      width: min(calc(50% - 33rem - 1rem), 16rem);
+      right: calc(50% + var(--content-half-width) + 1rem);
+      width: min(calc(50% - var(--content-half-width) - 2rem), 16rem);
     }
   }
 
@@ -364,6 +368,10 @@
     max-width: 100%;
   }
 
+  .navbar-shell--longzhong {
+    --navbar-max-width: var(--content-width);
+  }
+
   .navbar-glass .glass-surface__content {
     align-items: stretch;
     justify-content: flex-start;
@@ -373,14 +381,6 @@
   .navbar-glass.glass-surface {
     transition: none;
   }
-
-  .prompt-input-glass {
-    background: var(--wyse-canvas);
-    box-shadow:
-      0 -1.5rem 2.5rem color-mix(in oklch, var(--wyse-canvas) 60%, transparent),
-      var(--wyse-shadow-soft);
-  }
-
 }
 
 @media (prefers-color-scheme: dark) {

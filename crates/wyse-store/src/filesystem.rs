@@ -13,14 +13,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
 use wyse_core::{
-    AgentEvent, AgentId, ChatRole, EventSource, HistoryPage, HistoryQuery, RunId, RuntimeEvent,
-    StreamEnvelope, TokenUsage, TurnId,
+    AgentEvent, AgentId, ChatRole, EventSource, HistoryPage, HistoryQuery, ModelConfig, RunId,
+    RuntimeEvent, StreamEnvelope, TokenUsage, TurnId,
 };
 use wyse_filesystem::{
     CasExpectation, CasUpdateError, Entry, FILESYSTEM_CAS_RETRIES, FileType, Filesystem,
     FilesystemError, VirtualPath, cas_update,
 };
 
+use crate::state::LEGACY_AGENT_STATE_VERSION;
 use crate::{
     AGENT_STATE_VERSION, AgentState, AgentStatus, AgentStore, MAX_HISTORY_PAGE_SIZE, StoreError,
 };
@@ -35,6 +36,14 @@ pub struct FilesystemAgentStore {
 enum CommitSequenceOutcome {
     Committed(AgentState),
     Advanced,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ModelConfigMigrationError {
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    #[error("model configuration is already persisted")]
+    AlreadyPersisted,
 }
 
 impl FilesystemAgentStore {
@@ -67,6 +76,78 @@ impl FilesystemAgentStore {
         Ok(state)
     }
 
+    /// Creates the initial host-configured agent state and message directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the paths are invalid, the store already exists,
+    /// or the filesystem cannot create it.
+    pub async fn initialize_with_model_config(
+        &self,
+        agent_id: AgentId,
+        name: String,
+        model_config: ModelConfig,
+    ) -> Result<AgentState, StoreError> {
+        let state = AgentState::new_configured(agent_id, name, model_config);
+        self.filesystem.create_dir(&self.messages_path()?).await?;
+        self.filesystem
+            .put(
+                &self.agent_path()?,
+                encode_agent_state(&state)?,
+                CasExpectation::Absent,
+            )
+            .await?;
+        Ok(state)
+    }
+
+    /// Persists a model configuration for a legacy state that lacks one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state is invalid or the compare-and-swap update cannot be
+    /// committed.
+    pub async fn write_model_config_if_missing(
+        &self,
+        model_config: ModelConfig,
+    ) -> Result<AgentState, StoreError> {
+        let current = self.read_state_for_model_config().await?;
+        if current.model_config.is_some() {
+            return Ok(current);
+        }
+
+        let attempts = AtomicUsize::new(0);
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            &self.agent_path()?,
+            decode_agent_state_for_model_config_migration,
+            encode_agent_state_for_model_config_migration,
+            |current| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                validate_persisted_state(current)?;
+                if current.model_config.is_some() {
+                    return Err(ModelConfigMigrationError::AlreadyPersisted);
+                }
+                let mut next = current.clone();
+                next.state_version = AGENT_STATE_VERSION;
+                next.model_config = Some(model_config.clone());
+                Ok(next)
+            },
+        )
+        .await;
+        trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
+        match result {
+            Ok(state) => Ok(state),
+            Err(CasUpdateError::Apply(ModelConfigMigrationError::AlreadyPersisted)) => {
+                self.read_state_for_model_config().await
+            }
+            Err(CasUpdateError::Apply(ModelConfigMigrationError::Store(error))) => Err(error),
+            Err(CasUpdateError::CasUnsupported) => Err(StoreError::CasUnsupported),
+            Err(CasUpdateError::Timeout) => Err(StoreError::CasTimeout),
+            Err(CasUpdateError::RetriesExhausted) => Err(StoreError::CasRetriesExhausted),
+            Err(CasUpdateError::Filesystem(error)) => Err(StoreError::Filesystem(error)),
+        }
+    }
+
     fn agent_path(&self) -> Result<VirtualPath, StoreError> {
         self.child_path("agent.json")
     }
@@ -91,12 +172,18 @@ impl FilesystemAgentStore {
     }
 
     async fn read_state(&self) -> Result<AgentState, StoreError> {
+        let state = self.read_state_for_model_config().await?;
+        validate_runtime_state(&state)?;
+        Ok(state)
+    }
+
+    async fn read_state_for_model_config(&self) -> Result<AgentState, StoreError> {
         let path = self.agent_path()?;
         let Some(record) = self.filesystem.get(&path).await? else {
             return Err(StoreError::AgentMissing);
         };
         let state = decode_agent_state(&record.entry)?;
-        validate_state(&state)?;
+        validate_persisted_state(&state)?;
         Ok(state)
     }
 
@@ -131,7 +218,7 @@ impl FilesystemAgentStore {
             encode_agent_state,
             |current| {
                 attempts.fetch_add(1, Ordering::Relaxed);
-                validate_state(current)?;
+                validate_persisted_state(current)?;
                 if current.last_seq != expected_previous && current.last_seq != seq {
                     return Err(StoreError::MessageBeyondFrontier {
                         seq,
@@ -209,11 +296,22 @@ impl FilesystemAgentStore {
         Ok(sequences)
     }
 
-    async fn read_integrity_snapshot(&self) -> Result<(AgentState, BTreeSet<u64>), StoreError> {
+    async fn read_integrity_snapshot(
+        &self,
+        allow_legacy: bool,
+    ) -> Result<(AgentState, BTreeSet<u64>), StoreError> {
         loop {
-            let state = self.read_state().await?;
+            let state = if allow_legacy {
+                self.read_state_for_model_config().await?
+            } else {
+                self.read_state().await?
+            };
             let message_sequences = self.list_message_sequences().await?;
-            let refreshed = self.read_state().await?;
+            let refreshed = if allow_legacy {
+                self.read_state_for_model_config().await?
+            } else {
+                self.read_state().await?
+            };
             if refreshed.last_seq == state.last_seq {
                 return Ok((refreshed, message_sequences));
             }
@@ -252,13 +350,22 @@ impl FilesystemAgentStore {
         }
         Ok(())
     }
+
+    async fn load_agent_for_model_config(&self) -> Result<AgentState, StoreError> {
+        loop {
+            let (state, message_sequences) = self.read_integrity_snapshot(true).await?;
+            if let Some(state) = self.reconcile_frontier(state, &message_sequences).await? {
+                return Ok(state);
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl AgentStore for FilesystemAgentStore {
     async fn load_agent(&self) -> Result<AgentState, StoreError> {
         loop {
-            let (state, message_sequences) = self.read_integrity_snapshot().await?;
+            let (state, message_sequences) = self.read_integrity_snapshot(false).await?;
             if let Some(state) = self.reconcile_frontier(state, &message_sequences).await? {
                 return Ok(state);
             }
@@ -282,7 +389,7 @@ impl AgentStore for FilesystemAgentStore {
             encode_agent_state,
             |current| {
                 attempts.fetch_add(1, Ordering::Relaxed);
-                validate_state(current)?;
+                validate_runtime_state(current)?;
                 if status == AgentStatus::Running
                     && current.status == AgentStatus::Running
                     && current.run_id != run_id
@@ -309,6 +416,46 @@ impl AgentStore for FilesystemAgentStore {
         result.map_err(StoreError::from)
     }
 
+    async fn start_turn(
+        &self,
+        run_id: RunId,
+        turn_id: TurnId,
+        model_config: ModelConfig,
+    ) -> Result<AgentState, StoreError> {
+        self.load_agent_for_model_config().await?;
+        let updated_at = Utc::now();
+        let attempts = AtomicUsize::new(0);
+        let result = cas_update(
+            self.filesystem.as_ref(),
+            &self.agent_path()?,
+            decode_agent_state,
+            encode_agent_state,
+            |current| {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                validate_persisted_state(current)?;
+                if current.status == AgentStatus::Running && current.run_id != Some(run_id) {
+                    return Err(StoreError::RunningRunConflict {
+                        current: current.run_id,
+                        attempted: Some(run_id),
+                    });
+                }
+                let mut next = current.clone();
+                next.state_version = AGENT_STATE_VERSION;
+                next.status = AgentStatus::Running;
+                next.run_id = Some(run_id);
+                next.turn_id = Some(turn_id);
+                next.next_iteration = 0;
+                next.usage = TokenUsage::default();
+                next.model_config = Some(model_config.clone());
+                next.updated_at = updated_at;
+                Ok(next)
+            },
+        )
+        .await;
+        trace_cas_outcome(&result, attempts.load(Ordering::Relaxed), None);
+        result.map_err(StoreError::from)
+    }
+
     async fn complete_iteration(
         &self,
         run_id: RunId,
@@ -325,7 +472,7 @@ impl AgentStore for FilesystemAgentStore {
             encode_agent_state,
             |current| {
                 attempts.fetch_add(1, Ordering::Relaxed);
-                validate_state(current)?;
+                validate_runtime_state(current)?;
                 if current.status != AgentStatus::Running {
                     return Err(StoreError::AgentNotRunning {
                         actual: current.status,
@@ -511,10 +658,22 @@ fn decode_agent_state(entry: &Entry) -> Result<AgentState, StoreError> {
     serde_json::from_slice(entry.contents()).map_err(StoreError::DecodeState)
 }
 
+fn decode_agent_state_for_model_config_migration(
+    entry: &Entry,
+) -> Result<AgentState, ModelConfigMigrationError> {
+    decode_agent_state(entry).map_err(ModelConfigMigrationError::from)
+}
+
 fn encode_agent_state(state: &AgentState) -> Result<Entry, StoreError> {
     serde_json::to_vec(state)
         .map(Entry::new)
         .map_err(StoreError::Encode)
+}
+
+fn encode_agent_state_for_model_config_migration(
+    state: &AgentState,
+) -> Result<Entry, ModelConfigMigrationError> {
+    encode_agent_state(state).map_err(ModelConfigMigrationError::from)
 }
 
 fn decode_message(entry: &Entry) -> Result<StreamEnvelope, StoreError> {
@@ -530,11 +689,18 @@ fn encode_message(envelope: &StreamEnvelope) -> Result<Entry, StoreError> {
         .map_err(StoreError::Encode)
 }
 
-fn validate_state(state: &AgentState) -> Result<(), StoreError> {
-    if state.state_version != AGENT_STATE_VERSION {
-        return Err(StoreError::UnsupportedStateVersion {
-            version: state.state_version,
-        });
+fn validate_persisted_state(state: &AgentState) -> Result<(), StoreError> {
+    match (state.state_version, &state.model_config) {
+        (AGENT_STATE_VERSION, Some(_)) | (LEGACY_AGENT_STATE_VERSION, None) => Ok(()),
+        (AGENT_STATE_VERSION, None) => Err(StoreError::MissingModelConfig),
+        (version, _) => Err(StoreError::UnsupportedStateVersion { version }),
+    }
+}
+
+fn validate_runtime_state(state: &AgentState) -> Result<(), StoreError> {
+    validate_persisted_state(state)?;
+    if state.model_config.is_none() {
+        return Err(StoreError::MissingModelConfig);
     }
     Ok(())
 }
@@ -727,11 +893,13 @@ fn strict_json_error() -> serde_json::Error {
     ))
 }
 
-fn trace_cas_outcome(
-    result: &Result<AgentState, CasUpdateError<StoreError>>,
+fn trace_cas_outcome<E>(
+    result: &Result<AgentState, CasUpdateError<E>>,
     attempt_count: usize,
     seq: Option<u64>,
-) {
+) where
+    E: std::error::Error + 'static,
+{
     let state = result.as_ref().ok();
     let agent_id = state.map(|state| state.agent_id);
     let run_id = state.and_then(|state| state.run_id);

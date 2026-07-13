@@ -1,5 +1,10 @@
 # Runtime event persistence conventions
 
+## Hosted model configuration
+
+- `wyse-core` owns the common `ModelConfig` snapshot: a provider-scoped `ModelId` and its
+  provider-specific parameter object travel together across runtime and persistence boundaries.
+
 ## Dependency boundaries
 
 ```mermaid

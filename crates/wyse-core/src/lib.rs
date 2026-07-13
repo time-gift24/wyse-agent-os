@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fmt, str::FromStr};
 use bon::Builder;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 pub use error::ModelIdParseError;
@@ -379,6 +379,24 @@ impl TryFrom<String> for ModelId {
 impl From<ModelId> for String {
     fn from(value: ModelId) -> Self {
         value.0
+    }
+}
+
+/// Stable model selection and provider parameters for an agent turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ModelConfig {
+    /// Canonical provider-scoped model identity.
+    pub model: ModelId,
+    /// Provider-specific model parameters.
+    pub parameters: Map<String, Value>,
+}
+
+impl ModelConfig {
+    /// Creates a stable model configuration.
+    #[must_use]
+    pub fn new(model: ModelId, parameters: Map<String, Value>) -> Self {
+        Self { model, parameters }
     }
 }
 
@@ -993,6 +1011,15 @@ mod tests {
         assert_eq!(model.as_str(), "openai:gpt-4.1-mini");
         assert_eq!(model, constructed);
         assert_eq!(model, converted);
+    }
+
+    #[test]
+    fn model_config_constructs_with_model_and_parameters() {
+        let model = ModelId::new("openai", "test-model").expect("static model is valid");
+        let config = ModelConfig::new(model.clone(), Map::new());
+
+        assert_eq!(config.model, model);
+        assert!(config.parameters.is_empty());
     }
 
     #[test]

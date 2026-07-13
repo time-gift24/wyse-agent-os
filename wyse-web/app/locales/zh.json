@@ -39,7 +39,15 @@
     "composer": {
       "label": "输入消息",
       "placeholder": "向隆中对提问……",
-      "send": "发送"
+      "send": "发送",
+      "agent": "智能体",
+      "model": "模型",
+      "thinking": "思考",
+      "disabled": "关闭",
+      "high": "高",
+      "max": "最大",
+      "loadingConfiguration": "正在加载配置……",
+      "selectAgent": "选择智能体"
     },
     "creating": "正在创建对话……",
     "sending": "正在发送……",
@@ -57,6 +65,22 @@
     "reject": "拒绝",
     "toolKind": "工具类型",
     "dangerLevel": "风险等级",
+    "toolTrace": {
+      "status": {
+        "streaming": "正在执行 {{tool}}",
+        "finished": "{{tool}} 已完成",
+        "failed": "{{tool}} 执行失败"
+      },
+      "input": "输入",
+      "rawResult": "原始结果",
+      "error": "错误"
+    },
+    "approval": {
+      "title": "允许 {{agent}} 使用 {{tool}}？",
+      "titleWithResource": "允许 {{agent}} 对 {{resource}} 使用 {{tool}}？",
+      "allowing": "正在允许……",
+      "declining": "正在拒绝……"
+    },
     "streamStatus": "流式输出中",
     "reasoningComplete": "推理完成",
     "thinking": "正在思考",

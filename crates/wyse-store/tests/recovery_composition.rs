@@ -8,19 +8,26 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use support::MemoryCasFilesystem;
 use wyse_core::{
-    AgentEvent, AgentId, ChatMessage, EventSource, HistoryQuery, ReplayStart, RunId, RuntimeEvent,
-    StreamEnvelope, TurnId,
+    AgentEvent, AgentId, ChatMessage, EventSource, HistoryQuery, ModelConfig, ModelId, ReplayStart,
+    RunId, RuntimeEvent, StreamEnvelope, TurnId,
 };
 use wyse_filesystem::VirtualPath;
 use wyse_infra::{EventStreamBus, event_stream_bus::InMemoryEventStreamBus};
 use wyse_store::{AgentStore, FilesystemAgentStore, StoreEventStreamBus};
+
+fn test_model_config() -> ModelConfig {
+    ModelConfig::new(
+        ModelId::new("openai", "test-model").expect("static model is valid"),
+        serde_json::Map::new(),
+    )
+}
 
 async fn initialized_store(agent_id: AgentId) -> Arc<FilesystemAgentStore> {
     let filesystem = Arc::new(MemoryCasFilesystem::default());
     let root = VirtualPath::try_from("/agents/recovery").expect("valid root");
     let store = Arc::new(FilesystemAgentStore::new(filesystem, root));
     store
-        .initialize(agent_id, "recovery".to_owned())
+        .initialize_with_model_config(agent_id, "recovery".to_owned(), test_model_config())
         .await
         .expect("initialize store");
     store

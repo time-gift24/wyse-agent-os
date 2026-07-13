@@ -15,16 +15,16 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use wyse_agent::Agent;
-use wyse_config::{AgentName, Config, ResolvedAgentDefinition};
-use wyse_core::{AgentId, ChatMessage, DangerLevel, ToolKind};
+use wyse_agent::{Agent, AgentError};
+use wyse_config::{AgentName, Config, ConfigError, ResolvedAgentDefinition};
+use wyse_core::{AgentId, ChatMessage, DangerLevel, ModelConfig, ToolKind};
 use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemError, VirtualPath};
 use wyse_infra::EventStreamBus;
-use wyse_llm::LlmProviderManager;
-use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreEventStreamBus};
+use wyse_llm::{LlmError, LlmProviderManager, ModelDescriptor};
+use wyse_store::{AgentStatus, AgentStore, FilesystemAgentStore, StoreError, StoreEventStreamBus};
 use wyse_tools::{BuiltinToolRegistry, EchoTool, ToolPermissionMode, ToolRegistry};
 
-use crate::{AgentCleanupError, HostError};
+use crate::{AgentCleanupError, AgentTemplateView, HostError};
 
 const HISTORY_ROOT: &str = "/history";
 const TEMPLATE_ROOT: &str = "/templates";
@@ -58,11 +58,16 @@ pub(crate) struct AdmissionGuard {
 
 /// One composed agent and its durable store.
 pub struct HostedAgent {
-    /// Agent runtime.
-    pub agent: Agent,
+    agent: RwLock<Agent>,
+    definition: ResolvedAgentDefinition,
     /// Durable state and complete message history.
     pub store: Arc<dyn AgentStore>,
     needs_resume: AtomicBool,
+    transitioning: AtomicBool,
+}
+
+pub(crate) struct HostedAgentTransition<'a> {
+    transitioning: &'a AtomicBool,
 }
 
 enum CreationStage<T, E> {
@@ -72,6 +77,44 @@ enum CreationStage<T, E> {
 }
 
 impl HostedAgent {
+    fn new(
+        agent: Agent,
+        definition: ResolvedAgentDefinition,
+        store: Arc<dyn AgentStore>,
+        needs_resume: bool,
+    ) -> Self {
+        Self {
+            agent: RwLock::new(agent),
+            definition,
+            store,
+            needs_resume: AtomicBool::new(needs_resume),
+            transitioning: AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn agent(&self) -> Agent {
+        self.agent
+            .read()
+            .expect("hosted agent lock should not be poisoned")
+            .clone()
+    }
+
+    pub(crate) fn replace_agent(&self, agent: Agent) {
+        *self
+            .agent
+            .write()
+            .expect("hosted agent lock should not be poisoned") = agent;
+    }
+
+    pub(crate) fn begin_transition(&self) -> Result<HostedAgentTransition<'_>, AgentError> {
+        if self.transitioning.swap(true, Ordering::AcqRel) {
+            return Err(AgentError::RunAlreadyActive);
+        }
+        Ok(HostedAgentTransition {
+            transitioning: &self.transitioning,
+        })
+    }
+
     /// Returns whether startup found an interrupted running turn.
     #[must_use]
     pub fn needs_resume(&self) -> bool {
@@ -84,6 +127,12 @@ impl HostedAgent {
 
     pub(crate) fn clear_needs_resume(&self) {
         self.needs_resume.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for HostedAgentTransition<'_> {
+    fn drop(&mut self) {
+        self.transitioning.store(false, Ordering::Release);
     }
 }
 
@@ -181,10 +230,17 @@ impl HostState {
             let input = std::str::from_utf8(&bytes)
                 .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
             let definition = ResolvedAgentDefinition::parse(input)?;
-            config.validate_model_configured(&definition.model)?;
-            let store: Arc<dyn AgentStore> =
-                Arc::new(FilesystemAgentStore::new(Arc::clone(&filesystem), root));
-            let state = store.load_agent().await?;
+            let filesystem_store = FilesystemAgentStore::new(Arc::clone(&filesystem), root);
+            let state = match filesystem_store.load_agent().await {
+                Ok(state) => state,
+                Err(StoreError::MissingModelConfig) => {
+                    let model_config = providers.default_model_config(&definition.model)?;
+                    filesystem_store
+                        .write_model_config_if_missing(model_config)
+                        .await?
+                }
+                Err(error) => return Err(error.into()),
+            };
             let expected_name = definition.agent_name.as_str();
             if state.agent_id != agent_id || state.name != expected_name {
                 return Err(HostError::IdentityMismatch {
@@ -195,32 +251,26 @@ impl HostState {
                 });
             }
 
-            let provider = providers.get(&definition.model)?;
-            let registry = tool_registry(&definition)?;
-            let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
+            let model_config = state
+                .model_config
+                .clone()
+                .ok_or(StoreError::MissingModelConfig)?;
+            let store: Arc<dyn AgentStore> = Arc::new(filesystem_store);
+            let agent = compose_agent(
+                &providers,
+                &event_bus,
+                agent_id,
+                &definition,
                 Arc::clone(&store),
-                Arc::clone(&event_bus),
-            ));
-            let agent = Agent::builder()
-                .id(agent_id)
-                .name(expected_name)
-                .system_prompt(definition.prompt)
-                .llm_provider(provider)
-                .tool_registry(registry)
-                .event_bus(agent_bus)
-                .store(Arc::clone(&store))
-                .build()?;
+                model_config,
+            )?;
             let needs_resume = state.status == AgentStatus::Running;
             if !needs_resume {
                 agent.load_history().await?;
             }
             agents.insert(
                 agent_id,
-                Arc::new(HostedAgent {
-                    agent,
-                    store,
-                    needs_resume: AtomicBool::new(needs_resume),
-                }),
+                Arc::new(HostedAgent::new(agent, definition, store, needs_resume)),
             );
         }
 
@@ -243,6 +293,146 @@ impl HostState {
             .expect("host registry lock should not be poisoned")
             .get(&agent_id)
             .map(Arc::clone)
+    }
+
+    /// Lists the models configured for this host.
+    #[must_use]
+    pub fn models(&self) -> Vec<ModelDescriptor> {
+        self.providers.models()
+    }
+
+    /// Lists every resolved agent template and its provider default model configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError`] when template discovery, decoding, resolution, or provider lookup
+    /// fails. No partial list is returned.
+    pub async fn agent_templates(&self) -> Result<Vec<AgentTemplateView>, HostError> {
+        let template_root = VirtualPath::try_from(TEMPLATE_ROOT).map_err(|source| {
+            FilesystemError::InvalidVirtualPath {
+                path: TEMPLATE_ROOT.to_owned(),
+                source,
+            }
+        })?;
+        let mut entries = self.filesystem.list_dir(&template_root).await?;
+        entries.sort_unstable_by(|left, right| left.file_name.cmp(&right.file_name));
+
+        let mut templates = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            let Some(stem) = entry.file_name.strip_suffix(".toml") else {
+                continue;
+            };
+            let agent_name: AgentName = stem.parse()?;
+            let source = self.filesystem.read_file(&entry.path).await?;
+            let source = std::str::from_utf8(&source)
+                .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
+            let definition = self.config.resolve_template(agent_name, source)?;
+            let model_config = self.providers.default_model_config(&definition.model)?;
+            templates.push(AgentTemplateView {
+                agent_name: definition.agent_name.as_str().to_owned(),
+                model_config,
+            });
+        }
+
+        Ok(templates)
+    }
+
+    /// Starts a message using the persisted or requested model configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError`] when admission is closed, the agent is missing or requires resume,
+    /// the model configuration is invalid, or the required turn preamble cannot be committed.
+    pub async fn start_message(
+        &self,
+        agent_id: AgentId,
+        text: String,
+        requested: Option<ModelConfig>,
+    ) -> Result<wyse_core::RunId, HostError> {
+        let _admission = self.admit()?;
+        if text.trim().is_empty() {
+            return Err(HostError::InvalidMessage);
+        }
+        let hosted = self
+            .agent(agent_id)
+            .ok_or(HostError::AgentNotFound { agent_id })?;
+        if hosted.needs_resume() {
+            return Err(HostError::ResumeRequired);
+        }
+        let _transition = hosted.begin_transition()?;
+        let shutdown = self.shutdown_token();
+        let candidate = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return Err(HostError::HostShuttingDown),
+            result = self.prepare_message_agent(&hosted, requested) => {
+                result.map_err(map_model_parameter_error)?
+            },
+        };
+        let result = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                candidate.stop();
+                return Err(HostError::HostShuttingDown);
+            }
+            result = candidate.run_turn(ChatMessage::user(text)) => result,
+        };
+        let run_id = match result {
+            Ok(run_id) => run_id,
+            Err(error @ AgentError::RunAlreadyActive) => return Err(error.into()),
+            Err(error) => {
+                let requires_resume = tokio::select! {
+                    biased;
+                    state = hosted.store.load_agent() => match state {
+                        Ok(state) => state.status == AgentStatus::Running,
+                        Err(_) => true,
+                    },
+                    () = shutdown.cancelled() => return Err(HostError::HostShuttingDown),
+                };
+                if requires_resume {
+                    hosted.replace_agent(candidate);
+                    hosted.mark_needs_resume();
+                }
+                return Err(error.into());
+            }
+        };
+        if self.is_shutting_down() {
+            candidate.stop();
+            return Err(HostError::HostShuttingDown);
+        }
+        hosted.replace_agent(candidate);
+        Ok(run_id)
+    }
+
+    pub(crate) async fn prepare_message_agent(
+        &self,
+        hosted: &HostedAgent,
+        requested: Option<ModelConfig>,
+    ) -> Result<Agent, HostError> {
+        let state = hosted.store.load_agent().await?;
+        if requested.is_some() && state.status == AgentStatus::Running {
+            return Err(AgentError::RunAlreadyActive.into());
+        }
+        match requested {
+            None => {
+                let model_config = state
+                    .model_config
+                    .as_ref()
+                    .ok_or(StoreError::MissingModelConfig)?;
+                let _ = self.providers.configure(model_config)?;
+                Ok(hosted.agent())
+            }
+            Some(model_config) => compose_agent(
+                &self.providers,
+                &self.event_bus,
+                state.agent_id,
+                &hosted.definition,
+                Arc::clone(&hosted.store),
+                model_config,
+            ),
+        }
     }
 
     pub(crate) fn event_bus(&self) -> Arc<dyn EventStreamBus> {
@@ -283,7 +473,7 @@ impl HostState {
             .cloned()
             .collect::<Vec<_>>();
         for hosted in &agents {
-            hosted.agent.stop();
+            hosted.agent().stop();
         }
 
         let wait_for_terminal = async {
@@ -330,6 +520,23 @@ impl HostState {
         agent_name: AgentName,
         text: String,
     ) -> Result<crate::AgentCreated, HostError> {
+        self.create_agent_with_model_config(agent_name, text, None)
+            .await
+    }
+
+    /// Creates an agent using an optional caller-selected model configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError`] when the text is blank, the template or selected model cannot be
+    /// resolved, persistence or agent composition fails, or the required turn preamble cannot
+    /// be committed.
+    pub(crate) async fn create_agent_with_model_config(
+        &self,
+        agent_name: AgentName,
+        text: String,
+        requested_model_config: Option<ModelConfig>,
+    ) -> Result<crate::AgentCreated, HostError> {
         let _admission = self.admit()?;
         if text.trim().is_empty() {
             return Err(HostError::EmptyText);
@@ -350,11 +557,15 @@ impl HostState {
                 .map_err(|source| HostError::InvalidDefinitionEncoding { source })?;
             let definition = self.config.resolve_template(agent_name.clone(), template)?;
             let encoded_definition = definition.encode()?.into_bytes();
-            let provider = self.providers.get(&definition.model)?;
-            let registry = tool_registry(&definition)?;
-            Ok::<_, HostError>((definition, encoded_definition, provider, registry))
+            let model_config = match requested_model_config {
+                Some(model_config) => model_config,
+                None => self.providers.default_model_config(&definition.model)?,
+            };
+            let _ = self.providers.configure(&model_config)?;
+            let _ = tool_registry(&definition)?;
+            Ok::<_, HostError>((definition, encoded_definition, model_config))
         };
-        let (definition, encoded_definition, provider, registry) = tokio::select! {
+        let (definition, encoded_definition, model_config) = tokio::select! {
             biased;
             () = self.shutdown.cancelled() => return Err(HostError::HostShuttingDown),
             result = preflight => result?,
@@ -400,7 +611,11 @@ impl HostState {
         ));
         match creation_stage(
             &self.shutdown,
-            store.initialize(agent_id, agent_name.as_str().to_owned()),
+            store.initialize_with_model_config(
+                agent_id,
+                agent_name.as_str().to_owned(),
+                model_config.clone(),
+            ),
         )
         .await
         {
@@ -419,27 +634,21 @@ impl HostState {
         }
 
         let store: Arc<dyn AgentStore> = store;
-        let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::new(
+        let agent = match compose_agent(
+            &self.providers,
+            &self.event_bus,
+            agent_id,
+            &definition,
             Arc::clone(&store),
-            Arc::clone(&self.event_bus),
-        ));
-        let agent = match Agent::builder()
-            .id(agent_id)
-            .name(agent_name.as_str())
-            .system_prompt(definition.prompt)
-            .llm_provider(provider)
-            .tool_registry(registry)
-            .event_bus(agent_bus)
-            .store(Arc::clone(&store))
-            .build()
-        {
+            model_config,
+        ) {
             Ok(agent) => agent,
             Err(error) => {
                 return Err(creation_error_with_cleanup(
                     self.filesystem.as_ref(),
                     &root,
                     &definition_path,
-                    error.into(),
+                    error,
                 )
                 .await);
             }
@@ -472,17 +681,13 @@ impl HostState {
             }
         };
 
-        let hosted = Arc::new(HostedAgent {
-            agent,
-            store,
-            needs_resume: AtomicBool::new(false),
-        });
+        let hosted = Arc::new(HostedAgent::new(agent, definition, store, false));
         let mut agents = self
             .agents
             .write()
             .expect("host registry lock should not be poisoned");
         if self.is_shutting_down() {
-            hosted.agent.stop();
+            hosted.agent().stop();
             return Err(HostError::HostShuttingDown);
         }
         agents.insert(agent_id, hosted);
@@ -560,6 +765,18 @@ async fn ensure_directory(
     }
 }
 
+fn map_model_parameter_error(error: HostError) -> HostError {
+    match error {
+        HostError::Llm(LlmError::ProviderNotFound { model }) => {
+            HostError::Config(ConfigError::ModelNotConfigured { model })
+        }
+        HostError::Llm(LlmError::InvalidModelParameters { .. }) => {
+            HostError::InvalidModelParameters
+        }
+        error => error,
+    }
+}
+
 fn template_path(agent_name: &AgentName) -> Result<VirtualPath, HostError> {
     let path = format!("{TEMPLATE_ROOT}/{}.toml", agent_name.as_str());
     VirtualPath::try_from(path.as_str())
@@ -627,6 +844,32 @@ fn child_path(root: &VirtualPath, child: &str) -> Result<VirtualPath, HostError>
     VirtualPath::try_from(path.as_str()).map_err(|source| {
         wyse_filesystem::FilesystemError::InvalidVirtualPath { path, source }.into()
     })
+}
+
+fn compose_agent(
+    providers: &LlmProviderManager,
+    event_bus: &Arc<dyn EventStreamBus>,
+    agent_id: AgentId,
+    definition: &ResolvedAgentDefinition,
+    store: Arc<dyn AgentStore>,
+    model_config: ModelConfig,
+) -> Result<Agent, HostError> {
+    let provider = providers.configure(&model_config)?;
+    let registry = tool_registry(definition)?;
+    let agent_bus: Arc<dyn EventStreamBus> = Arc::new(StoreEventStreamBus::with_model_config(
+        Arc::clone(&store),
+        Arc::clone(event_bus),
+        model_config,
+    ));
+    Ok(Agent::builder()
+        .id(agent_id)
+        .name(definition.agent_name.as_str())
+        .system_prompt(definition.prompt.clone())
+        .llm_provider(provider)
+        .tool_registry(registry)
+        .event_bus(agent_bus)
+        .store(store)
+        .build()?)
 }
 
 fn tool_registry(definition: &ResolvedAgentDefinition) -> Result<Arc<dyn ToolRegistry>, HostError> {

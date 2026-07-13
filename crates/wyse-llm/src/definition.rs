@@ -1,11 +1,11 @@
 //! Public LLM provider definitions.
 
-use std::pin::Pin;
+use std::{pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
-use wyse_core::{ModelId, TokenUsage};
+use wyse_core::{ModelConfig, ModelId, TokenUsage};
 
 use crate::{ChatMessage, LlmError, StructuredOutput, ToolCallDelta, ToolSpec};
 
@@ -24,6 +24,36 @@ pub trait LlmProvider: Send + Sync {
 
     /// Sends a streaming chat request.
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError>;
+}
+
+/// Provider that can validate and apply its model-specific parameters.
+pub trait ConfigurableLlmProvider: LlmProvider {
+    /// Returns the JSON Schema describing this provider's model parameters.
+    fn parameter_schema(&self) -> serde_json::Value;
+
+    /// Returns the default configuration for this provider's bound model.
+    fn default_model_config(&self) -> ModelConfig;
+
+    /// Creates a provider configured with the supplied model parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::InvalidModelParameters`] when the parameters do not match this
+    /// provider's supported shape.
+    fn configure(
+        &self,
+        parameters: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Arc<dyn LlmProvider>, LlmError>;
+}
+
+/// A registered model and the schema for its provider-specific parameters.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct ModelDescriptor {
+    /// Canonical provider-scoped model identity.
+    pub model: ModelId,
+    /// JSON Schema for provider-specific model parameters.
+    pub parameters_schema: serde_json::Value,
 }
 
 /// Request for a chat completion.

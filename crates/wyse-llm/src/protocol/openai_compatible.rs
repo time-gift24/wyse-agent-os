@@ -1,5 +1,5 @@
 //! OpenAI-compatible protocol implementation.
-use std::{collections::VecDeque, pin::Pin};
+use std::{collections::VecDeque, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use bon::Builder;
@@ -9,13 +9,13 @@ use reqwest::{
     Url,
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
-use serde_json::{Value, json};
-use wyse_core::{CallId, ModelId, TokenUsage};
+use serde_json::{Map, Value, json};
+use wyse_core::{CallId, ModelConfig, ModelId, TokenUsage};
 
 use crate::{
     ApiKey, ChatContent, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream,
-    ChatStreamEvent, FinishReason, LlmError, LlmProvider, ProviderStatusError, StructuredOutput,
-    ToolCall, ToolCallDelta,
+    ChatStreamEvent, ConfigurableLlmProvider, FinishReason, LlmError, LlmProvider,
+    ProviderStatusError, StructuredOutput, ToolCall, ToolCallDelta,
     protocol::sse::{SseEvent, SseParser, stream_eof_error},
 };
 
@@ -129,6 +129,26 @@ impl LlmProvider for OpenAICompatibleProvider {
         }
 
         Ok(openai_chat_stream(response.bytes_stream()))
+    }
+}
+
+impl ConfigurableLlmProvider for OpenAICompatibleProvider {
+    fn parameter_schema(&self) -> Value {
+        json!({"type": "object", "additionalProperties": false, "default": {}})
+    }
+
+    fn default_model_config(&self) -> ModelConfig {
+        ModelConfig::new(self.model_id(), Map::new())
+    }
+
+    fn configure(&self, parameters: &Map<String, Value>) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        if !parameters.is_empty() {
+            return Err(LlmError::InvalidModelParameters {
+                model: self.model_id(),
+            });
+        }
+
+        Ok(Arc::new(self.clone()))
     }
 }
 

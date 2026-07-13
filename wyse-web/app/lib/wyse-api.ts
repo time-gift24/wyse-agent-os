@@ -1,3 +1,9 @@
+import type {
+  AgentTemplateView,
+  ModelConfig,
+  ModelDescriptor,
+} from "./model-config"
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -13,6 +19,7 @@ export type AgentView = {
   agent_id: string
   agent_name: string
   status: "idle" | "running"
+  model_config: ModelConfig
   run_id: string | null
   turn_id: string | null
   last_seq: number
@@ -91,13 +98,20 @@ export type WyseApi = {
   createAgent(input: {
     agentName: string
     text: string
+    modelConfig?: ModelConfig
   }): Promise<{ agent_id: string; agent_name: string; run_id: string }>
+  getAgentTemplates(): Promise<readonly AgentTemplateView[]>
+  getModels(): Promise<readonly ModelDescriptor[]>
   getAgent(agentId: string): Promise<AgentView>
   getHistory(
     agentId: string,
     query: { afterSeq: number; throughSeq: number; limit: number }
   ): Promise<HistoryPage>
-  sendMessage(agentId: string, text: string): Promise<void>
+  sendMessage(
+    agentId: string,
+    text: string,
+    modelConfig?: ModelConfig
+  ): Promise<void>
   resume(agentId: string): Promise<void>
   cancel(agentId: string): Promise<void>
   resolveApproval(
@@ -158,8 +172,26 @@ export function createWyseApi(options: {
       request("/v1/agents", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ agent_name: input.agentName, text: input.text }),
+        body: JSON.stringify({
+          agent_name: input.agentName,
+          text: input.text,
+          ...(input.modelConfig === undefined
+            ? {}
+            : { model_config: input.modelConfig }),
+        }),
       }),
+    getAgentTemplates: async () => {
+      const response = await request<{ agents: readonly AgentTemplateView[] }>(
+        "/v1/agent/templates"
+      )
+      return response.agents
+    },
+    getModels: async () => {
+      const response = await request<{ models: readonly ModelDescriptor[] }>(
+        "/v1/models"
+      )
+      return response.models
+    },
     getAgent: (agentId) => request(`/v1/agents/${agentId}`),
     getHistory: (agentId, query) => {
       const search = new URLSearchParams({
@@ -169,8 +201,11 @@ export function createWyseApi(options: {
       })
       return request(`/v1/agents/${agentId}/messages?${search}`)
     },
-    sendMessage: (agentId, text) =>
-      command(`/v1/agents/${agentId}/messages`, { text }),
+    sendMessage: (agentId, text, modelConfig) =>
+      command(`/v1/agents/${agentId}/messages`, {
+        text,
+        ...(modelConfig === undefined ? {} : { model_config: modelConfig }),
+      }),
     resume: (agentId) => command(`/v1/agents/${agentId}/resume`),
     cancel: (agentId) => command(`/v1/agents/${agentId}/cancel`),
     resolveApproval: (agentId, approvalId, decision) =>

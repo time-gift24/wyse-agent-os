@@ -1,15 +1,18 @@
+export type ApprovalDecision = "approve" | "reject"
+
 export function startApprovalSubmission(
-  approvalIds: ReadonlySet<string>,
-  approvalId: string
-): Set<string> {
-  return new Set(approvalIds).add(approvalId)
+  submissions: ReadonlyMap<string, ApprovalDecision>,
+  approvalId: string,
+  decision: ApprovalDecision
+): Map<string, ApprovalDecision> {
+  return new Map(submissions).set(approvalId, decision)
 }
 
 export function finishApprovalSubmission(
-  approvalIds: ReadonlySet<string>,
+  submissions: ReadonlyMap<string, ApprovalDecision>,
   approvalId: string
-): Set<string> {
-  const nextApprovalIds = new Set(approvalIds)
-  nextApprovalIds.delete(approvalId)
-  return nextApprovalIds
+): Map<string, ApprovalDecision> {
+  const nextSubmissions = new Map(submissions)
+  nextSubmissions.delete(approvalId)
+  return nextSubmissions
 }

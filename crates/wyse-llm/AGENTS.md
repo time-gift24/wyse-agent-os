@@ -22,3 +22,5 @@
 - Do not add a default DeepSeek base URL; callers must pass the endpoint explicitly.
 - Keep SSE framing in `protocol::sse`; provider modules should only map provider JSON into Wyse events.
 - Do not add DeepSeek pricing, concurrency, cache-hit usage, or old-model rejection code until a caller needs it.
+- Providers own validation of their parameter object; callers receive `LlmError::InvalidModelParameters`
+  without duplicating provider schemas or validation rules.

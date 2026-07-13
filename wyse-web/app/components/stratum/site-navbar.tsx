@@ -1,6 +1,12 @@
 "use client"
 
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
+import {
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from "react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { Link, useNavigate } from "react-router"
@@ -36,7 +42,11 @@ type SiteNavbarProps = {
   rightSlot?: ReactNode
 }
 
-export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarProps) {
+export function SiteNavbar({
+  activeSection,
+  leftSlot,
+  rightSlot,
+}: SiteNavbarProps) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const navRef = useRef<HTMLElement>(null)
@@ -172,16 +182,10 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
         return
       }
 
-      gsap.set(shell, { "--navbar-max-width": "90rem" })
       if (glass) gsap.set(glass, { opacity: 0 })
       if (leftSlotEl) gsap.set(leftSlotEl, { autoAlpha: 0, x: -8 })
 
       const tl = gsap.timeline()
-      tl.to(shell, {
-        "--navbar-max-width": "64rem",
-        duration: reduceMotion ? 0 : 0.55,
-        ease: "sine.inOut",
-      })
       tl.to(
         glass,
         {
@@ -287,7 +291,10 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
   return (
     <header
       ref={navRef}
-      className="fixed inset-x-0 top-0 z-50 mt-4 md:mt-6 px-4 md:px-8"
+      className={cn(
+        "fixed inset-x-0 top-0 z-50 mt-4 md:mt-6",
+        isLongzhong ? "px-0" : "px-4 md:px-8"
+      )}
     >
       <div
         ref={shellRef}
@@ -321,11 +328,12 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
 
       {leftSlot ? (
         <div
-          ref={leftSlotRef} data-slot="navbar-left-slot"
+          ref={leftSlotRef}
+          data-slot="navbar-left-slot"
           className={cn(
-            "pointer-events-none absolute top-1/2 hidden -translate-y-1/2 2xl:block"
+            "pointer-events-none absolute top-1/2 hidden -translate-y-1/2 2xl:block",
+            "right-[calc(50%+var(--content-half-width)+1rem)]"
           )}
-          style={{ right: "calc(50% + 33rem)" }}
         >
           <div className="pointer-events-auto">{leftSlot}</div>
         </div>

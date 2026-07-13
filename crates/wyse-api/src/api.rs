@@ -27,8 +27,8 @@ use tracing::{Span, field, info_span};
 use wyse_agent::AgentError;
 use wyse_config::{AgentName, ConfigError};
 use wyse_core::{
-    AgentEvent, AgentId, ApprovalDecision, ApprovalId, ChatMessage, EventCursor, EventRecord,
-    HistoryPage, HistoryQuery, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
+    AgentEvent, AgentId, ApprovalDecision, ApprovalId, EventCursor, EventRecord, HistoryPage,
+    HistoryQuery, ModelConfig, ModelId, ReplayStart, RunId, RuntimeEvent, TokenUsage, TurnId,
 };
 use wyse_infra::EventStreamBusError;
 use wyse_store::{AgentState, AgentStatus, MAX_HISTORY_PAGE_SIZE, StoreError};
@@ -57,6 +57,8 @@ pub struct AgentView {
     pub agent_name: String,
     /// Persisted runtime status.
     pub status: AgentStatus,
+    /// Persisted model and provider-specific parameters for future turns.
+    pub model_config: ModelConfig,
     /// Current run identity, when present.
     pub run_id: Option<RunId>,
     /// Current turn identity, when present.
@@ -67,6 +69,16 @@ pub struct AgentView {
     pub last_seq: u64,
     /// Last persisted state update.
     pub updated_at: DateTime<Utc>,
+}
+
+/// Public projection of a resolved agent template.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct AgentTemplateView {
+    /// Template name.
+    pub agent_name: String,
+    /// Resolved provider model and default parameters.
+    pub model_config: ModelConfig,
 }
 
 /// Response returned after a run is durably accepted.
@@ -82,12 +94,39 @@ pub struct RunAccepted {
 struct CreateAgentRequest {
     agent_name: String,
     text: String,
+    #[serde(default)]
+    model_config: Option<MessageModelConfig>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MessageRequest {
     text: String,
+    #[serde(default)]
+    model_config: Option<MessageModelConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageModelConfig {
+    model: ModelId,
+    parameters: serde_json::Map<String, serde_json::Value>,
+}
+
+impl From<MessageModelConfig> for ModelConfig {
+    fn from(config: MessageModelConfig) -> Self {
+        Self::new(config.model, config.parameters)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct ModelsResponse {
+    models: Vec<wyse_llm::ModelDescriptor>,
+}
+
+#[derive(Serialize)]
+struct AgentTemplatesResponse {
+    agents: Vec<AgentTemplateView>,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +158,8 @@ pub fn router(state: Arc<HostState>) -> Router {
         })
         .collect::<Vec<_>>();
     let router = Router::new()
+        .route("/v1/models", get(get_models))
+        .route("/v1/agent/templates", get(get_agent_templates))
         .route("/v1/agents", post(create_agent))
         .route("/v1/agents/{agent_id}", get(get_agent))
         .route(
@@ -189,7 +230,13 @@ async fn create_agent(
     let request = json_request(request)?;
     let agent_name: AgentName = request.agent_name.parse()?;
     Span::current().record("agent_name", agent_name.as_str());
-    let created = state.create_agent(agent_name, request.text).await?;
+    let created = state
+        .create_agent_with_model_config(
+            agent_name,
+            request.text,
+            request.model_config.map(ModelConfig::from),
+        )
+        .await?;
     Span::current().record("agent_id", field::display(created.agent_id));
     Span::current().record("run_id", field::display(created.run_id));
     let location = HeaderValue::from_str(&format!("/v1/agents/{}", created.agent_id))
@@ -207,7 +254,21 @@ async fn get_agent(
     record_agent_id(agent_id);
     let hosted = find_agent(&state, agent_id)?;
     let persisted = hosted.store.load_agent().await?;
-    Ok(Json(persisted.into()))
+    Ok(Json(AgentView::try_from(persisted)?))
+}
+
+async fn get_models(State(state): State<Arc<HostState>>) -> Json<ModelsResponse> {
+    Json(ModelsResponse {
+        models: state.models(),
+    })
+}
+
+async fn get_agent_templates(
+    State(state): State<Arc<HostState>>,
+) -> Result<Json<AgentTemplatesResponse>, HostError> {
+    Ok(Json(AgentTemplatesResponse {
+        agents: state.agent_templates().await?,
+    }))
 }
 
 async fn get_messages(
@@ -328,37 +389,13 @@ async fn post_message(
     let Path(agent_id) = path.map_err(|_| HostError::InvalidRequest)?;
     record_agent_id(agent_id);
     let request = json_request(request)?;
-    let _admission = state.admit()?;
-    if request.text.trim().is_empty() {
-        return Err(HostError::InvalidMessage);
-    }
-    let hosted = find_agent(&state, agent_id)?;
-    if hosted.needs_resume() {
-        return Err(HostError::ResumeRequired);
-    }
-    let shutdown = state.shutdown_token();
-    let run = hosted.agent.run_turn(ChatMessage::user(request.text));
-    let result = tokio::select! {
-        biased;
-        () = shutdown.cancelled() => {
-            hosted.mark_needs_resume();
-            hosted.agent.stop();
-            return Err(HostError::HostShuttingDown);
-        }
-        result = run => result,
-    };
-    let run_id = match result {
-        Ok(run_id) => run_id,
-        Err(error @ AgentError::RunAlreadyActive) => return Err(error.into()),
-        Err(error) => {
-            hosted.mark_needs_resume();
-            return Err(error.into());
-        }
-    };
-    if state.is_shutting_down() {
-        hosted.agent.stop();
-        return Err(HostError::HostShuttingDown);
-    }
+    let run_id = state
+        .start_message(
+            agent_id,
+            request.text,
+            request.model_config.map(ModelConfig::from),
+        )
+        .await?;
     Span::current().record("run_id", field::display(run_id));
     Ok((StatusCode::ACCEPTED, Json(RunAccepted { run_id })))
 }
@@ -371,6 +408,7 @@ async fn resume_agent(
     record_agent_id(agent_id);
     let _admission = state.admit()?;
     let hosted = find_agent(&state, agent_id)?;
+    let _transition = hosted.begin_transition()?;
     let operation = async {
         let persisted = hosted.store.load_agent().await?;
         if persisted.status != AgentStatus::Running {
@@ -381,13 +419,13 @@ async fn resume_agent(
             .into());
         }
         reconcile_started_only(&hosted, &persisted).await?;
-        hosted.agent.resume().await.map_err(HostError::from)
+        hosted.agent().resume().await.map_err(HostError::from)
     };
     let shutdown = state.shutdown_token();
     let result = tokio::select! {
         biased;
         () = shutdown.cancelled() => {
-            hosted.agent.stop();
+            hosted.agent().stop();
             return Err(HostError::HostShuttingDown);
         }
         result = operation => result,
@@ -401,7 +439,7 @@ async fn resume_agent(
         Err(error) => return Err(error),
     };
     if state.is_shutting_down() {
-        hosted.agent.stop();
+        hosted.agent().stop();
         return Err(HostError::HostShuttingDown);
     }
     hosted.clear_needs_resume();
@@ -474,7 +512,8 @@ async fn cancel_agent(
     if hosted.needs_resume() {
         return Err(HostError::ResumeRequired);
     }
-    hosted.agent.stop();
+    let _transition = hosted.begin_transition()?;
+    hosted.agent().stop();
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -488,7 +527,7 @@ async fn resolve_approval(
     let request = json_request(request)?;
     let hosted = find_agent(&state, agent_id)?;
     hosted
-        .agent
+        .agent()
         .resolve_tool_approval(approval_id, request.decision)
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -504,18 +543,22 @@ fn record_agent_id(agent_id: AgentId) {
     Span::current().record("agent_id", field::display(agent_id));
 }
 
-impl From<AgentState> for AgentView {
-    fn from(state: AgentState) -> Self {
-        Self {
+impl TryFrom<AgentState> for AgentView {
+    type Error = HostError;
+
+    fn try_from(state: AgentState) -> Result<Self, Self::Error> {
+        let model_config = state.model_config.ok_or(StoreError::MissingModelConfig)?;
+        Ok(Self {
             agent_id: state.agent_id,
             agent_name: state.name,
             status: state.status,
+            model_config,
             run_id: state.run_id,
             turn_id: state.turn_id,
             usage: state.usage,
             last_seq: state.last_seq,
             updated_at: state.updated_at,
-        }
+        })
     }
 }
 
@@ -566,6 +609,11 @@ fn error_response(error: &HostError) -> (StatusCode, &'static str, &'static str)
             StatusCode::BAD_REQUEST,
             "invalid_message",
             "message text must not be blank",
+        ),
+        HostError::InvalidModelParameters => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_model_parameters",
+            "model parameters are invalid",
         ),
         HostError::InvalidRequest => (
             StatusCode::BAD_REQUEST,

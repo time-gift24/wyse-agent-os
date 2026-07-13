@@ -10,7 +10,8 @@ pub mod structured_output;
 pub mod tool_call;
 
 pub use definition::{
-    ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, FinishReason, LlmProvider,
+    ChatRequest, ChatResponse, ChatStream, ChatStreamEvent, ConfigurableLlmProvider, FinishReason,
+    LlmProvider, ModelDescriptor,
 };
 pub use error::{ApiKey, LlmError, ProviderStatusError};
 pub use manager::LlmProviderManager;

@@ -12,3 +12,7 @@
 - create 的持久化 mutation 必须拆成有界阶段，并在每个 `await` 前进入“可能已写入”状态；shutdown、timeout 或检查失败都必须 fail-safe 保留 definition/Store/history，只有 mutation 已确定结束且能确定零消息时才能 cleanup。Store commit 后的 NATS best-effort forward 必须内部有界，不能决定 durable acceptance。
 - persisted `running` 只有在 run ID 和 turn ID 都存在、且 current turn 在固定 Store barrier 内完全没有任何 durable message 时，`/resume` 才可把精确 Started-only 状态 terminalize 为 `failed`，保留 run/turn/usage/history/frontier；任一 ID 缺失或 current turn 存在任何消息都必须走正常 resume 校验，不能用 reconciliation 掩盖损坏。
 - HTTP 最终错误边界只记录一次安全的结构化 operational error；span 可记录 agent/run/cursor 等 ID，不得记录 message、prompt、tool args、secret 或 host path。
+- Recovery derives an agent's provider configuration solely from its persisted `ModelConfig`; the API
+  exposes schemas only for configured models and never a second default-parameter representation.
+- `POST /v1/agents` accepts an optional `model_config`. When present, creation preflights,
+  persists, and composes with that configuration; when absent, it uses the resolved template default.

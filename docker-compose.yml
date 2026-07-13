@@ -28,8 +28,8 @@ services:
     ports:
       - "18080:8080"
     volumes:
-      - wyse-agent-data:/var/lib/wyse
-      - ./templates:/var/lib/wyse/agents/templates:ro
+      - wyse-agent-data:/var/lib/stratum
+      - ./templates:/var/lib/stratum/agents/templates:ro
       - ./config.docker.toml:/app/config.toml:ro
     environment:
       RUST_LOG: info
@@ -37,9 +37,6 @@ services:
   wyse-web:
     build:
       context: ./wyse-web
-      args:
-        VITE_WYSE_API_BASE_URL: ${VITE_WYSE_API_BASE_URL:-http://127.0.0.1:18080}
-        VITE_DEFAULT_AGENT_NAME: ${VITE_DEFAULT_AGENT_NAME:-default-agent}
     depends_on:
       - wyse-api
     ports:

@@ -1,6 +1,6 @@
 //! DeepSeek protocol implementation.
 
-use std::{collections::VecDeque, pin::Pin};
+use std::{collections::VecDeque, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
 use bon::Builder;
@@ -10,12 +10,13 @@ use reqwest::{
     Url,
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
-use serde_json::{Value, json};
-use wyse_core::ModelId;
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
+use wyse_core::{ModelConfig, ModelId};
 
 use crate::{
     ApiKey, ChatMessage, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamEvent,
-    FinishReason, LlmError, LlmProvider, StructuredOutput,
+    ConfigurableLlmProvider, FinishReason, LlmError, LlmProvider, StructuredOutput,
     protocol::openai_compatible::{
         finish_reason, provider_status_error, request_id, to_chat_payload,
         tool_call_delta_from_value, tool_calls_from_message, usage_from_value,
@@ -140,6 +141,56 @@ impl LlmProvider for DeepSeekProvider {
         }
 
         Ok(deepseek_chat_stream(response.bytes_stream()))
+    }
+}
+
+impl ConfigurableLlmProvider for DeepSeekProvider {
+    fn parameter_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["thinking"],
+            "properties": {
+                "thinking": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type"],
+                            "properties": {"type": {"const": "disabled"}}
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["type"],
+                            "properties": {
+                                "type": {"const": "enabled"},
+                                "reasoning_effort": {
+                                    "type": "string",
+                                    "enum": ["high", "max"]
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            "default": Value::Object(default_parameters())
+        })
+    }
+
+    fn default_model_config(&self) -> ModelConfig {
+        ModelConfig::new(self.model_id(), default_parameters())
+    }
+
+    fn configure(&self, parameters: &Map<String, Value>) -> Result<Arc<dyn LlmProvider>, LlmError> {
+        let parameters =
+            serde_json::from_value::<DeepSeekParameters>(Value::Object(parameters.clone()))
+                .map_err(|_| LlmError::InvalidModelParameters {
+                    model: self.model_id(),
+                })?;
+        let mut configured = self.clone();
+        configured.thinking = parameters.thinking.into();
+        Ok(Arc::new(configured))
     }
 }
 
@@ -316,6 +367,80 @@ pub enum DeepSeekReasoningEffort {
     High,
     /// Maximum reasoning effort.
     Max,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeepSeekParameters {
+    thinking: DeepSeekThinkingParameters,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DeepSeekThinkingParameters {
+    Enabled(EnabledThinkingParameters),
+    Disabled(DisabledThinkingParameters),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnabledThinkingParameters {
+    #[serde(rename = "type")]
+    _kind: EnabledThinkingType,
+    reasoning_effort: Option<DeepSeekReasoningEffortParameters>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisabledThinkingParameters {
+    #[serde(rename = "type")]
+    _kind: DisabledThinkingType,
+}
+
+#[derive(Deserialize)]
+enum EnabledThinkingType {
+    #[serde(rename = "enabled")]
+    Enabled,
+}
+
+#[derive(Deserialize)]
+enum DisabledThinkingType {
+    #[serde(rename = "disabled")]
+    Disabled,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DeepSeekReasoningEffortParameters {
+    High,
+    Max,
+}
+
+impl From<DeepSeekThinkingParameters> for DeepSeekThinking {
+    fn from(value: DeepSeekThinkingParameters) -> Self {
+        match value {
+            DeepSeekThinkingParameters::Enabled(EnabledThinkingParameters {
+                reasoning_effort,
+                ..
+            }) => Self::Enabled {
+                effort: reasoning_effort.map(Into::into),
+            },
+            DeepSeekThinkingParameters::Disabled(_) => Self::Disabled,
+        }
+    }
+}
+
+impl From<DeepSeekReasoningEffortParameters> for DeepSeekReasoningEffort {
+    fn from(value: DeepSeekReasoningEffortParameters) -> Self {
+        match value {
+            DeepSeekReasoningEffortParameters::High => Self::High,
+            DeepSeekReasoningEffortParameters::Max => Self::Max,
+        }
+    }
+}
+
+fn default_parameters() -> Map<String, Value> {
+    Map::from_iter([("thinking".to_owned(), json!({"type": "disabled"}))])
 }
 
 fn to_deepseek_chat_payload(

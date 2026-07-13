@@ -39,6 +39,9 @@ pub enum LlmError {
     /// No provider was registered for the model.
     #[error("provider not found for model: {model}")]
     ProviderNotFound { model: ModelId },
+    /// Provider-specific model parameters were invalid.
+    #[error("invalid model parameters for model: {model}")]
+    InvalidModelParameters { model: ModelId },
     /// Request is invalid before it reaches a provider.
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),

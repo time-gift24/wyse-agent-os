@@ -39,7 +39,15 @@
     "composer": {
       "label": "Message",
       "placeholder": "Ask Longzhong…",
-      "send": "Send"
+      "send": "Send",
+      "agent": "Agent",
+      "model": "Model",
+      "thinking": "Thinking",
+      "disabled": "Disabled",
+      "high": "High",
+      "max": "Max",
+      "loadingConfiguration": "Loading configuration…",
+      "selectAgent": "Select an Agent"
     },
     "creating": "Creating conversation…",
     "sending": "Sending…",
@@ -57,6 +65,22 @@
     "reject": "Reject",
     "toolKind": "Tool kind",
     "dangerLevel": "Danger level",
+    "toolTrace": {
+      "status": {
+        "streaming": "Running {{tool}}",
+        "finished": "{{tool}} completed",
+        "failed": "{{tool}} failed"
+      },
+      "input": "Input",
+      "rawResult": "Raw result",
+      "error": "Error"
+    },
+    "approval": {
+      "title": "Allow {{agent}} to use {{tool}}?",
+      "titleWithResource": "Allow {{agent}} to use {{tool}} on {{resource}}?",
+      "allowing": "Allowing…",
+      "declining": "Declining…"
+    },
     "streamStatus": "Streaming",
     "reasoningComplete": "Reasoning complete",
     "thinking": "Thinking",

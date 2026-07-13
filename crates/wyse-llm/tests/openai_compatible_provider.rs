@@ -1,10 +1,10 @@
 use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use wyse_core::CallId;
 use wyse_llm::{
-    ApiKey, ChatMessage, ChatRequest, ChatStreamEvent, FinishReason, LlmError, LlmProvider,
-    OpenAICompatibleProvider, ToolCallDelta,
+    ApiKey, ChatMessage, ChatRequest, ChatStreamEvent, ConfigurableLlmProvider, FinishReason,
+    LlmError, LlmProvider, OpenAICompatibleProvider, ToolCallDelta,
 };
 
 mod support;
@@ -126,6 +126,17 @@ fn openai_compatible_provider_model_id_includes_provider_name() {
         provider.model_id().as_str(),
         "openai_compatible:gpt-configured"
     );
+}
+
+#[test]
+fn openai_rejects_non_empty_parameters() {
+    let error = test_provider("https://example.test/v1")
+        .configure(&Map::from_iter([("temperature".to_owned(), json!(1))]));
+
+    assert!(matches!(
+        error,
+        Err(LlmError::InvalidModelParameters { .. })
+    ));
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ the local Wyse API at `http://127.0.0.1:18080`.
 podman compose up --build
 ```
 
-For local frontend development, copy `.env.example` to `.env.local` and run:
+For local frontend development, run:
 
 ```bash
 pnpm install

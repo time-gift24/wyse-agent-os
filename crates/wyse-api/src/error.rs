@@ -64,6 +64,9 @@ pub enum HostError {
     /// A follow-up user message is empty after trimming.
     #[error("agent message must not be empty")]
     InvalidMessage,
+    /// Provider-specific model parameters do not match the configured model.
+    #[error("model parameters are invalid")]
+    InvalidModelParameters,
     /// An HTTP request body or path parameter is invalid.
     #[error("request is invalid")]
     InvalidRequest,
