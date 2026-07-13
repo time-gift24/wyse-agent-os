@@ -46,7 +46,10 @@ export function OntologyDrawer({
         onOpenChange(false)
         returnFocusRef.current?.focus()
       }}
-      onCancel={() => onOpenChange(false)}
+      onCancel={(event) => {
+        event.preventDefault()
+        onOpenChange(false)
+      }}
       onClick={(event) => {
         if (event.target === event.currentTarget) onOpenChange(false)
       }}

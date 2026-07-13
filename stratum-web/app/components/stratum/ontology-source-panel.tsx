@@ -39,11 +39,22 @@ export function OntologySourcePanel({
   const [kind, setKind] = useState<SourceKind>(source.kind)
   const [tag, setTag] = useState(source.kind === "tag" ? source.name : "online")
   const [query, setQuery] = useState("")
+  const [nodeFocusId, setNodeFocusId] = useState<string | null>(
+    selection?.kind === "node" ? selection.id : null
+  )
+  const [edgeFocusId, setEdgeFocusId] = useState<string | null>(
+    selection?.kind === "edge" ? selection.id : null
+  )
 
   useEffect(() => {
     setKind(source.kind)
     if (source.kind === "tag") setTag(source.name)
   }, [source])
+
+  useEffect(() => {
+    if (selection?.kind === "node") setNodeFocusId(selection.id)
+    if (selection?.kind === "edge") setEdgeFocusId(selection.id)
+  }, [selection])
 
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const nodes = useMemo(
@@ -61,21 +72,39 @@ export function OntologySourcePanel({
     [graph?.edges, normalizedQuery]
   )
 
-  const handleIndexKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+  const nodeTabStopId = nodes.some((node) => node.id === nodeFocusId)
+    ? nodeFocusId
+    : nodes[0]?.id
+  const edgeTabStopId = edges.some((edge) => edge.id === edgeFocusId)
+    ? edgeFocusId
+    : edges[0]?.id
+
+  const handleListboxKeyDown = (
+    event: KeyboardEvent<HTMLDivElement>,
+    onFocusChange: (id: string) => void
+  ) => {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return
     const items = Array.from(
       event.currentTarget.querySelectorAll<HTMLButtonElement>(
-        "button:not(:disabled)"
+        '[role="option"]:not(:disabled)'
       )
     )
     if (items.length === 0) return
     const current = items.indexOf(document.activeElement as HTMLButtonElement)
     const next =
-      event.key === "ArrowDown"
-        ? (current + 1) % items.length
-        : (current - 1 + items.length) % items.length
+      current === -1
+        ? event.key === "ArrowDown"
+          ? 0
+          : items.length - 1
+        : event.key === "ArrowDown"
+          ? (current + 1) % items.length
+          : (current - 1 + items.length) % items.length
+    const nextItem = items[next]
+    const nextId = nextItem?.dataset.optionId
+    if (!nextItem || !nextId) return
     event.preventDefault()
-    items[next]?.focus()
+    onFocusChange(nextId)
+    nextItem.focus()
   }
 
   return (
@@ -114,7 +143,7 @@ export function OntologySourcePanel({
             onChange={(event) => setTag(event.target.value)}
             aria-label={t("ontology.source.tagName")}
             disabled={disabled}
-            className="h-11"
+            className="h-11 md:text-sm"
           />
           <Button
             type="submit"
@@ -169,20 +198,23 @@ export function OntologySourcePanel({
           onChange={(event) => setQuery(event.target.value)}
           placeholder={t("ontology.source.search")}
           aria-label={t("ontology.source.search")}
-          className="h-11 pl-8"
+          className="h-11 pl-8 md:text-sm"
         />
       </div>
 
       <nav
         className="mt-3 min-h-0 flex-1 overflow-y-auto"
         aria-label={t("ontology.source.index")}
-        onKeyDown={handleIndexKeyDown}
       >
         <div className="flex items-center justify-between border-b border-wyse-line py-2 text-sm font-semibold">
           <span>{t("ontology.source.objectTypes")}</span>
           <span className="text-muted-foreground">{nodes.length}</span>
         </div>
-        <div role="listbox" aria-label={t("ontology.source.objectTypes")}>
+        <div
+          role="listbox"
+          aria-label={t("ontology.source.objectTypes")}
+          onKeyDown={(event) => handleListboxKeyDown(event, setNodeFocusId)}
+        >
           {nodes.map((node) => {
             const selected =
               selection?.kind === "node" && selection.id === node.id
@@ -192,11 +224,16 @@ export function OntologySourcePanel({
                 type="button"
                 role="option"
                 aria-selected={selected}
+                data-option-id={node.id}
+                tabIndex={node.id === nodeTabStopId ? 0 : -1}
                 className={cn(
                   "mt-1 flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
                   selected && "bg-wyse-action/10 font-semibold"
                 )}
-                onClick={() => onSelectionChange({ kind: "node", id: node.id })}
+                onClick={() => {
+                  setNodeFocusId(node.id)
+                  onSelectionChange({ kind: "node", id: node.id })
+                }}
               >
                 <span className="size-2 rounded-sm border border-wyse-action" />
                 <span className="truncate">{node.label}</span>
@@ -209,7 +246,11 @@ export function OntologySourcePanel({
           <span>{t("ontology.source.linkTypes")}</span>
           <span className="text-muted-foreground">{edges.length}</span>
         </div>
-        <div role="listbox" aria-label={t("ontology.source.linkTypes")}>
+        <div
+          role="listbox"
+          aria-label={t("ontology.source.linkTypes")}
+          onKeyDown={(event) => handleListboxKeyDown(event, setEdgeFocusId)}
+        >
           {edges.map((edge) => {
             const selected =
               selection?.kind === "edge" && selection.id === edge.id
@@ -219,11 +260,16 @@ export function OntologySourcePanel({
                 type="button"
                 role="option"
                 aria-selected={selected}
+                data-option-id={edge.id}
+                tabIndex={edge.id === edgeTabStopId ? 0 : -1}
                 className={cn(
                   "mt-1 flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
                   selected && "bg-wyse-action/10 font-semibold"
                 )}
-                onClick={() => onSelectionChange({ kind: "edge", id: edge.id })}
+                onClick={() => {
+                  setEdgeFocusId(edge.id)
+                  onSelectionChange({ kind: "edge", id: edge.id })
+                }}
               >
                 <span className="h-px w-3 bg-wyse-action" />
                 <span className="min-w-0 flex-1 truncate">{edge.label}</span>

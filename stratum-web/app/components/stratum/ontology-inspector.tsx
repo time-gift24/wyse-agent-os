@@ -15,24 +15,21 @@ export function OntologyInspector({
   selection,
 }: OntologyInspectorProps) {
   const { t } = useTranslation()
-  if (!selection || !graph || !schema) {
-    return (
-      <aside className="h-full bg-wyse-paper p-4">
-        <h2 className="text-sm font-semibold">
-          {t("ontology.inspector.title")}
-        </h2>
-        <p className="mt-3 text-sm text-muted-foreground">
-          {t("ontology.inspector.empty")}
-        </p>
-      </aside>
-    )
-  }
+  const emptyInspector = (
+    <aside className="h-full bg-wyse-paper p-4">
+      <h2 className="text-sm font-semibold">{t("ontology.inspector.title")}</h2>
+      <p className="mt-3 text-sm text-muted-foreground">
+        {t("ontology.inspector.empty")}
+      </p>
+    </aside>
+  )
+  if (!selection || !graph || !schema) return emptyInspector
 
   if (selection.kind === "node") {
     const objectType = schema.object_types.find(
       (item) => item.id === selection.id
     )
-    if (!objectType) return null
+    if (!objectType) return emptyInspector
     const relationCount = graph.edges.filter(
       (edge) => edge.source === selection.id || edge.target === selection.id
     ).length
@@ -96,7 +93,7 @@ export function OntologyInspector({
 
   const edge = graph.edges.find((item) => item.id === selection.id)
   const linkType = schema.link_types.find((item) => item.id === selection.id)
-  if (!edge || !linkType) return null
+  if (!edge || !linkType) return emptyInspector
   const source = schema.object_types.find((item) => item.id === edge.source)
   const target = schema.object_types.find((item) => item.id === edge.target)
 
