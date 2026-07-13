@@ -1,4 +1,9 @@
-import type { AgentEvent, LlmEvent, StreamEnvelope } from "~/lib/wyse-api"
+import {
+  ApiError,
+  type AgentEvent,
+  type LlmEvent,
+  type StreamEnvelope,
+} from "~/lib/wyse-api"
 import type {
   ApprovalRequest,
   ConversationAction,
@@ -48,7 +53,7 @@ export function conversationReducer(
     case "envelope_received":
       return projectEnvelope(state, action.envelope)
     case "recovery_ready":
-      return { ...state, phase: "ready", error: null }
+      return { ...state, phase: "ready" }
     case "connection_error":
       return { ...state, phase: "connection_error", error: action.error }
     case "missing":
@@ -76,11 +81,22 @@ function projectAgentEvent(
     case "message":
       return projectStableMessage(state, agentId, envelope)
     case "started":
-      return updateViewStatus(state, "running")
+      return { ...updateViewStatus(state, "running"), error: null }
     case "finished":
-    case "failed":
     case "cancelled":
-      return { ...updateViewStatus(state, "idle"), drafts: {}, approvals: {} }
+      return {
+        ...updateViewStatus(state, "idle"),
+        drafts: {},
+        approvals: {},
+        error: null,
+      }
+    case "failed":
+      return {
+        ...updateViewStatus(state, "idle"),
+        drafts: {},
+        approvals: {},
+        error: new ApiError("agent_failed", 500, event.data.error_text),
+      }
     case "tool_approval_requested": {
       const approval: ApprovalRequest = {
         approvalId: event.data.approval_id,

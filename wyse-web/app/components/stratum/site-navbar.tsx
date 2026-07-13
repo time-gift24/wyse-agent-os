@@ -172,16 +172,10 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
         return
       }
 
-      gsap.set(shell, { "--navbar-max-width": "90rem" })
       if (glass) gsap.set(glass, { opacity: 0 })
       if (leftSlotEl) gsap.set(leftSlotEl, { autoAlpha: 0, x: -8 })
 
       const tl = gsap.timeline()
-      tl.to(shell, {
-        "--navbar-max-width": "64rem",
-        duration: reduceMotion ? 0 : 0.55,
-        ease: "sine.inOut",
-      })
       tl.to(
         glass,
         {
@@ -323,9 +317,9 @@ export function SiteNavbar({ activeSection, leftSlot, rightSlot }: SiteNavbarPro
         <div
           ref={leftSlotRef} data-slot="navbar-left-slot"
           className={cn(
-            "pointer-events-none absolute top-1/2 hidden -translate-y-1/2 2xl:block"
+            "pointer-events-none absolute top-1/2 hidden -translate-y-1/2 2xl:block",
+            "right-[calc(50%+var(--content-half-width)+1rem)]"
           )}
-          style={{ right: "calc(50% + 33rem)" }}
         >
           <div className="pointer-events-auto">{leftSlot}</div>
         </div>

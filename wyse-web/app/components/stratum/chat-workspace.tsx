@@ -56,6 +56,8 @@ export function ChatWorkspace({
   const inputContainerRef = useRef<HTMLDivElement>(null)
 
   const { state, recentAgents, selectAgent, removeRecentAgent } = conversation
+  const isNewConversation = state.agentId === null
+  const initialComposerBottom = useRef(isNewConversation ? "50%" : "0px")
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
 
@@ -128,25 +130,23 @@ export function ChatWorkspace({
         "(prefers-reduced-motion: reduce)"
       ).matches
 
-      if (state.agentId === null) {
-        // 居中状态 - bottom: 50% + translateY(-50%) 实现垂直居中
+      if (isNewConversation) {
+        // 居中状态 - 内层负责垂直偏移，避免与入场动画争用 transform。
         gsap.to(container, {
           bottom: "50%",
-          yPercent: -50,
           duration: reduceMotion ? 0 : 0.5,
           ease: "sine.inOut",
         })
       } else {
-        // 底部状态 - bottom: 0, translateY: 0
+        // 底部状态
         gsap.to(container, {
           bottom: 0,
-          yPercent: 0,
           duration: reduceMotion ? 0 : 0.5,
           ease: "sine.inOut",
         })
       }
     },
-    { dependencies: [state.agentId], scope: workspaceRef }
+    { dependencies: [isNewConversation], scope: workspaceRef }
   )
 
   useGSAP(
@@ -267,76 +267,86 @@ export function ChatWorkspace({
       <div
         ref={inputContainerRef}
         className="wyse-content-width fixed inset-x-0 z-40 mx-auto px-4 md:px-0"
+        style={{ bottom: initialComposerBottom.current }}
       >
-        <Card
-          size="sm"
-          className="prompt-input-glass wyse-content-width mx-auto bg-transparent ring-0"
+        <div
+          className={cn(
+            "transition-transform duration-500 ease-in-out motion-reduce:transition-none",
+            isNewConversation ? "-translate-y-1/2" : "translate-y-0"
+          )}
         >
-          <CardContent>
-            <PromptInput
-              onSubmit={(event) => {
-                event.preventDefault()
-                void submitMessage()
-              }}
-            >
-              <PromptInputBody>
-                <PromptInputTextarea
-                  ref={composerRef}
-                  aria-label={t("chat.composer.label")}
-                  disabled={isSubmitting || isAgentBusy}
-                  onChange={(event) => setComposerText(event.target.value)}
-                  placeholder={t("chat.composer.placeholder")}
-                  value={composerText}
-                />
-              </PromptInputBody>
-              <PromptInputFooter>
-                <PromptInputTools>
-                  <AgentConfigMenu
-                    configuration={conversation.composerConfiguration}
-                    commandPending={isSubmitting}
+          <Card
+            size="sm"
+            className="prompt-input-glass wyse-content-width mx-auto bg-transparent ring-0"
+          >
+            <CardContent>
+              <PromptInput
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  void submitMessage()
+                }}
+              >
+                <PromptInputBody>
+                  <PromptInputTextarea
+                    ref={composerRef}
+                    aria-label={t("chat.composer.label")}
+                    disabled={isSubmitting || isAgentBusy}
+                    onChange={(event) => setComposerText(event.target.value)}
+                    placeholder={t("chat.composer.placeholder")}
+                    value={composerText}
                   />
-                  <ModelConfigMenu
-                    configuration={conversation.composerConfiguration}
-                    commandPending={isSubmitting}
-                  />
-                  {state.phase === "connection_error" ? (
-                    <PromptInputButton
-                      variant="outline"
-                      onClick={() => conversation.reconnect()}
-                    >
-                      {t("chat.reconnect")}
-                    </PromptInputButton>
-                  ) : state.agentId !== null && isAgentBusy ? (
-                    <PromptInputButton
-                      variant="outline"
-                      onClick={() => void conversation.cancel()}
-                    >
-                      {t("chat.cancel")}
-                    </PromptInputButton>
-                  ) : null}
-                </PromptInputTools>
-                <div
-                  ref={submitButtonRef}
-                  className="inline-flex items-center gap-1"
-                >
-                  <PromptInputSubmit
-                    aria-label={t("chat.composer.send")}
-                    className={
-                      composerText.trim() === ""
-                        ? "bg-muted text-muted-foreground hover:bg-muted"
-                        : undefined
-                    }
-                    disabled={
-                      isSubmitting || isAgentBusy || composerText.trim() === ""
-                    }
+                </PromptInputBody>
+                <PromptInputFooter>
+                  <PromptInputTools>
+                    <AgentConfigMenu
+                      configuration={conversation.composerConfiguration}
+                      commandPending={isSubmitting}
+                    />
+                    <ModelConfigMenu
+                      configuration={conversation.composerConfiguration}
+                      commandPending={isSubmitting}
+                    />
+                    {state.phase === "connection_error" ? (
+                      <PromptInputButton
+                        variant="outline"
+                        onClick={() => conversation.reconnect()}
+                      >
+                        {t("chat.reconnect")}
+                      </PromptInputButton>
+                    ) : state.agentId !== null && isAgentBusy ? (
+                      <PromptInputButton
+                        variant="outline"
+                        onClick={() => void conversation.cancel()}
+                      >
+                        {t("chat.cancel")}
+                      </PromptInputButton>
+                    ) : null}
+                  </PromptInputTools>
+                  <div
+                    ref={submitButtonRef}
+                    className="inline-flex items-center gap-1"
                   >
-                    <ArrowUpIcon aria-hidden="true" />
-                  </PromptInputSubmit>
-                </div>
-              </PromptInputFooter>
-            </PromptInput>
-          </CardContent>
-        </Card>
+                    <PromptInputSubmit
+                      aria-label={t("chat.composer.send")}
+                      className={
+                        composerText.trim() === ""
+                          ? "bg-muted text-muted-foreground hover:bg-muted"
+                          : undefined
+                      }
+                      disabled={
+                        isSubmitting ||
+                        isAgentBusy ||
+                        composerText.trim() === ""
+                      }
+                    >
+                      <ArrowUpIcon aria-hidden="true" />
+                    </PromptInputSubmit>
+                  </div>
+                </PromptInputFooter>
+              </PromptInput>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </section>
   )
