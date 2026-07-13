@@ -53,6 +53,16 @@ pub fn validate_schema_instances(
     let mut diagnostics = Vec::new();
     let objects_by_id: HashMap<ObjectId, &ObjectRecord> =
         objects.iter().map(|object| (object.id, object)).collect();
+    let mut source_counts = HashMap::new();
+    let mut target_counts = HashMap::new();
+    for link in links {
+        *source_counts
+            .entry((link.link_type_id, link.source_object_id))
+            .or_insert(0_usize) += 1;
+        *target_counts
+            .entry((link.link_type_id, link.target_object_id))
+            .or_insert(0_usize) += 1;
+    }
 
     for object in objects {
         let Some(object_type) = schema
@@ -93,6 +103,26 @@ pub fn validate_schema_instances(
             Some(target) if target.object_type_id == link_type.target_object_type_id => {}
             Some(_) => diagnostics.push(format!("link {} has a target of the wrong type", link.id)),
             None => diagnostics.push(format!("link {} has a missing target object", link.id)),
+        }
+        let source_count = source_counts
+            .get(&(link.link_type_id, link.source_object_id))
+            .copied()
+            .unwrap_or_default();
+        let target_count = target_counts
+            .get(&(link.link_type_id, link.target_object_id))
+            .copied()
+            .unwrap_or_default();
+        let cardinality_valid = match link_type.cardinality {
+            Cardinality::OneToOne => source_count <= 1 && target_count <= 1,
+            Cardinality::OneToMany => target_count <= 1,
+            Cardinality::ManyToOne => source_count <= 1,
+            Cardinality::ManyToMany => true,
+        };
+        if !cardinality_valid {
+            diagnostics.push(format!(
+                "link type {} cardinality is violated by existing links",
+                link.link_type_id
+            ));
         }
     }
 
@@ -342,8 +372,17 @@ pub trait OntologyRepository: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{PublishedRevision, validate_published_revision};
-    use crate::{ObjectType, ObjectTypeId, RevisionId, SchemaDocument};
+    use serde_json::Map;
+    use uuid::Uuid;
+
+    use super::{
+        LinkRecord, ObjectRecord, PublishedRevision, validate_published_revision,
+        validate_schema_instances,
+    };
+    use crate::{
+        Cardinality, LinkId, LinkType, LinkTypeId, ObjectId, ObjectType, ObjectTypeId,
+        OntologyError, RevisionId, SchemaDocument,
+    };
 
     #[test]
     fn published_revision_rejects_an_id_that_does_not_match_its_schema() {
@@ -362,5 +401,74 @@ mod tests {
         };
 
         assert!(validate_published_revision(&revision).is_err());
+    }
+
+    #[test]
+    fn schema_instance_validation_enforces_every_link_cardinality() {
+        let object_type_id = ObjectTypeId::from(Uuid::from_u128(1));
+        let link_type_id = LinkTypeId::from(Uuid::from_u128(2));
+        let first = ObjectId::from(Uuid::from_u128(10));
+        let second = ObjectId::from(Uuid::from_u128(11));
+        let third = ObjectId::from(Uuid::from_u128(12));
+        let objects = [first, second, third]
+            .into_iter()
+            .map(|id| ObjectRecord {
+                id,
+                object_type_id,
+                values: Map::new(),
+                version: 1,
+            })
+            .collect::<Vec<_>>();
+        let links = [(first, second), (first, third), (second, third)]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (source_object_id, target_object_id))| LinkRecord {
+                id: LinkId::from(Uuid::from_u128(20 + index as u128)),
+                link_type_id,
+                source_object_id,
+                target_object_id,
+                version: 1,
+            })
+            .collect::<Vec<_>>();
+
+        for cardinality in [
+            Cardinality::OneToOne,
+            Cardinality::OneToMany,
+            Cardinality::ManyToOne,
+        ] {
+            let schema = schema_with_cardinality(object_type_id, link_type_id, cardinality);
+
+            assert!(matches!(
+                validate_schema_instances(&schema, &objects, &links),
+                Err(OntologyError::PublishInvalid { .. })
+            ));
+        }
+
+        let permissive =
+            schema_with_cardinality(object_type_id, link_type_id, Cardinality::ManyToMany);
+        assert!(validate_schema_instances(&permissive, &objects, &links).is_ok());
+    }
+
+    fn schema_with_cardinality(
+        object_type_id: ObjectTypeId,
+        link_type_id: LinkTypeId,
+        cardinality: Cardinality,
+    ) -> SchemaDocument {
+        SchemaDocument {
+            schema_version: 1,
+            object_types: vec![ObjectType {
+                id: object_type_id,
+                name: "person".to_owned(),
+                description: String::new(),
+                properties: Vec::new(),
+            }],
+            link_types: vec![LinkType::new(
+                link_type_id,
+                "knows".to_owned(),
+                object_type_id,
+                object_type_id,
+                cardinality,
+            )],
+        }
     }
 }

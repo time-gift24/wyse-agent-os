@@ -8,6 +8,7 @@ use wyse_filesystem::{CasExpectation, Entry, FileType, Filesystem, FilesystemErr
 use crate::{DraftName, OntologyError, RevisionId, SchemaDocument};
 
 const DRAFT_DIRECTORY: &str = "/ontology/drafts";
+const ONTOLOGY_DIRECTORY: &str = "/ontology";
 
 /// An editable schema draft and its current content digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,10 +50,23 @@ impl FilesystemDraftStore {
         let digest = digest_bytes(&bytes)?;
         let path = draft_path(&name)?;
 
-        self.filesystem
+        let write = self
+            .filesystem
             .put(&path, Entry::new(bytes), CasExpectation::Absent)
-            .await
-            .map_err(|error| map_write_error(name.clone(), error))?;
+            .await;
+        if matches!(write, Err(FilesystemError::NotFound { .. })) {
+            self.ensure_draft_directory().await?;
+            self.filesystem
+                .put(
+                    &path,
+                    Entry::new(canonical_schema_bytes(&schema)?),
+                    CasExpectation::Absent,
+                )
+                .await
+                .map_err(|error| map_write_error(name.clone(), error))?;
+        } else {
+            write.map_err(|error| map_write_error(name.clone(), error))?;
+        }
 
         Ok(Draft {
             name,
@@ -93,11 +107,11 @@ impl FilesystemDraftStore {
     /// listed draft cannot be loaded.
     pub async fn list(&self) -> Result<Vec<Draft>, OntologyError> {
         let directory = draft_directory()?;
-        let entries = self
-            .filesystem
-            .list_dir(&directory)
-            .await
-            .map_err(OntologyError::Filesystem)?;
+        let entries = match self.filesystem.list_dir(&directory).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => Vec::new(),
+            Err(error) => return Err(OntologyError::Filesystem(error)),
+        };
         let mut drafts = Vec::with_capacity(entries.len());
 
         for entry in entries {
@@ -115,6 +129,17 @@ impl FilesystemDraftStore {
 
         drafts.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(drafts)
+    }
+
+    async fn ensure_draft_directory(&self) -> Result<(), OntologyError> {
+        for path in [ONTOLOGY_DIRECTORY, DRAFT_DIRECTORY] {
+            let path = virtual_path(path.to_owned())?;
+            match self.filesystem.create_dir(&path).await {
+                Ok(()) | Err(FilesystemError::AlreadyExists { .. }) => {}
+                Err(error) => return Err(OntologyError::Filesystem(error)),
+            }
+        }
+        Ok(())
     }
 
     /// Replaces a draft when `expected_digest` matches its current contents.
