@@ -1,14 +1,35 @@
 //! Typed failures that stop the agent loop kernel.
 
-use stratum_core::CallId;
+use stratum_core::{CallId, ChatRole};
 use stratum_infra::DurableEventSinkError;
 use stratum_llm::LlmError;
 use thiserror::Error;
+
+/// Failure to construct an [`AgentLoop`](super::AgentLoop).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum AgentLoopBuildError {
+    /// A required dependency was not supplied.
+    #[error("missing agent loop field {field}")]
+    MissingField {
+        /// Builder field that must be supplied.
+        field: &'static str,
+    },
+}
 
 /// Agent-loop protocol invariant that a provider response violated.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ProtocolError {
+    /// A loop run did not receive any new user prompt.
+    #[error("agent loop prompts are empty")]
+    EmptyPrompts,
+    /// A new prompt had a role other than user.
+    #[error("agent loop prompt has invalid role {role:?}")]
+    InvalidPromptRole {
+        /// Role rejected at the prompt boundary.
+        role: ChatRole,
+    },
     /// The provider stream ended without a terminal finish event.
     #[error("stream ended without a finish event")]
     StreamEndedWithoutFinish,
