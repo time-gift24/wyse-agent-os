@@ -126,6 +126,7 @@ pub enum AgentTelemetryEvent {
         /// Tool call identity.
         call_id: CallId,
         /// Provider-visible tool name when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
         /// Raw argument text fragment.
         arguments_delta: String,
@@ -137,6 +138,7 @@ pub enum AgentTelemetryEvent {
         /// Why the LLM call finished.
         finish_reason: String,
         /// Token usage reported by the provider, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<TokenUsage>,
     },
     /// A tool emitted an execution progress update.
@@ -166,7 +168,10 @@ impl AgentTelemetryEvent {
 #[cfg(test)]
 mod tests {
     use super::{AgentTelemetryEvent, DurableAgentEvent};
-    use crate::{ChatMessage, LlmCallId};
+    use crate::{
+        ApprovalDecision, ApprovalId, CallId, ChatMessage, DangerLevel, LlmCallId, TokenUsage,
+        ToolKind, ToolName,
+    };
     use serde_json::json;
 
     fn accept_durable(_: &DurableAgentEvent) {}
@@ -181,8 +186,9 @@ mod tests {
 
         accept_durable(&event);
         assert_eq!(event.event_type(), "message_appended");
+        let serialized = serde_json::to_value(&event)?;
         assert_eq!(
-            serde_json::to_value(event)?,
+            serialized,
             json!({
                 "type": "message_appended",
                 "data": {
@@ -195,6 +201,10 @@ mod tests {
                     }
                 }
             })
+        );
+        assert_eq!(
+            serde_json::from_value::<DurableAgentEvent>(serialized)?,
+            event
         );
 
         Ok(())
@@ -209,8 +219,9 @@ mod tests {
 
         accept_telemetry(&event);
         assert_eq!(event.event_type(), "text_delta");
+        let serialized = serde_json::to_value(&event)?;
         assert_eq!(
-            serde_json::to_value(event)?,
+            serialized,
             json!({
                 "type": "text_delta",
                 "data": {
@@ -219,6 +230,129 @@ mod tests {
                 }
             })
         );
+        assert_eq!(
+            serde_json::from_value::<AgentTelemetryEvent>(serialized)?,
+            event
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn telemetry_none_fields_are_omitted() -> serde_json::Result<()> {
+        let tool_delta = serde_json::to_value(AgentTelemetryEvent::ToolCallDelta {
+            llm_call_id: LlmCallId::from("llm-call-1"),
+            call_id: CallId::from("tool-call-1"),
+            name: None,
+            arguments_delta: "{}".to_owned(),
+        })?;
+        let llm_finished = serde_json::to_value(AgentTelemetryEvent::LlmFinished {
+            llm_call_id: LlmCallId::from("llm-call-1"),
+            finish_reason: "stop".to_owned(),
+            usage: None,
+        })?;
+
+        assert!(tool_delta["data"].get("name").is_none());
+        assert!(llm_finished["data"].get("usage").is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn every_durable_event_type_matches_its_serialized_type() -> serde_json::Result<()> {
+        let usage = TokenUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            total_tokens: 3,
+        };
+        let events = vec![
+            DurableAgentEvent::LoopStarted,
+            DurableAgentEvent::MessageAppended {
+                message: ChatMessage::user("hello"),
+            },
+            DurableAgentEvent::ToolApprovalRequested {
+                approval_id: ApprovalId::new(),
+                call_id: CallId::from("tool-call-1"),
+                tool_name: ToolName::from("echo"),
+                arguments: json!({ "text": "hello" }),
+                tool_kind: ToolKind::Read,
+                danger_level: DangerLevel::Low,
+            },
+            DurableAgentEvent::ToolApprovalResolved {
+                approval_id: ApprovalId::new(),
+                decision: ApprovalDecision::Approve,
+            },
+            DurableAgentEvent::ToolExecutionStarted {
+                call_id: CallId::from("tool-call-1"),
+                tool_name: ToolName::from("echo"),
+            },
+            DurableAgentEvent::IterationCompleted {
+                iteration: 1,
+                usage,
+            },
+            DurableAgentEvent::LoopFinished {
+                finish_reason: "stop".to_owned(),
+                usage,
+            },
+            DurableAgentEvent::LoopFailed {
+                error_text: "provider unavailable".to_owned(),
+                usage,
+            },
+            DurableAgentEvent::LoopCancelled { usage },
+        ];
+
+        for event in events {
+            assert_eq!(
+                serde_json::to_value(&event)?["type"],
+                json!(event.event_type())
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn every_telemetry_event_type_matches_its_serialized_type() -> serde_json::Result<()> {
+        let llm_call_id = LlmCallId::from("llm-call-1");
+        let events = vec![
+            AgentTelemetryEvent::LlmStarted {
+                llm_call_id: llm_call_id.clone(),
+            },
+            AgentTelemetryEvent::TextDelta {
+                llm_call_id: llm_call_id.clone(),
+                delta: "hello".to_owned(),
+            },
+            AgentTelemetryEvent::ReasoningDelta {
+                llm_call_id: llm_call_id.clone(),
+                delta: "thinking".to_owned(),
+            },
+            AgentTelemetryEvent::ToolCallDelta {
+                llm_call_id: llm_call_id.clone(),
+                call_id: CallId::from("tool-call-1"),
+                name: Some("echo".to_owned()),
+                arguments_delta: "{}".to_owned(),
+            },
+            AgentTelemetryEvent::LlmFinished {
+                llm_call_id,
+                finish_reason: "stop".to_owned(),
+                usage: Some(TokenUsage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                }),
+            },
+            AgentTelemetryEvent::ToolExecutionProgress {
+                call_id: CallId::from("tool-call-1"),
+                update: json!({ "percent": 50 }),
+            },
+        ];
+
+        for event in events {
+            assert_eq!(
+                serde_json::to_value(&event)?["type"],
+                json!(event.event_type())
+            );
+        }
 
         Ok(())
     }
