@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use stratum_core::{CallId, DangerLevel, ToolKind, ToolName, ToolSpec};
+use tokio_util::sync::CancellationToken;
 
 use crate::ToolError;
 
@@ -64,7 +65,11 @@ pub trait Tool: Send + Sync {
     /// # Errors
     ///
     /// Returns a tool error when execution fails.
-    async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError>;
+    async fn call(
+        &self,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError>;
 }
 
 /// Registry of pre-populated runtime tools.
@@ -100,5 +105,65 @@ pub trait ToolRegistry: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when the tool is missing or execution fails.
-    async fn call(&self, name: &ToolName, input: ToolInput) -> Result<ToolOutput, ToolError>;
+    async fn call(
+        &self,
+        name: &ToolName,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BuiltinToolRegistry;
+    use serde_json::json;
+    struct CancellationAwareTool {
+        spec: ToolSpec,
+    }
+
+    #[async_trait]
+    impl Tool for CancellationAwareTool {
+        fn spec(&self) -> &ToolSpec {
+            &self.spec
+        }
+
+        async fn call(
+            &self,
+            _input: ToolInput,
+            cancellation: &CancellationToken,
+        ) -> Result<ToolOutput, ToolError> {
+            assert!(cancellation.is_cancelled());
+            Ok(ToolOutput::new(json!({"cancelled": true})))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_token_reaches_tool() {
+        let tool = Arc::new(CancellationAwareTool {
+            spec: ToolSpec::builder()
+                .name("cancellation_aware")
+                .description("observes cancellation")
+                .input_schema(json!({"type": "object"}))
+                .build(),
+        });
+        let name = tool.spec().name.clone();
+        let mut registry = BuiltinToolRegistry::default();
+        registry
+            .register(tool, ToolKind::Read, DangerLevel::Low)
+            .expect("test tool should register");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let output = registry
+            .call(
+                &name,
+                ToolInput::new(CallId::new("call-1"), json!({})),
+                &cancellation,
+            )
+            .await
+            .expect("test tool should return output");
+
+        assert_eq!(output.result, json!({"cancelled": true}));
+    }
 }

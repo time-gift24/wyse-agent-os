@@ -32,6 +32,7 @@ use stratum_tools::{
     ToolRegistry,
 };
 use tokio::time::{sleep, timeout};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 enum ProviderResponse {
@@ -1220,7 +1221,12 @@ impl ToolRegistry for BlockingToolRegistry {
         vec![self.spec.clone()]
     }
 
-    async fn call(&self, _name: &ToolName, _input: ToolInput) -> Result<ToolOutput, ToolError> {
+    async fn call(
+        &self,
+        _name: &ToolName,
+        _input: ToolInput,
+        _cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         self.entered.notify_waiters();
         pending::<Result<ToolOutput, ToolError>>().await
     }
@@ -1250,7 +1256,11 @@ impl Tool for CountingTool {
         &self.spec
     }
 
-    async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
+    async fn call(
+        &self,
+        input: ToolInput,
+        _cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput::new(input.arguments))
     }

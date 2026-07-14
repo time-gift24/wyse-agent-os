@@ -7,6 +7,7 @@ use stratum_tools::{
     ApplyPatchTool, BuiltinToolRegistry, EchoTool, FileMetadataTool, ListDirTool,
     ReadFileLinesTool, SearchTextTool, ToolError, ToolInput, ToolPermissionMode, ToolRegistry,
 };
+use tokio_util::sync::CancellationToken;
 
 async fn apply_patch_test_filesystem(name: &str) -> (Arc<LocalFilesystem>, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
@@ -53,6 +54,7 @@ async fn read_file_lines_tool_returns_requested_line_range_through_registry() {
                     "line_count": 2
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -102,6 +104,7 @@ async fn read_file_lines_tool_returns_empty_lines_when_range_starts_after_end() 
                     "line_count": 2
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -143,6 +146,7 @@ async fn read_file_lines_tool_rejects_invalid_relative_path() {
                     "line_count": 1
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("invalid path should fail before reading");
@@ -180,6 +184,7 @@ async fn read_file_lines_tool_returns_typed_error_for_non_utf8_file() {
                     "line_count": 1
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("non-utf8 file should fail");
@@ -222,6 +227,7 @@ async fn list_dir_tool_returns_sorted_directory_entries_through_registry() {
                     "path": "src"
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -274,6 +280,7 @@ async fn file_metadata_tool_returns_file_type_and_length_through_registry() {
                     "path": "notes.txt"
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -335,6 +342,7 @@ async fn search_text_tool_returns_matches_under_directory_through_registry() {
                     "max_results": 10
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -377,6 +385,7 @@ async fn registered_echo_tool_can_be_called_through_registry() {
         .call(
             &ToolName::from("echo"),
             ToolInput::new(CallId::from("call-1"), json!({"message": "hello"})),
+            &CancellationToken::new(),
         )
         .await
         .expect("echo tool should run");
@@ -468,6 +477,7 @@ async fn missing_tool_returns_typed_error() {
         .call(
             &ToolName::from("missing"),
             ToolInput::new(CallId::from("call-1"), json!({})),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("missing tool should fail");
@@ -503,6 +513,7 @@ async fn apply_patch_tool_can_create_file_through_registry() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -548,6 +559,7 @@ async fn apply_patch_tool_updates_existing_file_through_registry() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -591,6 +603,7 @@ async fn apply_patch_tool_deletes_existing_file_through_registry() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -638,6 +651,7 @@ async fn apply_patch_tool_returns_failed_status_for_patch_conflict() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -685,6 +699,7 @@ async fn apply_patch_tool_returns_failed_status_for_existing_create_target() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -727,6 +742,7 @@ async fn apply_patch_tool_rejects_invalid_relative_path() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("invalid path should fail before patching");

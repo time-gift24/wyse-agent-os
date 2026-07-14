@@ -1852,6 +1852,7 @@ dependencies = [
  "stratum-filesystem",
  "thiserror",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

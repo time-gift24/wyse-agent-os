@@ -9,6 +9,7 @@ use stratum_tools::{
     ApplyPatchTool, FileMetadataTool, ListDirTool, ReadFileLinesTool, SearchTextTool, Tool,
     ToolInput,
 };
+use tokio_util::sync::CancellationToken;
 
 const LINE_COUNT: usize = 1_050;
 const HEAD_COUNT: usize = 10;
@@ -48,16 +49,19 @@ async fn apply_patch_tool_updates_and_deletes_large_file_in_docker_sandbox() {
     assert_head_is_original(&original);
 
     let update = tool
-        .call(ToolInput::new(
-            CallId::from("call-update"),
-            json!({
-                "operation": {
-                    "type": "update_file",
-                    "path": "large.txt",
-                    "diff": update_diff()
-                }
-            }),
-        ))
+        .call(
+            ToolInput::new(
+                CallId::from("call-update"),
+                json!({
+                    "operation": {
+                        "type": "update_file",
+                        "path": "large.txt",
+                        "diff": update_diff()
+                    }
+                }),
+            ),
+            &CancellationToken::new(),
+        )
         .await
         .expect("update call should run");
     assert_eq!(update.result["status"], "completed");
@@ -71,15 +75,18 @@ async fn apply_patch_tool_updates_and_deletes_large_file_in_docker_sandbox() {
     assert_large_file_patched(&updated);
 
     let delete = tool
-        .call(ToolInput::new(
-            CallId::from("call-delete"),
-            json!({
-                "operation": {
-                    "type": "delete_file",
-                    "path": "large.txt"
-                }
-            }),
-        ))
+        .call(
+            ToolInput::new(
+                CallId::from("call-delete"),
+                json!({
+                    "operation": {
+                        "type": "delete_file",
+                        "path": "large.txt"
+                    }
+                }),
+            ),
+            &CancellationToken::new(),
+        )
         .await
         .expect("delete call should run");
     assert_eq!(delete.result["status"], "completed");
@@ -132,14 +139,17 @@ async fn readonly_filesystem_tools_read_docker_sandbox() {
         .expect("seed nested file");
 
     let read_lines = ReadFileLinesTool::new(filesystem.clone())
-        .call(ToolInput::new(
-            CallId::from("call-read-lines"),
-            json!({
-                "path": "src/lib.rs",
-                "start_line": 2,
-                "line_count": 1
-            }),
-        ))
+        .call(
+            ToolInput::new(
+                CallId::from("call-read-lines"),
+                json!({
+                    "path": "src/lib.rs",
+                    "start_line": 2,
+                    "line_count": 1
+                }),
+            ),
+            &CancellationToken::new(),
+        )
         .await
         .expect("read lines tool should run");
     assert_eq!(
@@ -153,12 +163,15 @@ async fn readonly_filesystem_tools_read_docker_sandbox() {
     );
 
     let list_dir = ListDirTool::new(filesystem.clone())
-        .call(ToolInput::new(
-            CallId::from("call-list-dir"),
-            json!({
-                "path": "src"
-            }),
-        ))
+        .call(
+            ToolInput::new(
+                CallId::from("call-list-dir"),
+                json!({
+                    "path": "src"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
         .await
         .expect("list dir tool should run");
     assert_eq!(
@@ -178,12 +191,15 @@ async fn readonly_filesystem_tools_read_docker_sandbox() {
     );
 
     let metadata = FileMetadataTool::new(filesystem.clone())
-        .call(ToolInput::new(
-            CallId::from("call-file-metadata"),
-            json!({
-                "path": "src/lib.rs"
-            }),
-        ))
+        .call(
+            ToolInput::new(
+                CallId::from("call-file-metadata"),
+                json!({
+                    "path": "src/lib.rs"
+                }),
+            ),
+            &CancellationToken::new(),
+        )
         .await
         .expect("file metadata tool should run");
     assert_eq!(
@@ -196,14 +212,17 @@ async fn readonly_filesystem_tools_read_docker_sandbox() {
     );
 
     let search = SearchTextTool::new(filesystem)
-        .call(ToolInput::new(
-            CallId::from("call-search-text"),
-            json!({
-                "path": "src",
-                "query": "alpha",
-                "max_results": 10
-            }),
-        ))
+        .call(
+            ToolInput::new(
+                CallId::from("call-search-text"),
+                json!({
+                    "path": "src",
+                    "query": "alpha",
+                    "max_results": 10
+                }),
+            ),
+            &CancellationToken::new(),
+        )
         .await
         .expect("search text tool should run");
     assert_eq!(

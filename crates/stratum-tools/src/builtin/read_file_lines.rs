@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use stratum_core::ToolSpec;
 use stratum_filesystem::{Filesystem, VirtualPath};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Tool, ToolError, ToolInput, ToolOutput,
@@ -50,7 +51,14 @@ impl Tool for ReadFileLinesTool {
         &self.spec
     }
 
-    async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
+    async fn call(
+        &self,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         let raw: ReadFileLinesInput = serde_json::from_value(input.arguments)
             .map_err(|source| ToolError::InvalidInput { source })?;
         let path = normalize_path(&raw.path)?;
