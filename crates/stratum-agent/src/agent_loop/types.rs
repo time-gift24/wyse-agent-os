@@ -5,6 +5,7 @@ use stratum_llm::FinishReason;
 
 /// Committed conversation state supplied to an agent loop run.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct LoopContext {
     /// Instruction prepended to the model conversation.
     pub system_prompt: String,
@@ -32,6 +33,7 @@ impl LoopContext {
 
 /// Safety bounds applied before the loop starts additional work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LoopLimits {
     /// Maximum number of model iterations in one run.
     pub max_iterations: usize,
@@ -39,17 +41,26 @@ pub struct LoopLimits {
     pub max_tool_calls_per_iteration: usize,
 }
 
+impl LoopLimits {
+    /// Creates loop safety bounds.
+    #[must_use]
+    pub const fn new(max_iterations: usize, max_tool_calls_per_iteration: usize) -> Self {
+        Self {
+            max_iterations,
+            max_tool_calls_per_iteration,
+        }
+    }
+}
+
 impl Default for LoopLimits {
     fn default() -> Self {
-        Self {
-            max_iterations: 16,
-            max_tool_calls_per_iteration: 16,
-        }
+        Self::new(16, 16)
     }
 }
 
 /// Successful terminal result returned by the agent loop kernel.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct LoopOutcome {
     /// Messages committed during this loop run.
     pub new_messages: Vec<ChatMessage>,
@@ -62,7 +73,6 @@ pub struct LoopOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AgentLoopError;
 
     #[test]
     fn new_context_starts_with_an_empty_transcript() {
@@ -93,22 +103,10 @@ mod tests {
     }
 
     #[test]
-    fn outcome_contains_only_successful_terminal_data() {
-        let outcome: Result<LoopOutcome, AgentLoopError> = Ok(LoopOutcome {
-            new_messages: vec![ChatMessage::assistant("done")],
-            finish_reason: FinishReason::Stop,
-            usage: TokenUsage {
-                input_tokens: 3,
-                output_tokens: 1,
-                total_tokens: 4,
-            },
-        });
+    fn custom_limits_preserve_both_bounds() {
+        let limits = LoopLimits::new(3, 5);
 
-        let Ok(outcome) = outcome else {
-            panic!("expected a successful outcome");
-        };
-        assert_eq!(outcome.new_messages, vec![ChatMessage::assistant("done")]);
-        assert_eq!(outcome.finish_reason, FinishReason::Stop);
-        assert_eq!(outcome.usage.total_tokens, 4);
+        assert_eq!(limits.max_iterations, 3);
+        assert_eq!(limits.max_tool_calls_per_iteration, 5);
     }
 }

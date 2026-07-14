@@ -105,16 +105,28 @@ mod tests {
             event_type: "future_event",
         });
 
-        assert!(matches!(error, AgentLoopError::Durability { .. }));
-        assert!(error.source().is_some());
+        assert!(matches!(&error, AgentLoopError::Durability { .. }));
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<DurableEventSinkError>()),
+            Some(DurableEventSinkError::UnsupportedEvent {
+                event_type: "future_event"
+            })
+        ));
     }
 
     #[test]
     fn llm_conversion_preserves_the_source_chain() {
         let error = AgentLoopError::from(LlmError::MockExhausted);
 
-        assert!(matches!(error, AgentLoopError::Llm { .. }));
-        assert!(error.source().is_some());
+        assert!(matches!(&error, AgentLoopError::Llm { .. }));
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<LlmError>()),
+            Some(LlmError::MockExhausted)
+        ));
     }
 
     #[test]
@@ -122,10 +134,30 @@ mod tests {
         let error = AgentLoopError::from(ProtocolError::StreamEndedWithoutFinish);
 
         assert!(matches!(
-            error,
+            &error,
             AgentLoopError::InvalidProtocol {
                 reason: ProtocolError::StreamEndedWithoutFinish
             }
+        ));
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<ProtocolError>()),
+            Some(ProtocolError::StreamEndedWithoutFinish)
+        ));
+    }
+
+    #[test]
+    fn limit_error_exposes_the_typed_limit_as_its_source() {
+        let error = AgentLoopError::LimitExceeded {
+            limit: LoopLimit::Iterations { maximum: 2 },
+        };
+
+        assert!(matches!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<LoopLimit>()),
+            Some(LoopLimit::Iterations { maximum: 2 })
         ));
     }
 }
