@@ -1,5 +1,7 @@
 //! Typed failures that prevent safe tool execution.
 
+use std::error::Error as StdError;
+
 use stratum_infra::DurableEventSinkError;
 use thiserror::Error;
 
@@ -10,6 +12,23 @@ pub enum ToolApprovalError {
     /// The approval interaction was cancelled.
     #[error("tool approval cancelled")]
     Cancelled,
+    /// An approval interaction backend failed.
+    #[error("tool approval interaction failed")]
+    Interaction {
+        /// Backend failure source, retained without exposing it in the top-level message.
+        #[source]
+        source: Box<dyn StdError + Send + Sync + 'static>,
+    },
+}
+
+impl ToolApprovalError {
+    /// Wraps an approval interaction backend failure while preserving its source chain.
+    #[must_use]
+    pub fn interaction(source: impl StdError + Send + Sync + 'static) -> Self {
+        Self::Interaction {
+            source: Box::new(source),
+        }
+    }
 }
 
 /// Failure that prevents the tool executor from preserving its durable ordering.

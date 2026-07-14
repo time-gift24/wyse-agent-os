@@ -15,7 +15,7 @@ use super::{ToolApproval, ToolApprovalRequest, ToolExecutorError};
 #[non_exhaustive]
 pub struct ToolExecutionOutcome {
     message: ChatMessage,
-    reached_tool: bool,
+    dispatch_attempted: bool,
 }
 
 impl ToolExecutionOutcome {
@@ -25,10 +25,10 @@ impl ToolExecutionOutcome {
         &self.message
     }
 
-    /// Returns whether the external tool implementation was invoked.
+    /// Returns whether [`ToolRegistry::call`] was invoked for this tool call.
     #[must_use]
-    pub const fn reached_tool(&self) -> bool {
-        self.reached_tool
+    pub const fn dispatch_attempted(&self) -> bool {
+        self.dispatch_attempted
     }
 
     /// Consumes the outcome and returns its model-visible message.
@@ -71,6 +71,13 @@ impl ToolExecutor {
     /// # Errors
     ///
     /// Returns an error when a required durable event or approval interaction fails.
+    ///
+    /// # Cancellation safety
+    ///
+    /// Cancellation is cooperative through the supplied token. After
+    /// `ToolExecutionStarted` is durably acknowledged, callers must await this method until the
+    /// tool reports an outcome; racing or dropping the execution future can lose knowledge of an
+    /// external side effect.
     pub async fn execute(
         &self,
         tool_call: &ToolCall,
@@ -85,7 +92,7 @@ impl ToolExecutor {
                         tool_call.call_id.clone(),
                         json!({"error": error.to_string()}),
                     ),
-                    reached_tool: false,
+                    dispatch_attempted: false,
                 });
             }
         };
@@ -99,6 +106,7 @@ impl ToolExecutor {
                 tool_kind,
                 danger_level,
             };
+            let approval_id = request.approval_id;
             self.durable_events
                 .append(DurableAgentEvent::ToolApprovalRequested {
                     approval_id: request.approval_id,
@@ -109,10 +117,10 @@ impl ToolExecutor {
                     danger_level: request.danger_level,
                 })
                 .await?;
-            let decision = self.approval.request(request.clone(), cancellation).await?;
+            let decision = self.approval.request(request, cancellation).await?;
             self.durable_events
                 .append(DurableAgentEvent::ToolApprovalResolved {
-                    approval_id: request.approval_id,
+                    approval_id,
                     decision,
                 })
                 .await?;
@@ -123,7 +131,7 @@ impl ToolExecutor {
                             tool_call.call_id.clone(),
                             json!({"error": "tool approval rejected"}),
                         ),
-                        reached_tool: false,
+                        dispatch_attempted: false,
                     });
                 }
                 ApprovalDecision::Approve => {}
@@ -151,7 +159,7 @@ impl ToolExecutor {
         };
         Ok(ToolExecutionOutcome {
             message: ChatMessage::tool(tool_call.call_id.clone(), payload),
-            reached_tool: true,
+            dispatch_attempted: true,
         })
     }
 }
@@ -162,6 +170,7 @@ mod tests {
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::{error::Error as _, fmt};
 
     use async_trait::async_trait;
     use serde_json::json;
@@ -322,6 +331,36 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ApprovalBackendError;
+
+    impl fmt::Display for ApprovalBackendError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("approval backend unavailable")
+        }
+    }
+
+    impl std::error::Error for ApprovalBackendError {}
+
+    struct BackendFailingApproval {
+        operations: Arc<Mutex<Vec<Operation>>>,
+    }
+
+    #[async_trait]
+    impl ToolApproval for BackendFailingApproval {
+        async fn request(
+            &self,
+            request: ToolApprovalRequest,
+            _cancellation: &CancellationToken,
+        ) -> Result<ApprovalDecision, ToolApprovalError> {
+            self.operations
+                .lock()
+                .expect("operation lock should not be poisoned")
+                .push(Operation::Approval(request));
+            Err(ToolApprovalError::interaction(ApprovalBackendError))
+        }
+    }
+
     fn tool_call(name: &str) -> ToolCall {
         ToolCall {
             call_id: CallId::new("call-1"),
@@ -363,7 +402,7 @@ mod tests {
                 json!({"error": "tool not found: missing"}),
             )
         );
-        assert!(!outcome.reached_tool());
+        assert!(!outcome.dispatch_attempted());
         assert_eq!(
             *operations
                 .lock()
@@ -405,7 +444,7 @@ mod tests {
                 json!({"error": "tool approval rejected"}),
             )
         );
-        assert!(!outcome.reached_tool());
+        assert!(!outcome.dispatch_attempted());
 
         let operations = operations
             .lock()
@@ -452,6 +491,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_backend_failure_preserves_source_and_prevents_dispatch() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor = ToolExecutor::new(
+            Arc::new(RecordingRegistry {
+                operations: Arc::clone(&operations),
+                missing: false,
+                approval: Some((ToolKind::Write, DangerLevel::High)),
+                specs: Vec::new(),
+                call_result: RegistryCallResult::Success(json!({"ok": true})),
+            }),
+            Arc::new(BackendFailingApproval {
+                operations: Arc::clone(&operations),
+            }),
+            Arc::new(RecordingDurableSink {
+                operations: Arc::clone(&operations),
+            }),
+        );
+        let call = tool_call("dangerous");
+
+        let error = executor
+            .execute(&call, &CancellationToken::new())
+            .await
+            .expect_err("approval backend failure must stop execution");
+
+        let crate::ToolExecutorError::Approval { source } = &error else {
+            panic!("backend failure should remain an approval error");
+        };
+        assert_eq!(source.to_string(), "tool approval interaction failed");
+        assert!(matches!(
+            source
+                .source()
+                .and_then(|source| source.downcast_ref::<ApprovalBackendError>()),
+            Some(ApprovalBackendError)
+        ));
+
+        let operations = operations
+            .lock()
+            .expect("operation lock should not be poisoned");
+        assert_eq!(operations.len(), 3);
+        assert_eq!(
+            operations[0],
+            Operation::Authorization(ToolName::new("dangerous"))
+        );
+        let Operation::Durable(DurableAgentEvent::ToolApprovalRequested {
+            approval_id,
+            call_id,
+            tool_name,
+            arguments,
+            tool_kind,
+            danger_level,
+        }) = &operations[1]
+        else {
+            panic!("approval request should be durable before interaction");
+        };
+        assert_eq!(call_id, &call.call_id);
+        assert_eq!(tool_name, &ToolName::new("dangerous"));
+        assert_eq!(arguments, &call.arguments);
+        assert_eq!(*tool_kind, ToolKind::Write);
+        assert_eq!(*danger_level, DangerLevel::High);
+        assert_eq!(
+            operations[2],
+            Operation::Approval(ToolApprovalRequest {
+                approval_id: *approval_id,
+                call_id: call.call_id,
+                tool_name: ToolName::new("dangerous"),
+                arguments: call.arguments,
+                tool_kind: ToolKind::Write,
+                danger_level: DangerLevel::High,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn approved_call_is_started_durably_before_tool_invocation() {
         let operations = Arc::new(Mutex::new(Vec::new()));
         let executor = ToolExecutor::new(
@@ -481,7 +593,7 @@ mod tests {
             outcome.message(),
             &ChatMessage::tool(call.call_id.clone(), json!({"ok": true}))
         );
-        assert!(outcome.reached_tool());
+        assert!(outcome.dispatch_attempted());
 
         let operations = operations
             .lock()
@@ -568,7 +680,7 @@ mod tests {
             .await
             .expect("tool domain failures are recoverable results");
 
-        assert!(outcome.reached_tool());
+        assert!(outcome.dispatch_attempted());
         assert_eq!(
             outcome.into_message(),
             ChatMessage::tool(
@@ -699,7 +811,7 @@ mod tests {
             .await
             .expect("a tool-reported cancellation remains a tool result");
 
-        assert!(outcome.reached_tool());
+        assert!(outcome.dispatch_attempted());
         assert_eq!(
             outcome.into_message(),
             ChatMessage::tool(
