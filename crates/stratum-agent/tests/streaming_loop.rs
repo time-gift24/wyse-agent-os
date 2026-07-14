@@ -1266,6 +1266,56 @@ impl Tool for CountingTool {
     }
 }
 
+struct CancellationRecordingTool {
+    spec: ToolSpec,
+    entered: Arc<tokio::sync::Notify>,
+    cancellation_observed: Arc<tokio::sync::Notify>,
+    saw_cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationRecordingTool {
+    fn new(
+        entered: Arc<tokio::sync::Notify>,
+        cancellation_observed: Arc<tokio::sync::Notify>,
+        saw_cancelled: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            spec: ToolSpec::builder()
+                .name("observe_cancellation")
+                .description("records cancellation")
+                .input_schema(json!({"type": "object"}))
+                .build(),
+            entered,
+            cancellation_observed,
+            saw_cancelled,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for CancellationRecordingTool {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+
+    async fn call(
+        &self,
+        _input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        let cancellation = cancellation.clone();
+        let cancellation_observed = Arc::clone(&self.cancellation_observed);
+        let saw_cancelled = Arc::clone(&self.saw_cancelled);
+        tokio::spawn(async move {
+            cancellation.cancelled().await;
+            saw_cancelled.store(cancellation.is_cancelled(), Ordering::SeqCst);
+            cancellation_observed.notify_one();
+        });
+        self.entered.notify_one();
+        pending::<Result<ToolOutput, ToolError>>().await
+    }
+}
+
 #[derive(Clone, Default)]
 struct FailingApprovalBus {
     inner: InMemoryEventStreamBus,
@@ -2207,6 +2257,60 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
     .expect("timed out waiting for cancelled event");
 
     assert!(saw_cancelled);
+}
+
+#[tokio::test]
+async fn agent_cancellation_reaches_active_tool_token() {
+    let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
+        vec![
+            ChatStreamEvent::ToolCallDelta(ToolCallDelta {
+                index: 0,
+                call_id: Some(CallId::from("call-1")),
+                name: Some("observe_cancellation".to_owned()),
+                arguments_delta: "{}".to_owned(),
+            }),
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::ToolCalls,
+                usage: None,
+            },
+        ],
+    )]));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let cancellation_observed = Arc::new(tokio::sync::Notify::new());
+    let saw_cancelled = Arc::new(AtomicBool::new(false));
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(
+            Arc::new(CancellationRecordingTool::new(
+                Arc::clone(&entered),
+                Arc::clone(&cancellation_observed),
+                Arc::clone(&saw_cancelled),
+            )),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("recording tool should register");
+    let agent = Agent::builder()
+        .id(test_agent_id())
+        .name("test-agent")
+        .system_prompt("be helpful")
+        .llm_provider(provider)
+        .tool_registry(Arc::new(registry))
+        .event_bus(Arc::new(InMemoryEventStreamBus::default()))
+        .store(test_store())
+        .build()
+        .expect("agent should build");
+
+    let (_run_id, _events) = run_turn_and_subscribe(&agent, ChatMessage::user("hello")).await;
+    timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("timed out waiting for tool call");
+    agent.stop();
+    timeout(Duration::from_secs(1), cancellation_observed.notified())
+        .await
+        .expect("tool did not observe active cancellation");
+
+    assert!(saw_cancelled.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

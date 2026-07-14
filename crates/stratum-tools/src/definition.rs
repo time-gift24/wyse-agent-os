@@ -62,6 +62,9 @@ pub trait Tool: Send + Sync {
 
     /// Executes the tool.
     ///
+    /// Cancellation is cooperative. Implementations should stop before starting new
+    /// external work, but operations already issued are not guaranteed to be rolled back.
+    ///
     /// # Errors
     ///
     /// Returns a tool error when execution fails.
@@ -101,6 +104,9 @@ pub trait ToolRegistry: Send + Sync {
     fn specs(&self) -> Vec<ToolSpec>;
 
     /// Executes a registered tool by name.
+    ///
+    /// Cancellation is cooperative. Implementations should stop before starting new
+    /// external work, but operations already issued are not guaranteed to be rolled back.
     ///
     /// # Errors
     ///

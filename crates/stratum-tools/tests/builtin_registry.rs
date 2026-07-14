@@ -489,6 +489,59 @@ async fn missing_tool_returns_typed_error() {
 }
 
 #[tokio::test]
+async fn cancelled_apply_patch_preserves_existing_content_and_version() {
+    let (filesystem, root) = apply_patch_test_filesystem("cancelled-update").await;
+    let path = VirtualPath::try_from("/notes.txt").expect("path is valid");
+    filesystem
+        .write_file(&path, b"original\n".to_vec())
+        .await
+        .expect("seed file");
+    let before = filesystem
+        .get(&path)
+        .await
+        .expect("get should succeed")
+        .expect("seeded file should exist");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem.clone())),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
+        .expect("apply patch tool should register");
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = registry
+        .call(
+            &ToolName::from("apply_patch"),
+            ToolInput::new(
+                CallId::from("call-cancelled-update"),
+                json!({
+                    "operation": {
+                        "type": "update_file",
+                        "path": "notes.txt",
+                        "diff": "@@\n-original\n+changed\n"
+                    }
+                }),
+            ),
+            &cancellation,
+        )
+        .await
+        .expect_err("cancelled patch should not run");
+
+    assert!(matches!(error, ToolError::Cancelled));
+    let after = filesystem
+        .get(&path)
+        .await
+        .expect("get should succeed")
+        .expect("cancelled patch should preserve the file");
+    assert_eq!(after, before);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn apply_patch_tool_can_create_file_through_registry() {
     let (filesystem, root) = apply_patch_test_filesystem("create").await;
     let mut registry = BuiltinToolRegistry::default();
