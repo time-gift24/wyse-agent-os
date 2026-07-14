@@ -60,6 +60,17 @@ pub trait Tool: Send + Sync {
     /// Returns the provider-visible tool specification.
     fn spec(&self) -> &ToolSpec;
 
+    /// Validates every deterministic input condition before execution is authorized.
+    ///
+    /// Validation is synchronous and side-effect free. Callers use it before approval and before
+    /// recording that execution started; [`Tool::call`] must still reject the same invalid input
+    /// when invoked directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a tool error when the input cannot be executed as supplied.
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError>;
+
     /// Executes the tool.
     ///
     /// Cancellation is cooperative. Implementations should stop before starting new
@@ -97,6 +108,13 @@ pub trait ToolRegistry: Send + Sync {
     /// Returns an error when the tool is not registered.
     fn authorization(&self, name: &ToolName) -> Result<Option<(ToolKind, DangerLevel)>, ToolError>;
 
+    /// Validates input for a registered tool without starting external work.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is missing or the input is invalid.
+    fn validate(&self, name: &ToolName, input: &ToolInput) -> Result<(), ToolError>;
+
     /// Returns a registered tool by name.
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>>;
 
@@ -132,6 +150,10 @@ mod tests {
     impl Tool for CancellationAwareTool {
         fn spec(&self) -> &ToolSpec {
             &self.spec
+        }
+
+        fn validate(&self, _input: &ToolInput) -> Result<(), ToolError> {
+            Ok(())
         }
 
         async fn call(

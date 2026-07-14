@@ -27,10 +27,14 @@
 
 ## Cancellation
 
+- Every `Tool` synchronously validates all deterministic input conditions through
+  `Tool::validate` before approval or execution-start events. Validation is
+  side-effect free; `Tool::call` must enforce the same conditions when invoked
+  directly.
 - `ToolRegistry::call` propagates the same borrowed `CancellationToken` to the
   selected `Tool::call`.
-- Builtin tools check for pre-cancellation before starting external work and
-  return the typed cancellation error.
+- Builtin tools revalidate input, then check for pre-cancellation immediately
+  before starting external work and return the typed cancellation error.
 - Cancellation is cooperative. Effects already issued are not rolled back, and
   cancellation does not prove that no external effect occurred.
 - Once a caller records that tool execution started, it must keep awaiting the

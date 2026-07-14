@@ -15,9 +15,13 @@ impl ToolApproval for DenyAllToolApproval {
     async fn request(
         &self,
         _request: ToolApprovalRequest,
-        _cancellation: &CancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ApprovalDecision, ToolApprovalError> {
-        Ok(ApprovalDecision::Reject)
+        if cancellation.is_cancelled() {
+            Err(ToolApprovalError::Cancelled)
+        } else {
+            Ok(ApprovalDecision::Reject)
+        }
     }
 }
 
@@ -45,5 +49,26 @@ mod tests {
             .expect("deny-all policy is infallible");
 
         assert_eq!(decision, ApprovalDecision::Reject);
+    }
+
+    #[tokio::test]
+    async fn deny_all_policy_honors_pre_cancellation() {
+        let request = ToolApprovalRequest {
+            approval_id: ApprovalId::new(),
+            call_id: CallId::new("call-cancelled"),
+            tool_name: ToolName::new("write_file"),
+            arguments: json!({"path": "notes.txt"}),
+            tool_kind: ToolKind::Write,
+            danger_level: DangerLevel::Medium,
+        };
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = DenyAllToolApproval
+            .request(request, &cancellation)
+            .await
+            .expect_err("pre-cancellation must prevent a rejection decision");
+
+        assert!(matches!(error, ToolApprovalError::Cancelled));
     }
 }

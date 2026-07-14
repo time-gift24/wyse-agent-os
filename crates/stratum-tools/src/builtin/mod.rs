@@ -91,6 +91,13 @@ impl ToolRegistry for BuiltinToolRegistry {
         Ok((!allowed).then_some((registered.tool_kind, registered.danger_level)))
     }
 
+    fn validate(&self, name: &ToolName, input: &ToolInput) -> Result<(), ToolError> {
+        let tool = self
+            .get(name)
+            .ok_or_else(|| ToolError::ToolNotFound { name: name.clone() })?;
+        tool.validate(input)
+    }
+
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>> {
         self.tools
             .get(name)
@@ -149,11 +156,23 @@ impl Tool for EchoTool {
         &self.spec
     }
 
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        if input.arguments.is_object() {
+            Ok(())
+        } else {
+            Err(ToolError::InvalidArgument {
+                name: "arguments",
+                reason: "must be an object",
+            })
+        }
+    }
+
     async fn call(
         &self,
         input: ToolInput,
         cancellation: &CancellationToken,
     ) -> Result<ToolOutput, ToolError> {
+        self.validate(&input)?;
         if cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
         }

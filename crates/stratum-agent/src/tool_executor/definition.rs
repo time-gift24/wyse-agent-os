@@ -8,7 +8,7 @@ use stratum_infra::DurableEventSink;
 use stratum_tools::{ToolInput, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
-use super::{ToolApproval, ToolApprovalRequest, ToolExecutorError};
+use super::{ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutorError};
 
 /// Result of processing one provider tool call.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +84,7 @@ impl ToolExecutor {
         cancellation: &CancellationToken,
     ) -> Result<ToolExecutionOutcome, ToolExecutorError> {
         let tool_name = ToolName::new(tool_call.name.clone());
+        let input = ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone());
         let authorization = match self.registry.authorization(&tool_name) {
             Ok(authorization) => authorization,
             Err(error) => {
@@ -96,6 +97,16 @@ impl ToolExecutor {
                 });
             }
         };
+        if let Err(error) = self.registry.validate(&tool_name, &input) {
+            return Ok(ToolExecutionOutcome {
+                message: ChatMessage::tool(
+                    tool_call.call_id.clone(),
+                    json!({"error": error.to_string()}),
+                ),
+                dispatch_attempted: false,
+            });
+        }
+        ensure_not_cancelled(cancellation)?;
 
         if let Some((tool_kind, danger_level)) = authorization {
             let request = ToolApprovalRequest {
@@ -117,6 +128,7 @@ impl ToolExecutor {
                     danger_level: request.danger_level,
                 })
                 .await?;
+            ensure_not_cancelled(cancellation)?;
             let decision = self.approval.request(request, cancellation).await?;
             self.durable_events
                 .append(DurableAgentEvent::ToolApprovalResolved {
@@ -124,6 +136,7 @@ impl ToolExecutor {
                     decision,
                 })
                 .await?;
+            ensure_not_cancelled(cancellation)?;
             match decision {
                 ApprovalDecision::Reject => {
                     return Ok(ToolExecutionOutcome {
@@ -139,20 +152,14 @@ impl ToolExecutor {
             }
         }
 
+        ensure_not_cancelled(cancellation)?;
         self.durable_events
             .append(DurableAgentEvent::ToolExecutionStarted {
                 call_id: tool_call.call_id.clone(),
                 tool_name: tool_name.clone(),
             })
             .await?;
-        let result = self
-            .registry
-            .call(
-                &tool_name,
-                ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
-                cancellation,
-            )
-            .await;
+        let result = self.registry.call(&tool_name, input, cancellation).await;
         let payload = match result {
             Ok(output) => output.result,
             Err(error) => json!({"error": error.to_string()}),
@@ -161,6 +168,14 @@ impl ToolExecutor {
             message: ChatMessage::tool(tool_call.call_id.clone(), payload),
             dispatch_attempted: true,
         })
+    }
+}
+
+fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), ToolExecutorError> {
+    if cancellation.is_cancelled() {
+        Err(ToolApprovalError::Cancelled.into())
+    } else {
+        Ok(())
     }
 }
 
@@ -179,7 +194,11 @@ mod tests {
         ToolName, ToolSpec,
     };
     use stratum_infra::{DurableEventSink, DurableEventSinkError};
-    use stratum_tools::{Tool, ToolError, ToolInput, ToolOutput, ToolRegistry};
+    use stratum_tools::{
+        BuiltinToolRegistry, EchoTool, Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode,
+        ToolRegistry,
+    };
+    use tokio::{sync::Notify, time::timeout};
     use tokio_util::sync::CancellationToken;
 
     use crate::tool_executor::{
@@ -239,6 +258,10 @@ mod tests {
             }
         }
 
+        fn validate(&self, _name: &ToolName, _input: &ToolInput) -> Result<(), ToolError> {
+            Ok(())
+        }
+
         fn get(&self, _name: &ToolName) -> Option<Arc<dyn Tool>> {
             None
         }
@@ -291,6 +314,28 @@ mod tests {
         operations: Arc<Mutex<Vec<Operation>>>,
         fail_at: usize,
         attempts: AtomicUsize,
+    }
+
+    struct BlockingResolvedSink {
+        operations: Arc<Mutex<Vec<Operation>>>,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl DurableEventSink for BlockingResolvedSink {
+        async fn append(&self, event: DurableAgentEvent) -> Result<(), DurableEventSinkError> {
+            let is_resolved = matches!(event, DurableAgentEvent::ToolApprovalResolved { .. });
+            self.operations
+                .lock()
+                .expect("operation lock should not be poisoned")
+                .push(Operation::Durable(event));
+            if is_resolved {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -408,6 +453,51 @@ mod tests {
                 .lock()
                 .expect("operation lock should not be poisoned"),
             vec![Operation::Authorization(ToolName::new("missing"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_builtin_input_returns_error_before_approval_or_execution_start() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = BuiltinToolRegistry::new(ToolPermissionMode::RequireApproval);
+        registry
+            .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+            .expect("echo tool should register");
+        let executor = ToolExecutor::new(
+            Arc::new(registry),
+            Arc::new(StaticApproval {
+                operations: Arc::clone(&operations),
+                decision: ApprovalDecision::Approve,
+            }),
+            Arc::new(RecordingDurableSink {
+                operations: Arc::clone(&operations),
+            }),
+        );
+        let call = ToolCall {
+            call_id: CallId::new("call-invalid"),
+            name: "echo".to_owned(),
+            arguments: json!(42),
+        };
+
+        let outcome = executor
+            .execute(&call, &CancellationToken::new())
+            .await
+            .expect("invalid arguments should remain a recoverable tool result");
+
+        assert_eq!(
+            outcome.message(),
+            &ChatMessage::tool(
+                call.call_id,
+                json!({"error": "invalid argument arguments: must be an object"}),
+            )
+        );
+        assert!(!outcome.dispatch_attempted());
+        assert!(
+            operations
+                .lock()
+                .expect("operation lock should not be poisoned")
+                .is_empty(),
+            "validation must precede approval and execution events"
         );
     }
 
@@ -655,6 +745,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_while_approval_resolution_ack_is_pending_prevents_start() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let executor = ToolExecutor::new(
+            Arc::new(RecordingRegistry {
+                operations: Arc::clone(&operations),
+                missing: false,
+                approval: Some((ToolKind::Write, DangerLevel::High)),
+                specs: Vec::new(),
+                call_result: RegistryCallResult::Success(json!({"ok": true})),
+            }),
+            Arc::new(StaticApproval {
+                operations: Arc::clone(&operations),
+                decision: ApprovalDecision::Approve,
+            }),
+            Arc::new(BlockingResolvedSink {
+                operations: Arc::clone(&operations),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+        );
+        let call = tool_call("dangerous");
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move { executor.execute(&call, &task_cancellation).await });
+        timeout(std::time::Duration::from_secs(1), entered.notified())
+            .await
+            .expect("approval resolution append should reach its barrier");
+
+        cancellation.cancel();
+        release.notify_one();
+        let error = timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("executor should finish after the barrier releases")
+            .expect("executor task should not panic")
+            .expect_err("cancellation must stop before execution starts");
+
+        assert!(matches!(
+            error,
+            crate::ToolExecutorError::Approval {
+                source: ToolApprovalError::Cancelled,
+            }
+        ));
+        let operations = operations
+            .lock()
+            .expect("operation lock should not be poisoned");
+        assert_eq!(operations.len(), 4);
+        assert!(matches!(operations[0], Operation::Authorization(_)));
+        assert!(matches!(
+            operations[1],
+            Operation::Durable(DurableAgentEvent::ToolApprovalRequested { .. })
+        ));
+        assert!(matches!(operations[2], Operation::Approval(_)));
+        assert!(matches!(
+            operations[3],
+            Operation::Durable(DurableAgentEvent::ToolApprovalResolved { .. })
+        ));
+        assert!(!operations.iter().any(|operation| matches!(
+            operation,
+            Operation::Durable(DurableAgentEvent::ToolExecutionStarted { .. })
+                | Operation::ToolCall { .. }
+        )));
+    }
+
+    #[tokio::test]
     async fn tool_failure_becomes_a_model_visible_error_result() {
         let operations = Arc::new(Mutex::new(Vec::new()));
         let executor = ToolExecutor::new(
@@ -784,7 +940,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_token_reaches_tool_and_cancelled_outcome_is_preserved() {
+    async fn pre_cancellation_without_approval_prevents_execution_start_and_dispatch() {
         let operations = Arc::new(Mutex::new(Vec::new()));
         let executor = ToolExecutor::new(
             Arc::new(RecordingRegistry {
@@ -806,35 +962,22 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
-        let outcome = executor
+        let error = executor
             .execute(&call, &cancellation)
             .await
-            .expect("a tool-reported cancellation remains a tool result");
+            .expect_err("pre-cancellation should stop before execution starts");
 
-        assert!(outcome.dispatch_attempted());
-        assert_eq!(
-            outcome.into_message(),
-            ChatMessage::tool(
-                call.call_id.clone(),
-                json!({"error": "tool execution cancelled"}),
-            )
-        );
+        assert!(matches!(
+            error,
+            crate::ToolExecutorError::Approval {
+                source: ToolApprovalError::Cancelled,
+            }
+        ));
         assert_eq!(
             *operations
                 .lock()
                 .expect("operation lock should not be poisoned"),
-            vec![
-                Operation::Authorization(ToolName::new("cancellable")),
-                Operation::Durable(DurableAgentEvent::ToolExecutionStarted {
-                    call_id: call.call_id.clone(),
-                    tool_name: ToolName::new("cancellable"),
-                }),
-                Operation::ToolCall {
-                    name: ToolName::new("cancellable"),
-                    input: ToolInput::new(call.call_id, call.arguments),
-                    cancelled: true,
-                },
-            ]
+            vec![Operation::Authorization(ToolName::new("cancellable"))]
         );
     }
 

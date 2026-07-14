@@ -240,6 +240,9 @@ impl AgentLoop {
             }
         }
 
+        if cancellation.is_cancelled() {
+            return Err(AgentLoopError::Cancelled);
+        }
         Err(AgentLoopError::LimitExceeded {
             limit: LoopLimit::Iterations {
                 maximum: self.limits.max_iterations,

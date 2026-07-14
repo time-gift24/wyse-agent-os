@@ -1213,6 +1213,10 @@ impl ToolRegistry for BlockingToolRegistry {
         Ok(None)
     }
 
+    fn validate(&self, _name: &ToolName, _input: &ToolInput) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     fn get(&self, _name: &ToolName) -> Option<Arc<dyn stratum_tools::Tool>> {
         None
     }
@@ -1256,6 +1260,10 @@ impl Tool for CountingTool {
         &self.spec
     }
 
+    fn validate(&self, _input: &ToolInput) -> Result<(), ToolError> {
+        Ok(())
+    }
+
     async fn call(
         &self,
         input: ToolInput,
@@ -1296,6 +1304,10 @@ impl CancellationRecordingTool {
 impl Tool for CancellationRecordingTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
+    }
+
+    fn validate(&self, _input: &ToolInput) -> Result<(), ToolError> {
+        Ok(())
     }
 
     async fn call(

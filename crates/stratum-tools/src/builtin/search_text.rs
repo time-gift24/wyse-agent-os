@@ -4,7 +4,7 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use stratum_core::ToolSpec;
 use stratum_filesystem::{FileType, Filesystem, VirtualPath};
 use tokio_util::sync::CancellationToken;
@@ -51,28 +51,19 @@ impl Tool for SearchTextTool {
         &self.spec
     }
 
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        parse_input(input.arguments.clone()).map(|_| ())
+    }
+
     async fn call(
         &self,
         input: ToolInput,
         cancellation: &CancellationToken,
     ) -> Result<ToolOutput, ToolError> {
+        let (raw, path, max_results) = parse_input(input.arguments)?;
         if cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        let raw: SearchTextInput = serde_json::from_value(input.arguments)
-            .map_err(|source| ToolError::InvalidInput { source })?;
-        if raw.query.is_empty() {
-            return Err(ToolError::InvalidArgument {
-                name: "query",
-                reason: "must not be empty",
-            });
-        }
-
-        let path = normalize_path(&raw.path)?;
-        let max_results = raw
-            .max_results
-            .map(NonZeroUsize::get)
-            .unwrap_or(DEFAULT_MAX_RESULTS);
         let matches = search_text(
             self.filesystem.as_ref(),
             path.clone(),
@@ -94,6 +85,23 @@ struct SearchTextInput {
     path: String,
     query: String,
     max_results: Option<NonZeroUsize>,
+}
+
+fn parse_input(arguments: Value) -> Result<(SearchTextInput, VirtualPath, usize), ToolError> {
+    let raw: SearchTextInput =
+        serde_json::from_value(arguments).map_err(|source| ToolError::InvalidInput { source })?;
+    if raw.query.is_empty() {
+        return Err(ToolError::InvalidArgument {
+            name: "query",
+            reason: "must not be empty",
+        });
+    }
+    let path = normalize_path(&raw.path)?;
+    let max_results = raw
+        .max_results
+        .map(NonZeroUsize::get)
+        .unwrap_or(DEFAULT_MAX_RESULTS);
+    Ok((raw, path, max_results))
 }
 
 async fn search_text(

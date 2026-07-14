@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use stratum_core::ToolSpec;
-use stratum_filesystem::Filesystem;
+use stratum_filesystem::{Filesystem, VirtualPath};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -47,17 +47,19 @@ impl Tool for ListDirTool {
         &self.spec
     }
 
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        parse_path(input.arguments.clone()).map(|_| ())
+    }
+
     async fn call(
         &self,
         input: ToolInput,
         cancellation: &CancellationToken,
     ) -> Result<ToolOutput, ToolError> {
+        let path = parse_path(input.arguments)?;
         if cancellation.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        let raw: PathInput = serde_json::from_value(input.arguments)
-            .map_err(|source| ToolError::InvalidInput { source })?;
-        let path = normalize_path(&raw.path)?;
         let entries = self.filesystem.list_dir(&path).await?;
         let entries = entries
             .into_iter()
@@ -80,4 +82,10 @@ impl Tool for ListDirTool {
 #[derive(Debug, Deserialize)]
 struct PathInput {
     path: String,
+}
+
+fn parse_path(arguments: Value) -> Result<VirtualPath, ToolError> {
+    let raw: PathInput =
+        serde_json::from_value(arguments).map_err(|source| ToolError::InvalidInput { source })?;
+    normalize_path(&raw.path)
 }

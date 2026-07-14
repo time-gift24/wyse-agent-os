@@ -27,6 +27,138 @@ async fn apply_patch_test_filesystem(name: &str) -> (Arc<LocalFilesystem>, std::
 }
 
 #[tokio::test]
+async fn builtin_validation_rejects_every_deterministic_invalid_input_without_filesystem_work() {
+    let (filesystem, root) = apply_patch_test_filesystem("validation").await;
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+        .expect("echo should register");
+    registry
+        .register(
+            Arc::new(ReadFileLinesTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("read file lines should register");
+    registry
+        .register(
+            Arc::new(ListDirTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("list dir should register");
+    registry
+        .register(
+            Arc::new(FileMetadataTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("file metadata should register");
+    registry
+        .register(
+            Arc::new(SearchTextTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("search text should register");
+    registry
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem)),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
+        .expect("apply patch should register");
+
+    let cases = [
+        ("echo", json!(42), "invalid argument arguments"),
+        (
+            "read_file_lines",
+            json!({"path": "notes.txt", "start_line": 1}),
+            "invalid tool input",
+        ),
+        (
+            "read_file_lines",
+            json!({"path": "notes.txt", "start_line": 0, "line_count": 1}),
+            "invalid tool input",
+        ),
+        (
+            "read_file_lines",
+            json!({"path": "../secret", "start_line": 1, "line_count": 1}),
+            "invalid path",
+        ),
+        ("list_dir", json!({}), "invalid tool input"),
+        ("list_dir", json!({"path": "../secret"}), "invalid path"),
+        ("file_metadata", json!({}), "invalid tool input"),
+        (
+            "file_metadata",
+            json!({"path": "../secret"}),
+            "invalid path",
+        ),
+        (
+            "search_text",
+            json!({"path": "src", "query": ""}),
+            "invalid argument query",
+        ),
+        (
+            "search_text",
+            json!({"path": "src", "query": "needle", "max_results": 0}),
+            "invalid tool input",
+        ),
+        (
+            "search_text",
+            json!({"path": "../secret", "query": "needle"}),
+            "invalid path",
+        ),
+        ("apply_patch", json!({}), "invalid tool input"),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "rename_file", "path": "notes.txt"}}),
+            "invalid tool operation",
+        ),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "delete_file", "path": "../secret"}}),
+            "invalid path",
+        ),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "create_file", "path": "notes.txt"}}),
+            "invalid argument diff",
+        ),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "update_file", "path": "notes.txt"}}),
+            "invalid argument diff",
+        ),
+    ];
+
+    for (name, arguments, expected_prefix) in cases {
+        let error = registry
+            .validate(
+                &ToolName::from(name),
+                &ToolInput::new(CallId::from("call-invalid"), arguments),
+            )
+            .expect_err("invalid input should fail synchronous validation");
+        assert!(
+            error.to_string().starts_with(expected_prefix),
+            "unexpected {name} validation error: {error}"
+        );
+    }
+    assert!(
+        tokio::fs::read_dir(&root)
+            .await
+            .expect("validation root should remain readable")
+            .next_entry()
+            .await
+            .expect("reading validation root should succeed")
+            .is_none(),
+        "synchronous validation must not perform filesystem work"
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
 async fn read_file_lines_tool_returns_requested_line_range_through_registry() {
     let (filesystem, root) = apply_patch_test_filesystem("read-lines").await;
     let path = VirtualPath::try_from("/notes.txt").expect("path is valid");

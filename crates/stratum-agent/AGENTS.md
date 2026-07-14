@@ -14,9 +14,13 @@ legacy stateful `Agent` compatibility path.
   the separate best-effort `TelemetryEventSink`.
 - A durable append must be acknowledged before the kernel mutates its in-memory
   transcript or starts the next external action.
-- Tool calls execute sequentially through `ToolExecutor`. Approval and
-  `ToolExecutionStarted` must be durable before dispatch, and each tool result
-  must be durable before the next tool or model request.
+- Tool calls execute sequentially through `ToolExecutor`. Lookup and synchronous,
+  side-effect-free deterministic input validation happen before approval.
+  Approval and `ToolExecutionStarted` must be durable before dispatch, and each
+  tool result must be durable before the next tool or model request.
+- Cancellation is rechecked after validation, after approval durability
+  boundaries, and immediately before `ToolExecutionStarted`; before started is
+  acknowledged, cancellation prevents dispatch and maps to loop cancellation.
 - The run's supplied `CancellationToken` controls model-stream acquisition and
   polling in `AgentLoop`; the same token is passed to approval and tool
   operations. Cancellation is cooperative: after `ToolExecutionStarted`, the
