@@ -133,15 +133,27 @@ async fn builtin_validation_rejects_every_deterministic_invalid_input_without_fi
     ];
 
     for (name, arguments, expected_prefix) in cases {
-        let error = registry
-            .validate(
-                &ToolName::from(name),
-                &ToolInput::new(CallId::from("call-invalid"), arguments),
-            )
+        let input = ToolInput::new(CallId::from("call-invalid"), arguments);
+        let validation_error = registry
+            .validate(&ToolName::from(name), &input)
             .expect_err("invalid input should fail synchronous validation");
         assert!(
-            error.to_string().starts_with(expected_prefix),
-            "unexpected {name} validation error: {error}"
+            validation_error.to_string().starts_with(expected_prefix),
+            "unexpected {name} validation error: {validation_error}"
+        );
+        let call_error = registry
+            .call(&ToolName::from(name), input, &CancellationToken::new())
+            .await
+            .expect_err("direct calls must revalidate the same invalid input");
+        assert_eq!(
+            rejection_class(&validation_error),
+            rejection_class(&call_error),
+            "validation and call rejection classes differ for {name}"
+        );
+        assert_eq!(
+            validation_error.to_string(),
+            call_error.to_string(),
+            "validation and call rejection messages differ for {name}"
         );
     }
     assert!(
@@ -153,6 +165,52 @@ async fn builtin_validation_rejects_every_deterministic_invalid_input_without_fi
             .expect("reading validation root should succeed")
             .is_none(),
         "synchronous validation must not perform filesystem work"
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+fn rejection_class(error: &ToolError) -> &'static str {
+    match error {
+        ToolError::InvalidInput { .. } => "invalid_input",
+        ToolError::InvalidOperation { .. } => "invalid_operation",
+        ToolError::InvalidPath { .. } => "invalid_path",
+        ToolError::InvalidArgument { .. } => "invalid_argument",
+        _ => "unexpected",
+    }
+}
+
+#[tokio::test]
+async fn apply_patch_schema_requires_diff_only_for_create_and_update() {
+    let (filesystem, root) = apply_patch_test_filesystem("schema").await;
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem)),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
+        .expect("apply patch should register");
+
+    let spec = registry
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == ToolName::from("apply_patch"))
+        .expect("apply patch spec should be registered");
+    let operation_schema = &spec.input_schema["properties"]["operation"];
+
+    assert_eq!(operation_schema["required"], json!(["type", "path"]));
+    assert_eq!(
+        operation_schema["allOf"],
+        json!([{
+            "if": {
+                "properties": {
+                    "type": {"enum": ["create_file", "update_file"]}
+                },
+                "required": ["type"]
+            },
+            "then": {"required": ["diff"]}
+        }])
     );
 
     let _ = tokio::fs::remove_dir_all(root).await;

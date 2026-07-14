@@ -48,7 +48,18 @@ impl ApplyPatchTool {
                                 },
                                 "path": { "type": "string" },
                                 "diff": { "type": "string" }
-                            }
+                            },
+                            "allOf": [{
+                                "if": {
+                                    "properties": {
+                                        "type": {
+                                            "enum": ["create_file", "update_file"]
+                                        }
+                                    },
+                                    "required": ["type"]
+                                },
+                                "then": { "required": ["diff"] }
+                            }]
                         }
                     }
                 }))
