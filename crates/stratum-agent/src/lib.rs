@@ -3,6 +3,7 @@
 pub mod agent_loop;
 pub mod definition;
 pub mod error;
+pub mod tool_executor;
 
 pub(crate) mod r#loop;
 
@@ -11,3 +12,7 @@ pub use agent_loop::{
 };
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
+pub use tool_executor::{
+    AllowAllToolApproval, DenyAllToolApproval, ToolApproval, ToolApprovalError,
+    ToolApprovalRequest, ToolExecutionOutcome, ToolExecutor, ToolExecutorError,
+};
