@@ -5,7 +5,8 @@
 @import "@fontsource-variable/noto-sans";
 
 .ontology-graph-canvas .react-flow__edge-path {
-  stroke-width: 1.25px;
+  stroke-width: 1.5px;
+  stroke-linecap: square;
 }
 
 .ontology-graph-canvas .react-flow__edge.selected .react-flow__edge-path {
@@ -16,6 +17,16 @@
   .react-flow__edge.selectable:focus-visible
   .react-flow__edge-path {
   stroke-width: 3px;
+}
+
+.ontology-graph-canvas .react-flow__panel {
+  margin: 0;
+}
+
+.ontology-graph-canvas .react-flow__minimap {
+  border-radius: 0.375rem;
+  border: 1px solid var(--stratum-line);
+  background: var(--stratum-paper);
 }
 
 @custom-variant dark (&:is(.dark *));

@@ -3,6 +3,7 @@
 import {
   useEffect,
   useMemo,
+  useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react"
@@ -50,13 +51,23 @@ function CanvasInner({
   const { t } = useTranslation()
   const reduceMotion = useReducedMotion()
   const flow = useMemo(() => createOntologyFlow(graph), [graph])
+  const [isDesktop, setIsDesktop] = useState(false)
+
+  useEffect(() => {
+    const check = () => setIsDesktop(window.innerWidth >= 1024)
+    check()
+    window.addEventListener("resize", check)
+    return () => window.removeEventListener("resize", check)
+  }, [])
+
+  const canvasPadding = isDesktop ? 0.28 : 0.15
   const nodes = useMemo(
     () =>
       flow.nodes.map((node) => ({
         ...node,
         className: cn(
           node.className,
-          "rounded-lg focus-visible:outline-2! focus-visible:outline-offset-2! focus-visible:outline-ring!"
+          "transition-all duration-200 focus-visible:outline-2! focus-visible:outline-offset-2! focus-visible:outline-ring!"
         ),
         selected: selection?.kind === "node" && selection.id === node.id,
       })),
@@ -75,8 +86,10 @@ function CanvasInner({
           selected,
           labelStyle: {
             ...edge.labelStyle,
-            fontSize: 14,
+            fontSize: 13,
             fontWeight: 600,
+            padding: "2px 6px",
+            borderRadius: "2px",
           },
           markerEnd:
             typeof edge.markerEnd === "object"
@@ -106,7 +119,7 @@ function CanvasInner({
     if (targets.length === 0) return
     void fitView({
       nodes: targets,
-      padding: 0.8,
+      padding: isDesktop ? 0.35 : 0.15,
       duration: reduceMotion ? 0 : 180,
     })
   }, [edges, fitView, nodes, reduceMotion, selection])
@@ -139,7 +152,7 @@ function CanvasInner({
 
   return (
     <div
-      className="relative h-full min-h-0 w-full bg-stratum-canvas"
+      className="relative h-full min-h-0 w-full"
       role="region"
       aria-label={t("ontology.canvas.label")}
     >
@@ -150,7 +163,7 @@ function CanvasInner({
         edges={edges}
         nodeTypes={nodeTypes}
         fitView
-        fitViewOptions={{ padding: 0.3 }}
+        fitViewOptions={{ padding: canvasPadding }}
         minZoom={0.2}
         maxZoom={2}
         nodesDraggable={false}
@@ -172,15 +185,15 @@ function CanvasInner({
       >
         <Background
           variant={BackgroundVariant.Dots}
-          gap={18}
-          size={1}
-          color="var(--stratum-line-strong)"
+          gap={28}
+          size={1.5}
+          color="var(--stratum-line)"
         />
       </ReactFlow>
-      <div className="absolute bottom-3 left-3 z-10 flex rounded-md border border-stratum-line bg-stratum-paper p-0.5">
+      <div className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 rounded-2xl border border-stratum-line bg-stratum-paper p-1 shadow-stratum-soft">
         <button
           type="button"
-          className="grid size-11 place-items-center rounded-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+          className="grid size-10 place-items-center rounded-xl text-muted-foreground transition-colors hover:bg-stratum-paper-soft hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
           aria-label={t("ontology.canvas.zoomOut")}
           onClick={() => void zoomOut({ duration })}
         >
@@ -188,7 +201,7 @@ function CanvasInner({
         </button>
         <button
           type="button"
-          className="grid size-11 place-items-center rounded-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+          className="grid size-10 place-items-center rounded-xl text-muted-foreground transition-colors hover:bg-stratum-paper-soft hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
           aria-label={t("ontology.canvas.zoomIn")}
           onClick={() => void zoomIn({ duration })}
         >
@@ -196,9 +209,9 @@ function CanvasInner({
         </button>
         <button
           type="button"
-          className="grid size-11 place-items-center rounded-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
+          className="grid size-10 place-items-center rounded-xl text-muted-foreground transition-colors hover:bg-stratum-paper-soft hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring"
           aria-label={t("ontology.canvas.fitView")}
-          onClick={() => void fitView({ padding: 0.3, duration })}
+          onClick={() => void fitView({ padding: canvasPadding, duration })}
         >
           <ScanIcon className="size-4" aria-hidden="true" />
         </button>

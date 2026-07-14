@@ -16,12 +16,14 @@ export function OntologyInspector({
 }: OntologyInspectorProps) {
   const { t } = useTranslation()
   const emptyInspector = (
-    <aside className="h-full bg-stratum-paper p-4">
-      <h2 className="text-sm font-semibold">{t("ontology.inspector.title")}</h2>
-      <p className="mt-3 text-sm text-muted-foreground">
+    <div className="flex h-full flex-col px-4 py-4">
+      <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
+        {t("ontology.inspector.title")}
+      </h2>
+      <p className="mt-4 text-sm text-muted-foreground">
         {t("ontology.inspector.empty")}
       </p>
-    </aside>
+    </div>
   )
   if (!selection || !graph || !schema) return emptyInspector
 
@@ -34,49 +36,54 @@ export function OntologyInspector({
       (edge) => edge.source === selection.id || edge.target === selection.id
     ).length
     return (
-      <aside className="h-full overflow-y-auto bg-stratum-paper p-4">
-        <span className="text-sm text-muted-foreground">
+      <div className="flex h-full min-h-0 flex-col px-4 py-4">
+        <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
           {t("ontology.inspector.objectType")}
         </span>
-        <h2 className="mt-1 text-lg font-semibold">{objectType.name}</h2>
+        <h2 className="mt-1 text-base font-semibold text-foreground">
+          {objectType.name}
+        </h2>
         {objectType.description ? (
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
             {objectType.description}
           </p>
         ) : null}
-        <dl className="my-4 flex gap-6 border-y border-stratum-line py-3 text-sm">
+
+        <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-stratum-line pt-3 text-sm">
           <div>
-            <dt className="text-muted-foreground">
+            <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
               {t("ontology.inspector.properties")}
             </dt>
-            <dd className="font-semibold">{objectType.properties.length}</dd>
+            <dd className="mt-0.5 text-lg font-bold">{objectType.properties.length}</dd>
           </div>
           <div>
-            <dt className="text-muted-foreground">
+            <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
               {t("ontology.inspector.relations")}
             </dt>
-            <dd className="font-semibold">{relationCount}</dd>
+            <dd className="mt-0.5 text-lg font-bold">{relationCount}</dd>
           </div>
         </dl>
-        <h3 className="text-sm font-semibold">
+
+        <h3 className="mt-4 text-xs font-bold uppercase tracking-widest text-muted-foreground">
           {t("ontology.inspector.properties")}
         </h3>
-        <div className="mt-2">
-          {objectType.properties.map((property) => (
+        <div className="mt-2 min-h-0 flex-1 overflow-y-auto -mx-1">
+          {objectType.properties.map((property, index) => (
             <div
               key={property.id}
-              className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 border-t border-stratum-line py-2 text-sm"
+              className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 border-t border-stratum-line/50 px-1 py-2 text-sm"
             >
               <span className="truncate font-medium">{property.name}</span>
-              <span className="text-muted-foreground">
+              <span className="text-xs text-muted-foreground">
                 {property.value_type}
               </span>
               <span
-                className={
+                className={cn(
+                  "text-xs font-medium",
                   property.required
                     ? "text-stratum-action"
                     : "text-muted-foreground"
-                }
+                )}
               >
                 {t(
                   property.required
@@ -87,7 +94,7 @@ export function OntologyInspector({
             </div>
           ))}
         </div>
-      </aside>
+      </div>
     )
   }
 
@@ -98,36 +105,45 @@ export function OntologyInspector({
   const target = schema.object_types.find((item) => item.id === edge.target)
 
   return (
-    <aside className="h-full overflow-y-auto bg-stratum-paper p-4">
-      <span className="text-sm text-muted-foreground">
+    <div className="flex h-full min-h-0 flex-col px-4 py-4">
+      <span className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
         {t("ontology.inspector.linkType")}
       </span>
-      <h2 className="mt-1 text-lg font-semibold">{linkType.name}</h2>
+      <h2 className="mt-1 text-base font-semibold text-foreground">
+        {linkType.name}
+      </h2>
       {linkType.description ? (
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           {linkType.description}
         </p>
       ) : null}
+
       <dl className="mt-4 space-y-3 border-t border-stratum-line pt-3 text-sm">
         <div>
-          <dt className="text-muted-foreground">
+          <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             {t("ontology.inspector.source")}
           </dt>
-          <dd className="font-medium">{source?.name ?? edge.source}</dd>
+          <dd className="mt-0.5 font-medium">{source?.name ?? edge.source}</dd>
         </div>
         <div>
-          <dt className="text-muted-foreground">
+          <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             {t("ontology.inspector.target")}
           </dt>
-          <dd className="font-medium">{target?.name ?? edge.target}</dd>
+          <dd className="mt-0.5 font-medium">{target?.name ?? edge.target}</dd>
         </div>
         <div>
-          <dt className="text-muted-foreground">
+          <dt className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             {t("ontology.inspector.cardinality")}
           </dt>
-          <dd className="font-medium">{cardinalityLabel(edge.cardinality)}</dd>
+          <dd className="mt-0.5 font-bold text-stratum-action">
+            {cardinalityLabel(edge.cardinality)}
+          </dd>
         </div>
       </dl>
-    </aside>
+    </div>
   )
+}
+
+function cn(...classes: (string | boolean)[]) {
+  return classes.filter(Boolean).join(" ")
 }

@@ -108,112 +108,119 @@ export function OntologySourcePanel({
   }
 
   return (
-    <aside className="flex h-full min-h-0 flex-col bg-stratum-paper p-4">
-      <h2 className="text-sm font-semibold">{t("ontology.source.title")}</h2>
-      <div className="mt-3 grid grid-cols-3 rounded-md bg-muted p-1">
-        {(["tag", "draft", "revision"] as const).map((value) => (
-          <button
-            key={value}
-            type="button"
-            className={cn(
-              "h-11 rounded-sm border border-transparent px-2 text-sm focus-visible:outline-2 focus-visible:outline-ring",
-              kind === value
-                ? "border-input bg-stratum-paper text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-            aria-pressed={kind === value}
-            onClick={() => setKind(value)}
-          >
-            {t(`ontology.source.${value}`)}
-          </button>
-        ))}
-      </div>
+    <div className="flex h-full min-h-0 flex-col py-4">
+      <div className="px-4">
+        <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
+          {t("ontology.source.title")}
+        </h2>
+        <div className="mt-2 grid grid-cols-3 rounded-md bg-stratum-paper-soft p-0.5">
+          {(["tag", "draft", "revision"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={cn(
+                "h-9 rounded-sm text-xs font-medium transition-all duration-200 focus-visible:outline-2 focus-visible:outline-ring",
+                kind === value
+                  ? "bg-stratum-paper text-foreground shadow-sm ring-1 ring-stratum-line"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
+              aria-pressed={kind === value}
+              onClick={() => setKind(value)}
+            >
+              {t(`ontology.source.${value}`)}
+            </button>
+          ))}
+        </div>
 
-      {kind === "tag" ? (
-        <form
-          className="mt-2 flex gap-2"
-          onSubmit={(event) => {
-            event.preventDefault()
-            const name = tag.trim()
-            if (name) onSourceChange({ kind: "tag", name })
-          }}
-        >
-          <Input
-            value={tag}
-            onChange={(event) => setTag(event.target.value)}
-            aria-label={t("ontology.source.tagName")}
-            disabled={disabled}
-            className="h-11 md:text-sm"
-          />
-          <Button
-            type="submit"
-            variant="outline"
-            className="h-11 text-sm"
-            disabled={disabled || !tag.trim()}
+        {kind === "tag" ? (
+          <form
+            className="mt-2 flex gap-2"
+            onSubmit={(event) => {
+              event.preventDefault()
+              const name = tag.trim()
+              if (name) onSourceChange({ kind: "tag", name })
+            }}
           >
-            {t("ontology.source.load")}
-          </Button>
-        </form>
-      ) : (
-        <select
-          className="mt-2 h-11 w-full rounded-md border border-input bg-stratum-paper px-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
-          value={
-            source.kind === kind
-              ? source.kind === "revision"
-                ? source.id
-                : source.name
-              : ""
-          }
-          disabled={disabled}
-          aria-label={t(`ontology.source.${kind}`)}
-          onChange={(event) => {
-            const value = event.target.value
-            if (!value) return
-            onSourceChange(
-              kind === "revision" ? { kind, id: value } : { kind, name: value }
-            )
-          }}
-        >
-          <option value="">{t("ontology.source.choose")}</option>
-          {(kind === "draft" ? options.drafts : options.revisions).map(
-            (option) => {
-              const value = "id" in option ? option.id : option.name
-              return (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              )
+            <Input
+              value={tag}
+              onChange={(event) => setTag(event.target.value)}
+              aria-label={t("ontology.source.tagName")}
+              disabled={disabled}
+              className="h-9"
+            />
+            <Button
+              type="submit"
+              variant="outline"
+              className="h-9 shrink-0"
+              disabled={disabled || !tag.trim()}
+            >
+              {t("ontology.source.load")}
+            </Button>
+          </form>
+        ) : (
+          <select
+            className="mt-2 h-9 w-full rounded-md border border-input bg-stratum-paper px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+            value={
+              source.kind === kind
+                ? source.kind === "revision"
+                  ? source.id
+                  : source.name
+                : ""
             }
-          )}
-        </select>
-      )}
+            disabled={disabled}
+            aria-label={t(`ontology.source.${kind}`)}
+            onChange={(event) => {
+              const value = event.target.value
+              if (!value) return
+              onSourceChange(
+                kind === "revision" ? { kind, id: value } : { kind, name: value }
+              )
+            }}
+          >
+            <option value="">{t("ontology.source.choose")}</option>
+            {(kind === "draft" ? options.drafts : options.revisions).map(
+              (option) => {
+                const value = "id" in option ? option.id : option.name
+                return (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                )
+              }
+            )}
+          </select>
+        )}
 
-      <div className="relative mt-3">
-        <SearchIcon
-          className="pointer-events-none absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground"
-          aria-hidden="true"
-        />
-        <Input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={t("ontology.source.search")}
-          aria-label={t("ontology.source.search")}
-          className="h-11 pl-8 md:text-sm"
-        />
+        <div className="relative mt-2">
+          <SearchIcon
+            className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("ontology.source.search")}
+            aria-label={t("ontology.source.search")}
+            className="h-9 pl-7 text-sm"
+          />
+        </div>
       </div>
 
       <nav
-        className="mt-3 min-h-0 flex-1 overflow-y-auto"
+        className="mt-3 min-h-0 flex-1 overflow-y-auto px-4"
         aria-label={t("ontology.source.index")}
       >
-        <div className="flex items-center justify-between border-b border-stratum-line py-2 text-sm font-semibold">
-          <span>{t("ontology.source.objectTypes")}</span>
-          <span className="text-muted-foreground">{nodes.length}</span>
+        <div className="flex items-center justify-between border-b border-stratum-line py-1.5">
+          <span className="text-xs font-semibold text-muted-foreground">
+            {t("ontology.source.objectTypes")}
+          </span>
+          <span className="text-xs font-medium text-muted-foreground">{nodes.length}</span>
         </div>
         <div
           role="listbox"
           aria-label={t("ontology.source.objectTypes")}
           onKeyDown={(event) => handleListboxKeyDown(event, setNodeFocusId)}
+          className="space-y-0.5 py-1"
         >
           {nodes.map((node) => {
             const selected =
@@ -227,29 +234,37 @@ export function OntologySourcePanel({
                 data-option-id={node.id}
                 tabIndex={node.id === nodeTabStopId ? 0 : -1}
                 className={cn(
-                  "mt-1 flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
-                  selected && "bg-stratum-action/10 font-semibold"
+                  "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left transition-all duration-150 focus-visible:outline-2 focus-visible:outline-ring",
+                  selected
+                    ? "bg-stratum-action/10 font-semibold text-foreground"
+                    : "text-muted-foreground hover:bg-stratum-paper-soft hover:text-foreground"
                 )}
                 onClick={() => {
                   setNodeFocusId(node.id)
                   onSelectionChange({ kind: "node", id: node.id })
                 }}
               >
-                <span className="size-2 rounded-sm border border-stratum-action" />
-                <span className="truncate">{node.label}</span>
+                <span className={cn(
+                  "size-2 rounded-none border",
+                  selected ? "border-stratum-action bg-stratum-action" : "border-muted-foreground/40"
+                )} />
+                <span className="truncate text-sm">{node.label}</span>
               </button>
             )
           })}
         </div>
 
-        <div className="mt-3 flex items-center justify-between border-b border-stratum-line py-2 text-sm font-semibold">
-          <span>{t("ontology.source.linkTypes")}</span>
-          <span className="text-muted-foreground">{edges.length}</span>
+        <div className="mt-3 flex items-center justify-between border-b border-stratum-line py-1.5">
+          <span className="text-xs font-semibold text-muted-foreground">
+            {t("ontology.source.linkTypes")}
+          </span>
+          <span className="text-xs font-medium text-muted-foreground">{edges.length}</span>
         </div>
         <div
           role="listbox"
           aria-label={t("ontology.source.linkTypes")}
           onKeyDown={(event) => handleListboxKeyDown(event, setEdgeFocusId)}
+          className="space-y-0.5 py-1"
         >
           {edges.map((edge) => {
             const selected =
@@ -263,17 +278,19 @@ export function OntologySourcePanel({
                 data-option-id={edge.id}
                 tabIndex={edge.id === edgeTabStopId ? 0 : -1}
                 className={cn(
-                  "mt-1 flex min-h-11 w-full items-center gap-2 rounded-md px-2 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
-                  selected && "bg-stratum-action/10 font-semibold"
+                  "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left transition-all duration-150 focus-visible:outline-2 focus-visible:outline-ring",
+                  selected
+                    ? "bg-stratum-action/10 font-semibold text-foreground"
+                    : "text-muted-foreground hover:bg-stratum-paper-soft hover:text-foreground"
                 )}
                 onClick={() => {
                   setEdgeFocusId(edge.id)
                   onSelectionChange({ kind: "edge", id: edge.id })
                 }}
               >
-                <span className="h-px w-3 bg-stratum-action" />
-                <span className="min-w-0 flex-1 truncate">{edge.label}</span>
-                <span className="text-muted-foreground">
+                <span className="h-px w-3 bg-muted-foreground/40" />
+                <span className="min-w-0 flex-1 truncate text-sm">{edge.label}</span>
+                <span className="text-xs text-muted-foreground">
                   {cardinalityLabel(edge.cardinality)}
                 </span>
               </button>
@@ -281,6 +298,6 @@ export function OntologySourcePanel({
           })}
         </div>
       </nav>
-    </aside>
+    </div>
   )
 }

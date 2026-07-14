@@ -61,7 +61,7 @@ export function SiteNavbar({
   const indicatorRef = useRef<HTMLSpanElement>(null)
   const { contextSafe } = useGSAP({ scope: navRef })
 
-  const isLongzhong = activeSection === "longzhong"
+  const isLongzhong = activeSection === "longzhong" || activeSection === "ontology"
   const resolvedLanguage = i18n.resolvedLanguage ?? i18n.language
   const [isDark, setIsDark] = useState(() => isDarkMode())
 

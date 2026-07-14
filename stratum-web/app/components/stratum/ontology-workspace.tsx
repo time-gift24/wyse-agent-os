@@ -8,6 +8,7 @@ import {
   RefreshCwIcon,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
+import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 
 import { OntologyDrawer } from "~/components/stratum/ontology-drawer"
 import { OntologyGraphCanvas } from "~/components/stratum/ontology-graph-canvas"
@@ -17,19 +18,20 @@ import { Button } from "~/components/ui/button"
 import { useOntologyWorkspace } from "~/hooks/use-ontology-workspace"
 import type { SchemaSource } from "~/lib/ontology-api"
 import type { OntologySelection } from "~/lib/ontology-graph"
+import { cn } from "~/lib/utils"
 
 function LoadingCanvas({ label }: { label: string }) {
   return (
     <div
-      className="relative h-full overflow-hidden bg-stratum-canvas"
+      className="relative h-full overflow-hidden"
       role="status"
       aria-live="polite"
       aria-busy="true"
     >
       <span className="sr-only">{label}</span>
-      <div className="absolute top-[24%] left-[12%] h-16 w-44 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />
-      <div className="absolute top-[48%] left-[42%] h-16 w-44 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />
-      <div className="absolute top-[28%] left-[70%] h-16 w-44 animate-pulse rounded-lg bg-muted motion-reduce:animate-none" />
+      <div className="absolute top-[24%] left-[12%] h-16 w-44 animate-pulse rounded-lg bg-stratum-paper-soft motion-reduce:animate-none" />
+      <div className="absolute top-[48%] left-[42%] h-16 w-44 animate-pulse rounded-lg bg-stratum-paper-soft motion-reduce:animate-none" />
+      <div className="absolute top-[28%] left-[70%] h-16 w-44 animate-pulse rounded-lg bg-stratum-paper-soft motion-reduce:animate-none" />
     </div>
   )
 }
@@ -44,6 +46,7 @@ export function OntologyWorkspace() {
   const inspectorButtonRef = useRef<HTMLButtonElement>(null)
   const graph = "graph" in state ? state.graph : undefined
   const schema = "schema" in state ? state.schema : undefined
+  const reduceMotion = useReducedMotion()
 
   useEffect(() => setSelection(null), [state.source])
 
@@ -56,18 +59,6 @@ export function OntologyWorkspace() {
     if (!exists) setSelection(null)
   }, [graph, selection])
 
-  useEffect(() => {
-    const desktopQuery = window.matchMedia("(min-width: 1024px)")
-    const closeMobileDrawers = (event: MediaQueryListEvent) => {
-      if (!event.matches) return
-      setSourceOpen(false)
-      setInspectorOpen(false)
-    }
-
-    desktopQuery.addEventListener("change", closeMobileDrawers)
-    return () => desktopQuery.removeEventListener("change", closeMobileDrawers)
-  }, [])
-
   const handleSourceChange = (source: SchemaSource) => {
     setSourceOpen(false)
     setSelection(null)
@@ -76,10 +67,6 @@ export function OntologyWorkspace() {
 
   const handleSelectionChange = (next: OntologySelection) => {
     setSelection(next)
-    if (next && !window.matchMedia("(min-width: 1024px)").matches) {
-      setSourceOpen(false)
-      setInspectorOpen(true)
-    }
   }
 
   const sourcePanel = (
@@ -97,125 +84,175 @@ export function OntologyWorkspace() {
     <OntologyInspector graph={graph} schema={schema} selection={selection} />
   )
 
+  const floatingPanelVariants = {
+    hidden: {
+      scale: reduceMotion ? 1 : 0.97,
+      opacity: reduceMotion ? 1 : 0,
+      y: reduceMotion ? 0 : -8,
+    },
+    visible: { scale: 1, y: 0, opacity: 1 },
+  }
+
   return (
-    <section className="mx-auto h-[100dvh] min-h-[36rem] max-w-[100rem] px-4 pt-24 pb-4 md:px-8 md:pt-28 md:pb-6">
-      <div className="grid h-full min-h-0 overflow-hidden border-y border-stratum-line bg-stratum-paper lg:grid-cols-[15rem_minmax(0,1fr)_19rem] lg:border-x">
-        <div className="hidden min-h-0 border-r border-stratum-line lg:block">
-          {sourcePanel}
+    <section className="relative min-h-[100dvh] w-full pt-24 md:pt-28">
+      {/* Full screen Canvas Background */}
+      <div className="fixed inset-0 -z-10 h-full w-full bg-stratum-canvas" />
+
+      {/* Demo Status Banner */}
+      {state.phase === "demo" ? (
+        <motion.div
+          key="demo-banner"
+          initial={false}
+          variants={floatingPanelVariants}
+          animate="visible"
+          transition={{ duration: reduceMotion ? 0 : 0.25, ease: "easeOut" }}
+          className="fixed inset-x-0 top-28 z-40 px-4 md:px-8"
+        >
+          <div
+            role="status"
+            className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-2 gap-y-1 rounded-2xl border border-stratum-line bg-stratum-paper/90 px-4 py-3 shadow-stratum-soft backdrop-blur-sm"
+          >
+            <div className="flex h-6 w-6 items-center justify-center rounded-full bg-stratum-action/10">
+              <InfoIcon className="size-3.5 text-stratum-action" aria-hidden="true" />
+            </div>
+            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2">
+              <strong className="text-sm font-semibold text-foreground">
+                {t("ontology.state.demo")}
+              </strong>
+              <span className="text-sm text-muted-foreground">
+                {t(`ontology.state.${state.demoReason}`)}
+              </span>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={retry}
+            >
+              <RefreshCwIcon className="mr-1 size-3.5" aria-hidden="true" />
+              {t("ontology.state.retry")}
+            </Button>
+          </div>
+        </motion.div>
+      ) : null}
+
+      {/* Mobile Toggle Buttons */}
+      <div className="fixed top-28 z-40 flex w-full items-center justify-between px-4 md:px-8 lg:hidden">
+        <Button
+          ref={sourceButtonRef}
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-expanded={sourceOpen}
+          onClick={() => setSourceOpen(true)}
+          className="shadow-stratum-soft"
+        >
+          <ListTreeIcon className="mr-1.5 size-3.5" aria-hidden="true" />
+          {t("ontology.source.index")}
+        </Button>
+        <Button
+          ref={inspectorButtonRef}
+          type="button"
+          variant="outline"
+          size="sm"
+          aria-expanded={inspectorOpen}
+          onClick={() => setInspectorOpen(true)}
+          className="shadow-stratum-soft"
+        >
+          <PanelRightIcon className="mr-1.5 size-3.5" aria-hidden="true" />
+          {t("ontology.inspector.title")}
+        </Button>
+      </div>
+
+      {/* Desktop Floating Source Panel */}
+      <AnimatePresence initial={false}>
+        <div className="hidden lg:block">
+          <motion.aside
+            initial="hidden"
+            animate="visible"
+            variants={floatingPanelVariants}
+            transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeOut", delay: 0.1 }}
+            className="fixed left-12 top-32 z-30 w-60 max-h-[calc(100dvh-10rem)]"
+          >
+            <div className="flex flex-col overflow-hidden rounded-2xl border border-stratum-line bg-stratum-paper shadow-stratum-soft">
+              {sourcePanel}
+            </div>
+          </motion.aside>
         </div>
+      </AnimatePresence>
 
-        <div className="relative min-h-0 overflow-hidden">
-          <div className="pointer-events-none absolute inset-x-0 top-0 z-20">
-            {state.phase === "demo" ? (
-              <div
-                role="status"
-                className="pointer-events-auto flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 border-b border-stratum-line bg-stratum-paper-soft px-3 py-1.5 text-sm"
-              >
-                <InfoIcon
-                  className="size-4 shrink-0 text-stratum-action"
-                  aria-hidden="true"
-                />
-                <div className="min-w-40 flex-1">
-                  <strong className="mr-2">{t("ontology.state.demo")}</strong>
-                  <span className="text-muted-foreground">
-                    {t(`ontology.state.${state.demoReason}`)}
-                  </span>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-11 shrink-0 text-sm"
-                  onClick={retry}
-                >
-                  <RefreshCwIcon aria-hidden="true" />
-                  {t("ontology.state.retry")}
-                </Button>
-              </div>
-            ) : null}
+      {/* Desktop Floating Inspector Panel */}
+      <AnimatePresence initial={false}>
+        <div className="hidden lg:block">
+          <motion.aside
+            initial="hidden"
+            animate="visible"
+            variants={floatingPanelVariants}
+            transition={{ duration: reduceMotion ? 0 : 0.3, ease: "easeOut", delay: 0.15 }}
+            className="fixed right-6 top-32 z-30 w-60 max-h-[calc(100dvh-10rem)]"
+          >
+            <div className="flex flex-col overflow-hidden rounded-2xl border border-stratum-line bg-stratum-paper shadow-stratum-soft">
+              {inspector}
+            </div>
+          </motion.aside>
+        </div>
+      </AnimatePresence>
 
-            <div className="flex items-start justify-between gap-2 p-3 lg:hidden">
+      {/* Graph Canvas - Full Screen */}
+      <div className="relative h-[calc(100dvh-7rem)] w-full">
+        {state.phase === "loading" ? (
+          <LoadingCanvas label={t("ontology.state.loading")} />
+        ) : null}
+        {(state.phase === "ready" || state.phase === "demo") && graph ? (
+          <OntologyGraphCanvas
+            graph={graph}
+            selection={selection}
+            onSelectionChange={handleSelectionChange}
+          />
+        ) : null}
+        {state.phase === "empty" ? (
+          <div
+            className="grid h-full place-items-center px-6 text-center"
+            role="status"
+            aria-live="polite"
+          >
+            <div className="max-w-md">
+              <h2 className="text-lg font-semibold">
+                {t("ontology.state.emptyTitle")}
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {t("ontology.state.emptyDescription")}
+              </p>
+            </div>
+          </div>
+        ) : null}
+        {state.phase === "error" ? (
+          <div
+            className="grid h-full place-items-center px-6 text-center"
+            role="alert"
+          >
+            <div className="max-w-md">
+              <h2 className="text-lg font-semibold">
+                {t("ontology.state.errorTitle")}
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {t("ontology.state.errorDescription")}
+              </p>
               <Button
-                ref={sourceButtonRef}
+                className="mt-4"
                 type="button"
                 variant="outline"
-                className="pointer-events-auto h-11 text-sm"
-                aria-expanded={sourceOpen}
-                onClick={() => setSourceOpen(true)}
+                onClick={retry}
               >
-                <ListTreeIcon aria-hidden="true" />
-                {t("ontology.source.index")}
-              </Button>
-              <Button
-                ref={inspectorButtonRef}
-                type="button"
-                variant="outline"
-                className="pointer-events-auto h-11 text-sm"
-                aria-expanded={inspectorOpen}
-                onClick={() => setInspectorOpen(true)}
-              >
-                <PanelRightIcon aria-hidden="true" />
-                {t("ontology.inspector.title")}
+                <RefreshCwIcon className="mr-2 size-4" aria-hidden="true" />
+                {t("ontology.state.retry")}
               </Button>
             </div>
           </div>
-
-          {state.phase === "loading" ? (
-            <LoadingCanvas label={t("ontology.state.loading")} />
-          ) : null}
-          {(state.phase === "ready" || state.phase === "demo") && graph ? (
-            <OntologyGraphCanvas
-              graph={graph}
-              selection={selection}
-              onSelectionChange={handleSelectionChange}
-            />
-          ) : null}
-          {state.phase === "empty" ? (
-            <div
-              className="grid h-full place-items-center bg-stratum-canvas px-6 text-center"
-              role="status"
-              aria-live="polite"
-            >
-              <div className="max-w-md">
-                <h2 className="text-lg font-semibold">
-                  {t("ontology.state.emptyTitle")}
-                </h2>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {t("ontology.state.emptyDescription")}
-                </p>
-              </div>
-            </div>
-          ) : null}
-          {state.phase === "error" ? (
-            <div
-              className="grid h-full place-items-center bg-stratum-canvas px-6 text-center"
-              role="alert"
-            >
-              <div className="max-w-md">
-                <h2 className="text-lg font-semibold">
-                  {t("ontology.state.errorTitle")}
-                </h2>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {t("ontology.state.errorDescription")}
-                </p>
-                <Button
-                  className="mt-4 h-11 text-sm"
-                  type="button"
-                  variant="outline"
-                  onClick={retry}
-                >
-                  <RefreshCwIcon aria-hidden="true" />
-                  {t("ontology.state.retry")}
-                </Button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="hidden min-h-0 border-l border-stratum-line lg:block">
-          {inspector}
-        </div>
+        ) : null}
       </div>
 
+      {/* Mobile Drawers */}
       <OntologyDrawer
         open={sourceOpen}
         side="left"

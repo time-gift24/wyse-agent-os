@@ -39,7 +39,7 @@ export function OntologyDrawer({
       ref={dialogRef}
       aria-label={label}
       className={cn(
-        "fixed inset-y-0 m-0 h-dvh max-h-none w-[min(22rem,calc(100vw-2rem))] max-w-none border-0 bg-stratum-paper p-0 text-foreground backdrop:bg-foreground/25 lg:hidden",
+        "fixed inset-y-0 m-0 h-dvh max-h-none w-[min(22rem,calc(100vw-2rem))] max-w-none border-0 bg-stratum-paper p-0 text-foreground backdrop:bg-foreground/20 lg:hidden",
         side === "left" ? "mr-auto" : "ml-auto"
       )}
       onClose={() => {
@@ -55,17 +55,19 @@ export function OntologyDrawer({
       }}
     >
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex items-center justify-between border-b border-stratum-line px-4 py-3">
-          <h2 className="text-sm font-semibold">{label}</h2>
+        <div className="flex items-center justify-between border-b border-stratum-line px-4 py-2">
+          <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">
+            {label}
+          </h2>
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="size-11"
+            className="size-9 text-muted-foreground hover:text-foreground"
             aria-label={closeLabel}
             onClick={() => onOpenChange(false)}
           >
-            <XIcon aria-hidden="true" />
+            <XIcon className="size-4" aria-hidden="true" />
           </Button>
         </div>
         <div className="min-h-0 flex-1">{children}</div>
