@@ -2,8 +2,32 @@
 
 ## Scope
 
-`stratum-agent` owns the active turn loop, turn commands, tool approval events,
-cancellation, conversation history, and turn resumption.
+`stratum-agent` contains the session-independent `AgentLoop` kernel and the
+legacy stateful `Agent` compatibility path.
+
+## AgentLoop Kernel
+
+- `AgentLoop` consumes a caller-preloaded `LoopContext` plus user prompts. It
+  does not own session creation, history loading, an `AgentStore`, or an
+  `EventStreamBus`.
+- Required transitions use `DurableEventSink`; partial output and progress use
+  the separate best-effort `TelemetryEventSink`.
+- A durable append must be acknowledged before the kernel mutates its in-memory
+  transcript or starts the next external action.
+- Tool calls execute sequentially through `ToolExecutor`. Approval and
+  `ToolExecutionStarted` must be durable before dispatch, and each tool result
+  must be durable before the next tool or model request.
+- The run's supplied `CancellationToken` propagates through model and tool
+  operations. Cancellation is cooperative: after `ToolExecutionStarted`, the
+  caller must keep polling the loop so it can await and record the outcome.
+  A durable start without a result is an unknown outcome and is never retried
+  automatically by the kernel.
+
+## Legacy Agent Compatibility
+
+The following rules describe the existing `Agent`, session, resume, store, and
+`EventStreamBus` integration. This remains temporary compatibility code and is
+not the ownership model for the new `AgentLoop` kernel.
 
 - The Agent receives an injected `EventStreamBus` for event delivery and an
   injected `AgentStore` for durable resumption.
@@ -13,7 +37,7 @@ cancellation, conversation history, and turn resumption.
   responsibilities; the Agent uses the store to restore durable state and
   advance its resume position.
 
-## Turn Control
+## Turn Control (Legacy Agent)
 
 - Use a bounded MPSC channel for interactive commands sent to an active turn.
 - Keep cancellation on `CancellationToken` and prioritize it in `tokio::select!`.
@@ -21,7 +45,7 @@ cancellation, conversation history, and turn resumption.
 - Publish `tool_approval_requested` successfully before waiting.
 - Keep user-message queuing separate until its behavior is implemented.
 
-## Resume
+## Resume (Legacy Agent)
 
 - `Agent::resume()` takes no user message. It loads the injected store and
   continues the unfinished turn with the same persisted `run_id` and `turn_id`.

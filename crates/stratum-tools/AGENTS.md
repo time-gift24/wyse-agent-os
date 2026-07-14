@@ -24,3 +24,14 @@
 - `RequireApproval` requires approval for every tool.
 - Permission mode and registration metadata are immutable after sharing the registry.
 - Keep provider-visible specs independent from runtime permission metadata.
+
+## Cancellation
+
+- `ToolRegistry::call` propagates the same borrowed `CancellationToken` to the
+  selected `Tool::call`.
+- Builtin tools check for pre-cancellation before starting external work and
+  return the typed cancellation error.
+- Cancellation is cooperative. Effects already issued are not rolled back, and
+  cancellation does not prove that no external effect occurred.
+- Once a caller records that tool execution started, it must keep awaiting the
+  operation and record its outcome rather than dropping or racing the future.
