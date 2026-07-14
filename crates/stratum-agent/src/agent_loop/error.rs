@@ -145,6 +145,15 @@ pub enum AgentLoopError {
         #[source]
         source: DurableEventSinkError,
     },
+    /// Recording a terminal event failed after another loop operation had already failed.
+    #[error("durable terminal agent event was not acknowledged")]
+    TerminalDurability {
+        /// Operation failure that initiated terminal recording.
+        operation: Box<AgentLoopError>,
+        /// Durable terminal event sink failure, which is the primary error source.
+        #[source]
+        source: DurableEventSinkError,
+    },
     /// The model provider failed before producing a recoverable response.
     #[error("llm operation failed")]
     Llm {

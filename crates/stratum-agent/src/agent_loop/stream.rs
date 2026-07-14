@@ -21,6 +21,7 @@ struct PendingToolCall {
     call_id: Option<CallId>,
     name: Option<String>,
     arguments: String,
+    unemitted_arguments: String,
 }
 
 pub(super) async fn consume_assistant_stream(
@@ -99,14 +100,22 @@ pub(super) async fn consume_assistant_stream(
                 }
                 pending.arguments.push_str(&delta.arguments_delta);
                 if let Some(call_id) = &pending.call_id {
+                    let arguments_delta = if pending.unemitted_arguments.is_empty() {
+                        delta.arguments_delta
+                    } else {
+                        pending.unemitted_arguments.push_str(&delta.arguments_delta);
+                        std::mem::take(&mut pending.unemitted_arguments)
+                    };
                     telemetry
                         .emit(AgentTelemetryEvent::ToolCallDelta {
                             llm_call_id: llm_call_id.clone(),
                             call_id: call_id.clone(),
                             name: pending.name.clone(),
-                            arguments_delta: delta.arguments_delta,
+                            arguments_delta,
                         })
                         .await;
+                } else {
+                    pending.unemitted_arguments.push_str(&delta.arguments_delta);
                 }
             }
             ChatStreamEvent::Finished {

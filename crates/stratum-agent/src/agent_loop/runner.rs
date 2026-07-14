@@ -70,22 +70,36 @@ impl AgentLoop {
             .await;
         match result {
             Ok(outcome) => Ok(outcome),
-            Err(error @ AgentLoopError::Durability { .. }) => Err(error),
-            Err(error @ AgentLoopError::Cancelled) => {
-                self.durable_events
-                    .append(DurableAgentEvent::LoopCancelled { usage })
-                    .await?;
-                Err(error)
-            }
-            Err(error) => {
-                self.durable_events
-                    .append(DurableAgentEvent::LoopFailed {
+            Err(
+                error @ (AgentLoopError::Durability { .. }
+                | AgentLoopError::TerminalDurability { .. }),
+            ) => Err(error),
+            Err(error @ AgentLoopError::Cancelled) => Err(self
+                .append_terminal(DurableAgentEvent::LoopCancelled { usage }, error)
+                .await),
+            Err(error) => Err(self
+                .append_terminal(
+                    DurableAgentEvent::LoopFailed {
                         error_text: error.to_string(),
                         usage,
-                    })
-                    .await?;
-                Err(error)
-            }
+                    },
+                    error,
+                )
+                .await),
+        }
+    }
+
+    async fn append_terminal(
+        &self,
+        event: DurableAgentEvent,
+        operation: AgentLoopError,
+    ) -> AgentLoopError {
+        match self.durable_events.append(event).await {
+            Ok(()) => operation,
+            Err(source) => AgentLoopError::TerminalDurability {
+                operation: Box::new(operation),
+                source,
+            },
         }
     }
 
