@@ -2,7 +2,10 @@
 
 use std::{
     collections::BTreeMap,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -12,12 +15,48 @@ use stratum_core::{
     AgentEvent, AgentId, AgentTelemetryEvent, DurableAgentEvent, EventSource, LlmCallRole,
     LlmEvent, RunId, RuntimeEvent, StreamEnvelope, TurnId,
 };
+use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use super::{DurableEventSink, DurableEventSinkError, TelemetryEventSink};
 use crate::EventStreamBus;
 
 const TELEMETRY_PUBLISH_TIMEOUT: Duration = Duration::from_millis(100);
+const TELEMETRY_QUEUE_CAPACITY: usize = 256;
+const DURABLE_QUEUE_CAPACITY: usize = 16;
+
+struct QueuedTelemetry {
+    sequence: u64,
+    event_type: &'static str,
+    envelope: StreamEnvelope,
+}
+
+struct QueuedDurable {
+    sequence: u64,
+    envelope: StreamEnvelope,
+    acknowledgment: oneshot::Sender<Result<(), crate::EventStreamBusError>>,
+}
+
+struct WorkerReceivers {
+    durable: mpsc::Receiver<QueuedDurable>,
+    telemetry: mpsc::Receiver<QueuedTelemetry>,
+}
+
+#[derive(Default)]
+struct EnqueueState {
+    next_sequence: u64,
+}
+
+impl EnqueueState {
+    fn take_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("agent event sequence should not overflow");
+        sequence
+    }
+}
 
 /// Adds run, agent, and turn scope before publishing agent-loop events.
 pub struct ScopedAgentEventSink {
@@ -26,6 +65,11 @@ pub struct ScopedAgentEventSink {
     run_id: RunId,
     turn_id: TurnId,
     event_bus: Arc<dyn EventStreamBus>,
+    durable: mpsc::Sender<QueuedDurable>,
+    telemetry: mpsc::Sender<QueuedTelemetry>,
+    receivers: Mutex<Option<WorkerReceivers>>,
+    enqueue: Mutex<EnqueueState>,
+    telemetry_drop_reported: Arc<AtomicBool>,
 }
 
 impl ScopedAgentEventSink {
@@ -38,13 +82,52 @@ impl ScopedAgentEventSink {
         turn_id: TurnId,
         event_bus: Arc<dyn EventStreamBus>,
     ) -> Self {
-        Self {
+        let (durable, durable_receiver) = mpsc::channel(DURABLE_QUEUE_CAPACITY);
+        let (telemetry, telemetry_receiver) = mpsc::channel(TELEMETRY_QUEUE_CAPACITY);
+        let sink = Self {
             agent_id,
             agent_name: agent_name.into(),
             run_id,
             turn_id,
             event_bus,
-        }
+            durable,
+            telemetry,
+            receivers: Mutex::new(Some(WorkerReceivers {
+                durable: durable_receiver,
+                telemetry: telemetry_receiver,
+            })),
+            enqueue: Mutex::new(EnqueueState::default()),
+            telemetry_drop_reported: Arc::new(AtomicBool::new(false)),
+        };
+        sink.start_worker();
+        sink
+    }
+
+    fn start_worker(&self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let Some(receivers) = self
+            .receivers
+            .lock()
+            .expect("agent event receiver lock should not be poisoned")
+            .take()
+        else {
+            return;
+        };
+        let event_bus = Arc::clone(&self.event_bus);
+        let telemetry_drop_reported = Arc::clone(&self.telemetry_drop_reported);
+        let scope = EventScope {
+            agent_id: self.agent_id,
+            run_id: self.run_id,
+            turn_id: self.turn_id,
+        };
+        runtime.spawn(run_worker(
+            receivers,
+            event_bus,
+            telemetry_drop_reported,
+            scope,
+        ));
     }
 
     fn durable_agent_event(
@@ -198,54 +281,251 @@ impl ScopedAgentEventSink {
 impl DurableEventSink for ScopedAgentEventSink {
     async fn append(&self, event: DurableAgentEvent) -> Result<(), DurableEventSinkError> {
         let event = self.durable_agent_event(event)?;
-        self.event_bus.publish(self.envelope(event)).await?;
+        self.start_worker();
+        let (acknowledgment, result) = oneshot::channel();
+        let permit = self
+            .durable
+            .reserve()
+            .await
+            .map_err(|_| DurableEventSinkError::PublisherUnavailable)?;
+        {
+            let mut enqueue = self
+                .enqueue
+                .lock()
+                .expect("agent event enqueue lock should not be poisoned");
+            permit.send(QueuedDurable {
+                sequence: enqueue.take_sequence(),
+                envelope: self.envelope(event),
+                acknowledgment,
+            });
+        }
+        result
+            .await
+            .map_err(|_| DurableEventSinkError::PublisherUnavailable)??;
         Ok(())
     }
 }
 
-#[async_trait]
 impl TelemetryEventSink for ScopedAgentEventSink {
-    async fn emit(&self, event: AgentTelemetryEvent) {
+    fn emit(&self, event: AgentTelemetryEvent) {
+        self.start_worker();
         let event_type = event.event_type();
         let Some(event) = self.telemetry_agent_event(event) else {
             return;
         };
-        match tokio::time::timeout(
-            TELEMETRY_PUBLISH_TIMEOUT,
-            self.event_bus.publish(self.envelope(event)),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+        let result = {
+            let mut enqueue = self
+                .enqueue
+                .lock()
+                .expect("agent event enqueue lock should not be poisoned");
+            self.telemetry.try_send(QueuedTelemetry {
+                sequence: enqueue.take_sequence(),
+                event_type,
+                envelope: self.envelope(event),
+            })
+        };
+        if result.is_err() {
+            report_telemetry_drop(
+                self.telemetry_drop_reported.as_ref(),
+                EventScope {
+                    agent_id: self.agent_id,
+                    run_id: self.run_id,
+                    turn_id: self.turn_id,
+                },
+                event_type,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EventScope {
+    agent_id: AgentId,
+    run_id: RunId,
+    turn_id: TurnId,
+}
+
+async fn run_worker(
+    mut receivers: WorkerReceivers,
+    event_bus: Arc<dyn EventStreamBus>,
+    telemetry_drop_reported: Arc<AtomicBool>,
+    scope: EventScope,
+) {
+    let mut held_telemetry = None;
+    let mut durable_fence = None;
+    loop {
+        if let Ok(durable) = receivers.durable.try_recv() {
+            publish_durable(
+                durable,
+                &mut receivers.telemetry,
+                &mut held_telemetry,
+                &mut durable_fence,
+                event_bus.as_ref(),
+                telemetry_drop_reported.as_ref(),
+                scope,
+            )
+            .await;
+            continue;
+        }
+        if let Some(telemetry) = held_telemetry.take() {
+            publish_telemetry(
+                telemetry,
+                durable_fence,
+                event_bus.as_ref(),
+                telemetry_drop_reported.as_ref(),
+                scope,
+            )
+            .await;
+            continue;
+        }
+        tokio::select! {
+            biased;
+            durable = receivers.durable.recv() => {
+                let Some(durable) = durable else { break };
+                publish_durable(
+                    durable,
+                    &mut receivers.telemetry,
+                    &mut held_telemetry,
+                    &mut durable_fence,
+                    event_bus.as_ref(),
+                    telemetry_drop_reported.as_ref(),
+                    scope,
+                ).await;
+            }
+            telemetry = receivers.telemetry.recv() => {
+                let Some(telemetry) = telemetry else { break };
+                publish_telemetry(
+                    telemetry,
+                    durable_fence,
+                    event_bus.as_ref(),
+                    telemetry_drop_reported.as_ref(),
+                    scope,
+                ).await;
+            }
+        }
+    }
+}
+
+async fn publish_durable(
+    durable: QueuedDurable,
+    telemetry_receiver: &mut mpsc::Receiver<QueuedTelemetry>,
+    held_telemetry: &mut Option<QueuedTelemetry>,
+    durable_fence: &mut Option<u64>,
+    event_bus: &dyn EventStreamBus,
+    telemetry_drop_reported: &AtomicBool,
+    scope: EventScope,
+) {
+    discard_telemetry_before(
+        durable.sequence,
+        telemetry_receiver,
+        held_telemetry,
+        telemetry_drop_reported,
+        scope,
+    );
+    *durable_fence = Some(durable.sequence);
+    let result = event_bus.publish(durable.envelope).await;
+    let _ = durable.acknowledgment.send(result);
+}
+
+fn discard_telemetry_before(
+    sequence: u64,
+    telemetry_receiver: &mut mpsc::Receiver<QueuedTelemetry>,
+    held_telemetry: &mut Option<QueuedTelemetry>,
+    telemetry_drop_reported: &AtomicBool,
+    scope: EventScope,
+) {
+    if held_telemetry
+        .as_ref()
+        .is_some_and(|telemetry| telemetry.sequence < sequence)
+    {
+        let dropped = held_telemetry
+            .take()
+            .expect("held telemetry should be present");
+        report_telemetry_drop(telemetry_drop_reported, scope, dropped.event_type);
+    }
+    if held_telemetry.is_some() {
+        return;
+    }
+    while let Ok(telemetry) = telemetry_receiver.try_recv() {
+        if telemetry.sequence >= sequence {
+            *held_telemetry = Some(telemetry);
+            break;
+        }
+        report_telemetry_drop(telemetry_drop_reported, scope, telemetry.event_type);
+    }
+}
+
+async fn publish_telemetry(
+    telemetry: QueuedTelemetry,
+    durable_fence: Option<u64>,
+    event_bus: &dyn EventStreamBus,
+    telemetry_drop_reported: &AtomicBool,
+    scope: EventScope,
+) {
+    if durable_fence.is_some_and(|sequence| telemetry.sequence < sequence) {
+        report_telemetry_drop(telemetry_drop_reported, scope, telemetry.event_type);
+        return;
+    }
+    match tokio::time::timeout(
+        TELEMETRY_PUBLISH_TIMEOUT,
+        event_bus.publish(telemetry.envelope),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            if !telemetry_drop_reported.swap(true, Ordering::Relaxed) {
                 warn!(
-                    agent_id = %self.agent_id,
-                    run_id = %self.run_id,
-                    turn_id = %self.turn_id,
-                    event_type,
+                    agent_id = %scope.agent_id,
+                    run_id = %scope.run_id,
+                    turn_id = %scope.turn_id,
+                    event_type = telemetry.event_type,
                     error = %error,
-                    "failed to publish agent telemetry event"
+                    "failed to publish agent telemetry event; further telemetry issues for this turn will be silent"
                 );
             }
-            Err(error) => {
+        }
+        Err(error) => {
+            if !telemetry_drop_reported.swap(true, Ordering::Relaxed) {
                 warn!(
-                    agent_id = %self.agent_id,
-                    run_id = %self.run_id,
-                    turn_id = %self.turn_id,
-                    event_type,
+                    agent_id = %scope.agent_id,
+                    run_id = %scope.run_id,
+                    turn_id = %scope.turn_id,
+                    event_type = telemetry.event_type,
                     error = %error,
-                    "agent telemetry publish timed out"
+                    "agent telemetry publish timed out; further telemetry issues for this turn will be silent"
                 );
             }
         }
     }
 }
 
+fn report_telemetry_drop(
+    telemetry_drop_reported: &AtomicBool,
+    scope: EventScope,
+    event_type: &'static str,
+) {
+    if !telemetry_drop_reported.swap(true, Ordering::Relaxed) {
+        warn!(
+            agent_id = %scope.agent_id,
+            run_id = %scope.run_id,
+            turn_id = %scope.turn_id,
+            event_type,
+            "dropped agent telemetry event; further drops for this turn will be silent"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{QueuedTelemetry, TELEMETRY_PUBLISH_TIMEOUT, TELEMETRY_QUEUE_CAPACITY};
+
     use std::{
         future::pending,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -266,6 +546,24 @@ mod tests {
     #[derive(Default)]
     struct RecordingEventStreamBus {
         published: Mutex<Vec<StreamEnvelope>>,
+    }
+
+    async fn wait_for_published(published: &Mutex<Vec<StreamEnvelope>>, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if published
+                    .lock()
+                    .expect("event stream bus lock should not be poisoned")
+                    .len()
+                    >= expected
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("telemetry worker should publish queued events");
     }
 
     impl RecordingEventStreamBus {
@@ -305,10 +603,76 @@ mod tests {
 
     struct NeverCompletingEventStreamBus;
 
+    #[derive(Default)]
+    struct BlockingOldTelemetryBus {
+        published: Mutex<Vec<StreamEnvelope>>,
+        telemetry_started: tokio::sync::Notify,
+    }
+
+    #[derive(Default)]
+    struct DelayedFirstEventStreamBus {
+        publish_count: AtomicUsize,
+        published: Mutex<Vec<StreamEnvelope>>,
+        first_publish_started: tokio::sync::Notify,
+        release_first_publish: tokio::sync::Notify,
+    }
+
     #[async_trait]
     impl EventStreamBus for NeverCompletingEventStreamBus {
         async fn publish(&self, _envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
             pending().await
+        }
+
+        async fn subscribe_agent(
+            &self,
+            _agent_id: AgentId,
+            _replay_start: ReplayStart,
+        ) -> Result<EventStream, EventStreamBusError> {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    #[async_trait]
+    impl EventStreamBus for BlockingOldTelemetryBus {
+        async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+            if matches!(
+                &envelope.event,
+                RuntimeEvent::Agent {
+                    event: AgentEvent::Llm { llm_call_id, .. },
+                    ..
+                } if llm_call_id != &LlmCallId::from("new")
+            ) {
+                self.telemetry_started.notify_one();
+                pending().await
+            }
+            self.published
+                .lock()
+                .expect("blocking telemetry bus lock should not be poisoned")
+                .push(envelope);
+            Ok(())
+        }
+
+        async fn subscribe_agent(
+            &self,
+            _agent_id: AgentId,
+            _replay_start: ReplayStart,
+        ) -> Result<EventStream, EventStreamBusError> {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    #[async_trait]
+    impl EventStreamBus for DelayedFirstEventStreamBus {
+        async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+            if self.publish_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.first_publish_started.notify_one();
+                self.release_first_publish.notified().await;
+            }
+            self.published
+                .lock()
+                .expect("delayed event stream bus lock should not be poisoned")
+                .push(envelope);
+            Ok(())
         }
 
         async fn subscribe_agent(
@@ -412,8 +776,8 @@ mod tests {
         sink.emit(AgentTelemetryEvent::TextDelta {
             llm_call_id: llm_call_id.clone(),
             delta: "hello".to_owned(),
-        })
-        .await;
+        });
+        wait_for_published(&recorder.published, 1).await;
 
         let [envelope] = recorder
             .take_published()
@@ -475,8 +839,8 @@ mod tests {
         .expect("approval resolution should publish");
         sink.emit(AgentTelemetryEvent::LlmStarted {
             llm_call_id: LlmCallId::from("llm-call-1"),
-        })
-        .await;
+        });
+        wait_for_published(&recorder.published, 4).await;
 
         let envelopes = recorder.take_published();
         assert_eq!(envelopes.len(), 4);
@@ -521,7 +885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telemetry_emit_returns_when_bus_publish_never_completes() {
+    async fn telemetry_emit_is_non_blocking_when_bus_publish_never_completes() {
         let event_bus: Arc<dyn EventStreamBus> = Arc::new(NeverCompletingEventStreamBus);
         let sink = ScopedAgentEventSink::new(
             AgentId::new(),
@@ -531,14 +895,203 @@ mod tests {
             event_bus,
         );
 
-        tokio::time::timeout(
-            Duration::from_secs(1),
+        for index in 0..=TELEMETRY_QUEUE_CAPACITY {
             sink.emit(AgentTelemetryEvent::LlmStarted {
-                llm_call_id: LlmCallId::from("llm-call-1"),
+                llm_call_id: LlmCallId::from(format!("llm-call-{index}")),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_events_wait_for_preceding_telemetry_publish() {
+        let recorder = Arc::new(DelayedFirstEventStreamBus::default());
+        let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
+        let sink = Arc::new(ScopedAgentEventSink::new(
+            AgentId::new(),
+            "review-agent",
+            RunId::new(),
+            TurnId::new(),
+            event_bus,
+        ));
+
+        sink.emit(AgentTelemetryEvent::LlmStarted {
+            llm_call_id: LlmCallId::from("llm-call-1"),
+        });
+        recorder.first_publish_started.notified().await;
+        let durable_sink = Arc::clone(&sink);
+        let append = tokio::spawn(async move {
+            durable_sink
+                .append(DurableAgentEvent::MessageAppended {
+                    message: ChatMessage::assistant("done"),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!append.is_finished());
+
+        recorder.release_first_publish.notify_one();
+        append
+            .await
+            .expect("append task should finish")
+            .expect("durable event should publish");
+
+        let events = recorder
+            .published
+            .lock()
+            .expect("delayed event stream bus lock should not be poisoned");
+        assert!(matches!(
+            events[0].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Llm { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Message { .. },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_lane_discards_telemetry_backlog_after_current_publish_timeout() {
+        let recorder = Arc::new(BlockingOldTelemetryBus::default());
+        let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
+        let sink = ScopedAgentEventSink::new(
+            AgentId::new(),
+            "review-agent",
+            RunId::new(),
+            TurnId::new(),
+            event_bus,
+        );
+
+        sink.emit(AgentTelemetryEvent::LlmStarted {
+            llm_call_id: LlmCallId::from("old-in-flight"),
+        });
+        recorder.telemetry_started.notified().await;
+        for index in 0..TELEMETRY_QUEUE_CAPACITY {
+            sink.emit(AgentTelemetryEvent::TextDelta {
+                llm_call_id: LlmCallId::from(format!("old-{index}")),
+                delta: "x".to_owned(),
+            });
+        }
+
+        tokio::time::timeout(
+            TELEMETRY_PUBLISH_TIMEOUT * 3,
+            sink.append(DurableAgentEvent::MessageAppended {
+                message: ChatMessage::assistant("done"),
             }),
         )
         .await
-        .expect("best-effort telemetry should not wait indefinitely for the event bus");
+        .expect("durable publish should wait for at most the in-flight telemetry timeout")
+        .expect("durable event should publish");
+        sink.emit(AgentTelemetryEvent::LlmStarted {
+            llm_call_id: LlmCallId::from("new"),
+        });
+        wait_for_published(&recorder.published, 2).await;
+
+        let published = recorder
+            .published
+            .lock()
+            .expect("blocking telemetry bus lock should not be poisoned");
+        assert!(matches!(
+            published[0].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Message { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &published[1].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Llm { llm_call_id, .. },
+                ..
+            } if llm_call_id == &LlmCallId::from("new")
+        ));
+    }
+
+    #[tokio::test]
+    async fn telemetry_enqueued_late_with_an_old_sequence_is_dropped_after_durable() {
+        let recorder = Arc::new(RecordingEventStreamBus::default());
+        let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
+        let sink = ScopedAgentEventSink::new(
+            AgentId::new(),
+            "review-agent",
+            RunId::new(),
+            TurnId::new(),
+            event_bus,
+        );
+        let old_sequence = sink
+            .enqueue
+            .lock()
+            .expect("agent event enqueue lock should not be poisoned")
+            .take_sequence();
+
+        sink.append(DurableAgentEvent::LoopStarted)
+            .await
+            .expect("durable event should publish");
+        let old_event = AgentTelemetryEvent::LlmStarted {
+            llm_call_id: LlmCallId::from("old"),
+        };
+        let old_event_type = old_event.event_type();
+        let old_event = sink
+            .telemetry_agent_event(old_event)
+            .expect("supported telemetry should map");
+        sink.telemetry
+            .try_send(QueuedTelemetry {
+                sequence: old_sequence,
+                event_type: old_event_type,
+                envelope: sink.envelope(old_event),
+            })
+            .expect("test queue should have capacity");
+        sink.emit(AgentTelemetryEvent::LlmStarted {
+            llm_call_id: LlmCallId::from("new"),
+        });
+        wait_for_published(&recorder.published, 2).await;
+
+        let published = recorder.take_published();
+        assert_eq!(published.len(), 2);
+        assert!(matches!(
+            published[0].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Started { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &published[1].event,
+            RuntimeEvent::Agent {
+                event: AgentEvent::Llm { llm_call_id, .. },
+                ..
+            } if llm_call_id == &LlmCallId::from("new")
+        ));
+        assert!(sink.telemetry_drop_reported.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn constructing_outside_runtime_starts_worker_on_first_emit() {
+        let recorder = Arc::new(RecordingEventStreamBus::default());
+        let event_bus: Arc<dyn EventStreamBus> = recorder.clone();
+        let sink = ScopedAgentEventSink::new(
+            AgentId::new(),
+            "review-agent",
+            RunId::new(),
+            TurnId::new(),
+            event_bus,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build");
+
+        runtime.block_on(async {
+            sink.emit(AgentTelemetryEvent::LlmStarted {
+                llm_call_id: LlmCallId::from("llm-call-1"),
+            });
+            wait_for_published(&recorder.published, 1).await;
+        });
     }
 
     #[tokio::test]

@@ -27,14 +27,10 @@
     "you": "You",
     "history": {
       "title": "History",
+      "close": "Close history",
       "new": "New conversation",
       "activeNow": "Active Now",
-      "empty": "No history yet",
-      "mock": {
-        "viteConfig": "Discussing Vite config optimization…",
-        "retryPolicy": "How to design exponential backoff for tool calls?",
-        "agentTypes": "How should a typed agent state machine be modeled?"
-      }
+      "empty": "No history yet"
     },
     "composer": {
       "label": "Message",

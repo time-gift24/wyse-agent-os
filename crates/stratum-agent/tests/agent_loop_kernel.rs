@@ -117,9 +117,8 @@ struct RecordingTelemetrySink {
     operations: Arc<Mutex<Vec<Operation>>>,
 }
 
-#[async_trait]
 impl TelemetryEventSink for RecordingTelemetrySink {
-    async fn emit(&self, event: AgentTelemetryEvent) {
+    fn emit(&self, event: AgentTelemetryEvent) {
         self.operations
             .lock()
             .expect("operation lock should not be poisoned")
@@ -359,7 +358,6 @@ fn assemble_agent_loop(
     AgentLoop::builder()
         .llm_provider(provider)
         .tool_executor(tool_executor)
-        .durable_events(durable)
         .telemetry(telemetry)
         .limits(limits)
         .build()
@@ -1036,6 +1034,95 @@ async fn stream_protocol_error_commits_one_failed_terminal() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn streamed_text_is_rejected_at_its_byte_limit() {
+    let (agent_loop, _) = test_agent_loop_with(
+        provider_events(vec![
+            ChatStreamEvent::TextDelta {
+                delta: "hello".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ]),
+        LoopLimits::new(1, 1).with_stream_byte_limits(4, 16, 16),
+        None,
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("hello")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("oversized text should fail");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::TextByteLimitExceeded { maximum: 4 }
+    ));
+}
+
+#[tokio::test]
+async fn streamed_reasoning_is_rejected_at_its_byte_limit() {
+    let (agent_loop, _) = test_agent_loop_with(
+        provider_events(vec![
+            ChatStreamEvent::ReasoningDelta {
+                delta: "think".to_owned(),
+            },
+            ChatStreamEvent::Finished {
+                finish_reason: FinishReason::Stop,
+                usage: None,
+            },
+        ]),
+        LoopLimits::new(1, 1).with_stream_byte_limits(16, 4, 16),
+        None,
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("hello")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("oversized reasoning should fail");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::ReasoningByteLimitExceeded { maximum: 4 }
+    ));
+}
+
+#[tokio::test]
+async fn streamed_tool_arguments_are_rejected_at_their_byte_limit() {
+    let (agent_loop, _) = test_agent_loop_with(
+        tool_call_turn(
+            &[("call-1", "echo", json!({}))],
+            FinishReason::ToolCalls,
+            None,
+        ),
+        LoopLimits::new(1, 1).with_stream_byte_limits(16, 16, 1),
+        None,
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("hello")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("oversized tool arguments should fail");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::ToolArgumentByteLimitExceeded { maximum: 1 }
+    ));
 }
 
 #[tokio::test]
@@ -2039,7 +2126,7 @@ async fn length_with_calls_commits_typed_errors_without_executing_tools() {
 }
 
 #[tokio::test]
-async fn tool_call_presence_drives_processing_for_unexpected_finish_reason() {
+async fn unexpected_finish_reason_commits_errors_without_executing_tools() {
     let operations = Arc::new(Mutex::new(Vec::new()));
     let registry = recording_registry(
         &operations,
@@ -2069,16 +2156,37 @@ async fn tool_call_presence_drives_processing_for_unexpected_finish_reason() {
             CancellationToken::new(),
         )
         .await
-        .expect("calls should be processed regardless of non-length reason");
+        .expect("blocked calls should be reported back to the model");
 
+    let recorded = recorded
+        .lock()
+        .expect("operation lock should not be poisoned");
     assert_eq!(
         recorded
-            .lock()
-            .expect("operation lock should not be poisoned")
             .iter()
             .filter(|operation| matches!(operation, Operation::ToolCall { .. }))
             .count(),
-        1
+        0
+    );
+    let second_request = recorded
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::ChatStream(request) => Some(request),
+            _ => None,
+        })
+        .nth(1)
+        .expect("blocked result should be sent to the next model request");
+    assert_eq!(
+        second_request.messages.last(),
+        Some(&ChatMessage::tool(
+            "call-1",
+            json!({
+                "error": {
+                    "code": "tool_call_not_authorized",
+                    "message": "tool call was not executed because the model did not finish with tool_calls"
+                }
+            }),
+        ))
     );
 }
 

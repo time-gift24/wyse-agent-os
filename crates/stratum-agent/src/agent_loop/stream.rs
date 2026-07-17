@@ -9,7 +9,7 @@ use stratum_infra::TelemetryEventSink;
 use stratum_llm::{ChatStream, ChatStreamEvent, FinishReason};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentLoopError, ProtocolError};
+use super::{AgentLoopError, LoopLimits, ProtocolError};
 
 pub(super) struct AssistantStreamResult {
     pub(super) message: ChatMessage,
@@ -29,7 +29,7 @@ pub(super) async fn consume_assistant_stream(
     llm_call_id: &LlmCallId,
     telemetry: &dyn TelemetryEventSink,
     cancellation: &CancellationToken,
-    max_tool_calls_per_iteration: usize,
+    limits: LoopLimits,
     total_usage: &mut TokenUsage,
 ) -> Result<AssistantStreamResult, AgentLoopError> {
     let mut text = String::new();
@@ -46,27 +46,33 @@ pub(super) async fn consume_assistant_stream(
         };
         match event? {
             ChatStreamEvent::TextDelta { delta } => {
+                ensure_fits(text.len(), delta.len(), limits.max_text_bytes).map_err(|()| {
+                    AgentLoopError::TextByteLimitExceeded {
+                        maximum: limits.max_text_bytes,
+                    }
+                })?;
                 text.push_str(&delta);
-                telemetry
-                    .emit(AgentTelemetryEvent::TextDelta {
-                        llm_call_id: llm_call_id.clone(),
-                        delta,
-                    })
-                    .await;
+                telemetry.emit(AgentTelemetryEvent::TextDelta {
+                    llm_call_id: llm_call_id.clone(),
+                    delta,
+                });
             }
             ChatStreamEvent::ReasoningDelta { delta } => {
+                ensure_fits(reasoning.len(), delta.len(), limits.max_reasoning_bytes).map_err(
+                    |()| AgentLoopError::ReasoningByteLimitExceeded {
+                        maximum: limits.max_reasoning_bytes,
+                    },
+                )?;
                 reasoning.push_str(&delta);
-                telemetry
-                    .emit(AgentTelemetryEvent::ReasoningDelta {
-                        llm_call_id: llm_call_id.clone(),
-                        delta,
-                    })
-                    .await;
+                telemetry.emit(AgentTelemetryEvent::ReasoningDelta {
+                    llm_call_id: llm_call_id.clone(),
+                    delta,
+                });
             }
             ChatStreamEvent::ToolCallDelta(delta) => {
-                if delta.index >= max_tool_calls_per_iteration {
+                if delta.index >= limits.max_tool_calls_per_iteration {
                     return Err(AgentLoopError::ToolCallLimitExceeded {
-                        maximum: max_tool_calls_per_iteration,
+                        maximum: limits.max_tool_calls_per_iteration,
                     });
                 }
                 let pending = pending_tool_calls.entry(delta.index).or_default();
@@ -96,6 +102,14 @@ pub(super) async fn consume_assistant_stream(
                     }
                     pending.name = Some(name);
                 }
+                ensure_fits(
+                    pending.arguments.len(),
+                    delta.arguments_delta.len(),
+                    limits.max_tool_argument_bytes,
+                )
+                .map_err(|()| AgentLoopError::ToolArgumentByteLimitExceeded {
+                    maximum: limits.max_tool_argument_bytes,
+                })?;
                 pending.arguments.push_str(&delta.arguments_delta);
                 if let Some(call_id) = &pending.call_id {
                     let arguments_delta = if pending.unemitted_arguments.is_empty() {
@@ -104,14 +118,12 @@ pub(super) async fn consume_assistant_stream(
                         pending.unemitted_arguments.push_str(&delta.arguments_delta);
                         std::mem::take(&mut pending.unemitted_arguments)
                     };
-                    telemetry
-                        .emit(AgentTelemetryEvent::ToolCallDelta {
-                            llm_call_id: llm_call_id.clone(),
-                            call_id: call_id.clone(),
-                            name: pending.name.clone(),
-                            arguments_delta,
-                        })
-                        .await;
+                    telemetry.emit(AgentTelemetryEvent::ToolCallDelta {
+                        llm_call_id: llm_call_id.clone(),
+                        call_id: call_id.clone(),
+                        name: pending.name.clone(),
+                        arguments_delta,
+                    });
                 } else {
                     pending.unemitted_arguments.push_str(&delta.arguments_delta);
                 }
@@ -123,13 +135,11 @@ pub(super) async fn consume_assistant_stream(
                 if let Some(event_usage) = usage {
                     add_usage(total_usage, event_usage);
                 }
-                telemetry
-                    .emit(AgentTelemetryEvent::LlmFinished {
-                        llm_call_id: llm_call_id.clone(),
-                        finish_reason: finish_reason.as_str().to_owned(),
-                        usage,
-                    })
-                    .await;
+                telemetry.emit(AgentTelemetryEvent::LlmFinished {
+                    llm_call_id: llm_call_id.clone(),
+                    finish_reason: finish_reason.as_str().to_owned(),
+                    usage,
+                });
                 break finish_reason;
             }
             _ => {}
@@ -148,6 +158,14 @@ pub(super) async fn consume_assistant_stream(
         message,
         finish_reason,
     })
+}
+
+fn ensure_fits(current: usize, additional: usize, maximum: usize) -> Result<(), ()> {
+    if additional > maximum.saturating_sub(current) {
+        Err(())
+    } else {
+        Ok(())
+    }
 }
 
 fn finalize_tool_calls(

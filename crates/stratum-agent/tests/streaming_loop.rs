@@ -1229,10 +1229,11 @@ impl ToolRegistry for BlockingToolRegistry {
         &self,
         _name: &ToolName,
         _input: ToolInput,
-        _cancellation: &CancellationToken,
+        cancellation: &CancellationToken,
     ) -> Result<ToolOutput, ToolError> {
         self.entered.notify_waiters();
-        pending::<Result<ToolOutput, ToolError>>().await
+        cancellation.cancelled().await;
+        Err(ToolError::Cancelled)
     }
 }
 
@@ -1315,16 +1316,12 @@ impl Tool for CancellationRecordingTool {
         _input: ToolInput,
         cancellation: &CancellationToken,
     ) -> Result<ToolOutput, ToolError> {
-        let cancellation = cancellation.clone();
-        let cancellation_observed = Arc::clone(&self.cancellation_observed);
-        let saw_cancelled = Arc::clone(&self.saw_cancelled);
-        tokio::spawn(async move {
-            cancellation.cancelled().await;
-            saw_cancelled.store(cancellation.is_cancelled(), Ordering::SeqCst);
-            cancellation_observed.notify_one();
-        });
         self.entered.notify_one();
-        pending::<Result<ToolOutput, ToolError>>().await
+        cancellation.cancelled().await;
+        self.saw_cancelled
+            .store(cancellation.is_cancelled(), Ordering::SeqCst);
+        self.cancellation_observed.notify_one();
+        Err(ToolError::Cancelled)
     }
 }
 
@@ -2200,7 +2197,7 @@ async fn stream_publishes_failure_when_turn_limit_is_reached() {
 }
 
 #[tokio::test]
-async fn stream_publishes_cancelled_when_tool_call_hangs() {
+async fn stream_waits_for_cooperative_tool_outcome_before_cancelled() {
     let provider = Arc::new(RecordingProvider::new(vec![ProviderResponse::Events(
         vec![
             ChatStreamEvent::ToolCallDelta(ToolCallDelta {
@@ -2237,6 +2234,7 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
     agent.stop();
 
     let mut saw_cancelled = false;
+    let mut saw_tool_outcome = false;
 
     timeout(Duration::from_secs(1), async {
         while let Some(envelope) = events.next().await {
@@ -2246,7 +2244,18 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
             };
 
             match event {
+                AgentEvent::Llm {
+                    event: LlmEvent::ToolCallFailed { call_id, .. },
+                    ..
+                } => {
+                    assert_eq!(call_id, CallId::from("call-1"));
+                    saw_tool_outcome = true;
+                }
                 AgentEvent::Cancelled { usage } => {
+                    assert!(
+                        saw_tool_outcome,
+                        "tool outcome must be observed before cancellation is terminal"
+                    );
                     assert_eq!(
                         usage,
                         TokenUsage {
@@ -2269,6 +2278,7 @@ async fn stream_publishes_cancelled_when_tool_call_hangs() {
     .expect("timed out waiting for cancelled event");
 
     assert!(saw_cancelled);
+    assert!(saw_tool_outcome);
 }
 
 #[tokio::test]

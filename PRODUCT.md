@@ -56,4 +56,4 @@ Positive reference for the future orchestration page: Dify's visual workflow edi
 
 ## Accessibility & Inclusion
 
-Practical commitment: body text contrast ≥ 4.5:1, full keyboard navigation, reduced-motion alternatives for every animation, reduced-transparency fallback for glass surfaces. The existing DESIGN.md already implements reduced-motion and reduced-transparency media queries. No formal WCAG audit target is set yet; revisit when the product matures beyond the current chat surface.
+Practical commitment: body text contrast ≥ 4.5:1, full keyboard navigation, and reduced-motion alternatives for every animation. Glass surfaces are not part of the target design; any retained third-party glass component must provide an opaque fallback, including for reduced-transparency preferences, before it is used in product UI. These are product requirements, not a claim that every current component already satisfies them. No formal WCAG audit target is set yet; revisit when the product matures beyond the current chat surface.

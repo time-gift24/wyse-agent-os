@@ -27,14 +27,10 @@
     "you": "你",
     "history": {
       "title": "历史对话",
+      "close": "关闭历史对话",
       "new": "新建对话",
       "activeNow": "当前对话",
-      "empty": "暂无历史对话",
-      "mock": {
-        "viteConfig": "正在讨论 Vite 配置文件优化…",
-        "retryPolicy": "如何为工具调用设计指数退避重试策略？",
-        "agentTypes": "强类型智能体的状态机应该怎么建模？"
-      }
+      "empty": "暂无历史对话"
     },
     "composer": {
       "label": "输入消息",

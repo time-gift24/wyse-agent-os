@@ -27,6 +27,14 @@ legacy stateful `Agent` compatibility path.
   caller must keep polling the loop so it can await and record the outcome.
   A durable start without a result is an unknown outcome and is never retried
   automatically by the kernel.
+- Only a provider `FinishReason::ToolCalls` authorizes dispatch. If a response contains tool calls
+  with `length`, `stop`, or another finish reason, commit structured tool-error messages without
+  invoking the tools.
+- `LoopLimits` bounds assistant text, reasoning, and each tool-call argument buffer in addition to
+  iterations and tool-call count. Enforce limits before appending each streamed fragment; never
+  retain an unbounded provider response.
+- `ToolExecutor` is the single source of the durable sink used by `AgentLoop`; the builder must not
+  accept a second sink that could split tool and loop boundaries across transports.
 
 ## Legacy Agent Compatibility
 

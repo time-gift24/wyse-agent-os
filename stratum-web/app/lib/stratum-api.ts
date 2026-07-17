@@ -18,12 +18,19 @@ export class ApiError extends Error {
 export type AgentView = {
   agent_id: string
   agent_name: string
-  status: "idle" | "running"
+  status: "idle" | "running" | "finished" | "failed" | "cancelled"
   model_config: ModelConfig
   run_id: string | null
   turn_id: string | null
+  usage: TokenUsage
   last_seq: number
   updated_at: string
+}
+
+export type TokenUsage = {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
 }
 
 export type ToolCall = { call_id: string; name: string; arguments: unknown }
@@ -56,9 +63,9 @@ export type LlmEvent =
 export type AgentEvent =
   | { type: "message"; data: { turn_id: string; message: ChatMessage } }
   | { type: "started"; data: { turn_id: string } }
-  | { type: "finished"; data: { finish_reason: string; usage: unknown } }
-  | { type: "failed"; data: { error_text: string; usage: unknown } }
-  | { type: "cancelled"; data: { usage: unknown } }
+  | { type: "finished"; data: { finish_reason: string; usage: TokenUsage } }
+  | { type: "failed"; data: { error_text: string; usage: TokenUsage } }
+  | { type: "cancelled"; data: { usage: TokenUsage } }
   | {
       type: "tool_approval_requested"
       data: {
@@ -74,6 +81,14 @@ export type AgentEvent =
   | {
       type: "tool_approval_resolved"
       data: { approval_id: string; decision: "approve" | "reject" }
+    }
+  | {
+      type: "tool_execution_started"
+      data: { turn_id: string; call_id: string; tool_name: string }
+    }
+  | {
+      type: "iteration_completed"
+      data: { turn_id: string; iteration: number; usage: TokenUsage }
     }
   | { type: "llm"; data: { llm_call_id: string; event: LlmEvent } }
 

@@ -39,16 +39,43 @@ pub struct LoopLimits {
     pub max_iterations: usize,
     /// Maximum tool calls accepted from one model iteration.
     pub max_tool_calls_per_iteration: usize,
+    /// Maximum streamed assistant text bytes in one model response.
+    pub max_text_bytes: usize,
+    /// Maximum streamed reasoning bytes in one model response.
+    pub max_reasoning_bytes: usize,
+    /// Maximum streamed argument bytes for one tool call.
+    pub max_tool_argument_bytes: usize,
 }
 
 impl LoopLimits {
+    const DEFAULT_MAX_TEXT_BYTES: usize = 1024 * 1024;
+    const DEFAULT_MAX_REASONING_BYTES: usize = 1024 * 1024;
+    const DEFAULT_MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+
     /// Creates loop safety bounds.
     #[must_use]
     pub const fn new(max_iterations: usize, max_tool_calls_per_iteration: usize) -> Self {
         Self {
             max_iterations,
             max_tool_calls_per_iteration,
+            max_text_bytes: Self::DEFAULT_MAX_TEXT_BYTES,
+            max_reasoning_bytes: Self::DEFAULT_MAX_REASONING_BYTES,
+            max_tool_argument_bytes: Self::DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
         }
+    }
+
+    /// Overrides the streamed response byte limits.
+    #[must_use]
+    pub const fn with_stream_byte_limits(
+        mut self,
+        max_text_bytes: usize,
+        max_reasoning_bytes: usize,
+        max_tool_argument_bytes: usize,
+    ) -> Self {
+        self.max_text_bytes = max_text_bytes;
+        self.max_reasoning_bytes = max_reasoning_bytes;
+        self.max_tool_argument_bytes = max_tool_argument_bytes;
+        self
     }
 }
 

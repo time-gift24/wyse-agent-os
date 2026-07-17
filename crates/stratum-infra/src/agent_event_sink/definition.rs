@@ -17,8 +17,7 @@ pub trait DurableEventSink: Send + Sync {
 }
 
 /// Publishes best-effort agent-loop telemetry.
-#[async_trait]
 pub trait TelemetryEventSink: Send + Sync {
     /// Emits one telemetry event without affecting agent-loop control flow.
-    async fn emit(&self, event: AgentTelemetryEvent);
+    fn emit(&self, event: AgentTelemetryEvent);
 }

@@ -17,9 +17,6 @@ pub enum AgentLoopBuildError {
     /// The tool executor was not supplied.
     #[error("missing agent loop field tool_executor")]
     MissingToolExecutor,
-    /// The durable event sink was not supplied.
-    #[error("missing agent loop field durable_events")]
-    MissingDurableEvents,
     /// The telemetry sink was not supplied.
     #[error("missing agent loop field telemetry")]
     MissingTelemetry,
@@ -148,6 +145,24 @@ pub enum AgentLoopError {
     #[error("maximum of {maximum} tool calls per iteration exceeded")]
     ToolCallLimitExceeded {
         /// Configured maximum number of tool calls per iteration.
+        maximum: usize,
+    },
+    /// Streamed assistant text exceeded its byte bound.
+    #[error("maximum of {maximum} streamed assistant text bytes exceeded")]
+    TextByteLimitExceeded {
+        /// Configured maximum number of bytes.
+        maximum: usize,
+    },
+    /// Streamed reasoning exceeded its byte bound.
+    #[error("maximum of {maximum} streamed reasoning bytes exceeded")]
+    ReasoningByteLimitExceeded {
+        /// Configured maximum number of bytes.
+        maximum: usize,
+    },
+    /// One streamed tool call exceeded its argument byte bound.
+    #[error("maximum of {maximum} streamed tool argument bytes exceeded")]
+    ToolArgumentByteLimitExceeded {
+        /// Configured maximum number of bytes.
         maximum: usize,
     },
 }

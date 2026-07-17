@@ -21,4 +21,7 @@ pub enum DurableEventSinkError {
         /// Stable type name of the unsupported event.
         event_type: &'static str,
     },
+    /// The sink's ordered publisher is no longer available.
+    #[error("durable agent event publisher is unavailable")]
+    PublisherUnavailable,
 }

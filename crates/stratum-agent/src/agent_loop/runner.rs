@@ -137,11 +137,9 @@ impl AgentLoop {
                 return Err(AgentLoopError::Cancelled);
             }
             let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
-            self.telemetry
-                .emit(AgentTelemetryEvent::LlmStarted {
-                    llm_call_id: llm_call_id.clone(),
-                })
-                .await;
+            self.telemetry.emit(AgentTelemetryEvent::LlmStarted {
+                llm_call_id: llm_call_id.clone(),
+            });
             let request = ChatRequest {
                 model: self.llm_provider.model_id(),
                 messages: request_messages(&context.system_prompt, &context.messages),
@@ -158,7 +156,7 @@ impl AgentLoop {
                 &llm_call_id,
                 self.telemetry.as_ref(),
                 cancellation,
-                self.limits.max_tool_calls_per_iteration,
+                self.limits,
                 usage,
             )
             .await?;
@@ -182,8 +180,8 @@ impl AgentLoop {
                     if cancellation.is_cancelled() {
                         return Err(AgentLoopError::Cancelled);
                     }
-                    let message = if finish_reason == FinishReason::Length {
-                        truncated_tool_result(tool_call)
+                    let message = if finish_reason != FinishReason::ToolCalls {
+                        unexecutable_tool_result(tool_call, finish_reason)
                     } else {
                         match self.tool_executor.execute(tool_call, cancellation).await {
                             Ok(message) => message,
@@ -243,7 +241,6 @@ impl AgentLoop {
 pub struct AgentLoopBuilder {
     llm_provider: Option<Arc<dyn LlmProvider>>,
     tool_executor: Option<ToolExecutor>,
-    durable_events: Option<Arc<dyn DurableEventSink>>,
     telemetry: Option<Arc<dyn TelemetryEventSink>>,
     limits: LoopLimits,
 }
@@ -260,13 +257,6 @@ impl AgentLoopBuilder {
     #[must_use]
     pub fn tool_executor(mut self, tool_executor: ToolExecutor) -> Self {
         self.tool_executor = Some(tool_executor);
-        self
-    }
-
-    /// Sets the sink used for required durable events.
-    #[must_use]
-    pub fn durable_events(mut self, durable_events: Arc<dyn DurableEventSink>) -> Self {
-        self.durable_events = Some(durable_events);
         self
     }
 
@@ -291,16 +281,17 @@ impl AgentLoopBuilder {
     /// Returns the corresponding [`AgentLoopBuildError`] variant for the first required field not
     /// supplied.
     pub fn build(self) -> Result<AgentLoop, AgentLoopBuildError> {
+        let llm_provider = self
+            .llm_provider
+            .ok_or(AgentLoopBuildError::MissingLlmProvider)?;
+        let tool_executor = self
+            .tool_executor
+            .ok_or(AgentLoopBuildError::MissingToolExecutor)?;
+        let durable_events = tool_executor.durable_events();
         Ok(AgentLoop {
-            llm_provider: self
-                .llm_provider
-                .ok_or(AgentLoopBuildError::MissingLlmProvider)?,
-            tool_executor: self
-                .tool_executor
-                .ok_or(AgentLoopBuildError::MissingToolExecutor)?,
-            durable_events: self
-                .durable_events
-                .ok_or(AgentLoopBuildError::MissingDurableEvents)?,
+            llm_provider,
+            tool_executor,
+            durable_events,
             telemetry: self
                 .telemetry
                 .ok_or(AgentLoopBuildError::MissingTelemetry)?,
@@ -316,13 +307,24 @@ fn request_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<ChatMes
     messages
 }
 
-fn truncated_tool_result(tool_call: &ToolCall) -> ChatMessage {
+fn unexecutable_tool_result(tool_call: &ToolCall, finish_reason: FinishReason) -> ChatMessage {
+    let (code, message) = if finish_reason == FinishReason::Length {
+        (
+            "tool_call_truncated",
+            "tool call was not executed because the model response reached its length limit",
+        )
+    } else {
+        (
+            "tool_call_not_authorized",
+            "tool call was not executed because the model did not finish with tool_calls",
+        )
+    };
     ChatMessage::tool(
         tool_call.call_id.clone(),
         serde_json::json!({
             "error": {
-                "code": "tool_call_truncated",
-                "message": "tool call was not executed because the model response reached its length limit",
+                "code": code,
+                "message": message,
             }
         }),
     )

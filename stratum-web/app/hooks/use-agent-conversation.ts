@@ -399,8 +399,7 @@ export function useAgentConversation(): AgentConversation {
 
   const setThinkingLevel = useCallback(
     (level: "disabled" | "high" | "max") => {
-      if (selectedAgentRef.current === null || selectedModelConfig === null)
-        return
+      if (selectedModelConfig === null) return
       setRequestedModelConfig({
         ...selectedModelConfig,
         parameters: withThinkingLevel(selectedModelConfig.parameters, level),

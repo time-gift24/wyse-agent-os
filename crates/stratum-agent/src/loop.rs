@@ -831,20 +831,14 @@ impl Agent {
         }
 
         let cancel = self.cancel_token().expect("cancel token should be set");
-        let future = self.tool_registry.call(
-            &name,
-            ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
-            &cancel,
-        );
-        tokio::pin!(future);
-        let tool_result = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                self.publish_cancelled().await?;
-                return Err(AgentError::Cancelled);
-            }
-            result = &mut future => result,
-        };
+        let tool_result = self
+            .tool_registry
+            .call(
+                &name,
+                ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
+                &cancel,
+            )
+            .await;
 
         match tool_result {
             Ok(output) => {

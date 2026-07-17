@@ -38,6 +38,10 @@ impl ToolExecutor {
         self.registry.specs()
     }
 
+    pub(crate) fn durable_events(&self) -> Arc<dyn DurableEventSink> {
+        Arc::clone(&self.durable_events)
+    }
+
     /// Processes one provider tool call.
     ///
     /// # Errors
