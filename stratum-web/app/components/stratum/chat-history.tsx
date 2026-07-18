@@ -1,23 +1,14 @@
 "use client"
 
-import { useEffect, useMemo } from "react"
-import {
-  Clock3Icon,
-  HistoryIcon,
-  PlusIcon,
-  Trash2Icon,
-  XIcon,
-} from "lucide-react"
+import { useEffect, useMemo, useRef } from "react"
+import { HistoryIcon, PlusIcon, Trash2Icon, XIcon } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { AnimatePresence, motion, useReducedMotion } from "motion/react"
 
-import { AnimatedList } from "~/components/react-bits/AnimatedList"
 import { Button } from "~/components/ui/button"
 import type { ConversationState } from "~/features/agent-conversation/types"
 import type { RecentAgent } from "~/lib/recent-agents"
 import { cn } from "~/lib/utils"
-
-import { getMockRecentAgents } from "./chat-history.mock"
 
 type ChatHistoryProps = {
   open: boolean
@@ -63,12 +54,7 @@ export function ChatHistory({
 }: ChatHistoryProps) {
   const { t, i18n } = useTranslation()
   const reduceMotion = useReducedMotion()
-
-  const isMock = recentAgents.length === 0
-  const displayAgents = useMemo(
-    () => (recentAgents.length > 0 ? recentAgents : getMockRecentAgents(t)),
-    [recentAgents, t]
-  )
+  const panelRef = useRef<HTMLElement>(null)
 
   const currentAgent = useMemo(() => {
     if (!state.agentId) return null
@@ -79,11 +65,43 @@ export function ChatHistory({
 
   useEffect(() => {
     if (!open) return
+    const previouslyFocused = document.activeElement as HTMLElement | null
+    const panel = panelRef.current
+    const focusFrame = requestAnimationFrame(() => {
+      panel?.querySelector<HTMLElement>("button:not(:disabled)")?.focus()
+    })
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose()
+      if (event.key === "Escape") {
+        event.preventDefault()
+        onClose()
+        return
+      }
+      if (event.key !== "Tab" || !panel) return
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'
+        )
+      )
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last?.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first?.focus()
+      }
     }
     window.addEventListener("keydown", handleKeyDown)
-    return () => window.removeEventListener("keydown", handleKeyDown)
+    return () => {
+      cancelAnimationFrame(focusFrame)
+      window.removeEventListener("keydown", handleKeyDown)
+      document.body.style.overflow = previousOverflow
+      previouslyFocused?.focus()
+    }
   }, [open, onClose])
 
   const panelVariants = {
@@ -100,22 +118,22 @@ export function ChatHistory({
     },
   }
 
-  const backdropVariants = {
-    hidden: { opacity: 0 },
-    visible: { opacity: 1 },
-    exit: { opacity: 0 },
-  }
-
   return (
     <AnimatePresence initial={false}>
       {open ? (
-        <div
-          key="chat-history-drawer"
-          className="pointer-events-none fixed inset-0 z-40"
-        >
-          <div className="absolute inset-0 pointer-events-none" />
+        <div key="chat-history-drawer" className="fixed inset-0 z-[70]">
+          <motion.div
+            aria-hidden="true"
+            className="absolute inset-0 cursor-default bg-stratum-ink/20"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: reduceMotion ? 0 : 0.18 }}
+            onPointerDown={onClose}
+          />
 
           <motion.aside
+            ref={panelRef}
             id="chat-history-drawer"
             role="dialog"
             aria-modal="true"
@@ -130,15 +148,15 @@ export function ChatHistory({
             }}
             className={cn(
               "stratum-history-drawer",
-              "pointer-events-auto flex flex-col gap-2 overflow-hidden",
-              "rounded-2xl border border-stratum-line bg-stratum-bg-paper shadow-stratum-soft",
+              "flex flex-col gap-2 overflow-hidden",
+              "rounded-2xl border border-stratum-line shadow-stratum-soft [background:var(--stratum-bg-paper)]",
               "max-h-[calc(100dvh-9rem)]"
             )}
           >
             <div className="flex items-center justify-between px-3 pt-2.5">
-              <div className="flex items-center gap-1.5 text-muted-foreground">
-                <HistoryIcon className="size-3" aria-hidden="true" />
-                <span className="text-[10px] font-medium">
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <HistoryIcon className="size-4" aria-hidden="true" />
+                <span className="text-sm font-medium">
                   {t("chat.history.title")}
                 </span>
               </div>
@@ -147,10 +165,10 @@ export function ChatHistory({
                 variant="ghost"
                 size="icon-xs"
                 onClick={onClose}
-                aria-label={t("errors.genericTitle")}
-                className="text-muted-foreground hover:text-foreground"
+                aria-label={t("chat.history.close")}
+                className="size-11 text-muted-foreground hover:text-foreground"
               >
-                <XIcon className="size-3" aria-hidden="true" />
+                <XIcon className="size-4" aria-hidden="true" />
               </Button>
             </div>
 
@@ -158,12 +176,15 @@ export function ChatHistory({
               <button
                 type="button"
                 onClick={() => {
-                  window.scrollTo({
-                    top: document.body.scrollHeight,
-                    behavior: reduceMotion ? "auto" : "smooth",
+                  onClose()
+                  requestAnimationFrame(() => {
+                    window.scrollTo({
+                      top: document.body.scrollHeight,
+                      behavior: reduceMotion ? "auto" : "smooth",
+                    })
                   })
                 }}
-                className="mx-2.5 flex items-center gap-2 rounded-lg bg-secondary/50 px-2.5 py-2 text-left transition-colors hover:bg-secondary/70"
+                className="mx-2.5 flex min-h-11 items-center gap-2 rounded-lg bg-secondary/50 px-3 py-2 text-left transition-colors hover:bg-secondary/70"
               >
                 <div className="flex flex-col items-center gap-1">
                   <span
@@ -175,10 +196,10 @@ export function ChatHistory({
                   <span className="w-px flex-1 bg-stratum-line/50" />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="text-[9px] font-medium text-stratum-action">
+                  <span className="text-xs font-medium text-stratum-action">
                     {t("chat.history.activeNow")}
                   </span>
-                  <span className="truncate text-[11px] text-foreground">
+                  <span className="truncate text-sm text-foreground">
                     {currentAgent.title}
                   </span>
                 </div>
@@ -191,30 +212,30 @@ export function ChatHistory({
                 variant="ghost"
                 aria-current={state.agentId === null ? "true" : undefined}
                 className={cn(
-                  "h-6 justify-start gap-1.5 rounded-lg px-2 text-[11px] font-medium",
+                  "min-h-11 w-full justify-start gap-2 rounded-lg px-3 text-sm font-medium",
                   state.agentId === null
                     ? "bg-stratum-action/10 text-stratum-action"
                     : "text-stratum-action hover:bg-stratum-action/5"
                 )}
                 onClick={() => {
                   onNewConversation()
+                  onClose()
                 }}
               >
-                <PlusIcon className="size-3" aria-hidden="true" />
+                <PlusIcon className="size-4" aria-hidden="true" />
                 {t("chat.history.new")}
               </Button>
             </div>
 
-            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2.5 pb-2.5">
-              <AnimatedList
-                staggerDelay={0.025}
-                maxDelay={0.18}
-                className="gap-0.5"
-              >
-                {displayAgents.map((agent) => {
+            <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-2.5 pb-2.5">
+              {recentAgents.length === 0 ? (
+                <p className="px-3 py-6 text-center text-sm text-muted-foreground">
+                  {t("chat.history.empty")}
+                </p>
+              ) : (
+                recentAgents.map((agent) => {
                   const isCurrent = agent.agentId === state.agentId
                   const isMissing = state.phase === "missing" && isCurrent
-                  const isMockItem = isMock
 
                   return (
                     <div
@@ -223,23 +244,22 @@ export function ChatHistory({
                     >
                       <button
                         type="button"
-                        disabled={isMockItem}
                         aria-current={isCurrent ? "true" : undefined}
                         onClick={() => {
                           onSelectAgent(agent.agentId)
+                          onClose()
                         }}
                         className={cn(
-                          "flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
+                          "flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-3 text-left text-sm transition-colors",
+                          isMissing && "pr-12",
                           isCurrent
                             ? "bg-secondary/50"
-                            : isMockItem
-                              ? "opacity-50"
-                              : "hover:bg-secondary/30"
+                            : "hover:bg-secondary/30"
                         )}
                       >
                         <span
                           className={cn(
-                            "truncate text-[11px]",
+                            "truncate text-sm",
                             isCurrent
                               ? "font-medium text-foreground"
                               : "text-foreground/80"
@@ -247,7 +267,7 @@ export function ChatHistory({
                         >
                           {agent.title}
                         </span>
-                        <span className="shrink-0 text-[9px] text-muted-foreground">
+                        <span className="shrink-0 text-xs text-muted-foreground">
                           {formatRelativeTime(
                             agent.lastOpenedAt,
                             i18n.resolvedLanguage ?? "en"
@@ -255,7 +275,7 @@ export function ChatHistory({
                         </span>
                       </button>
 
-                      {isMissing && !isMockItem ? (
+                      {isMissing ? (
                         <Button
                           type="button"
                           variant="ghost"
@@ -263,18 +283,15 @@ export function ChatHistory({
                           aria-label={t("chat.removeLocalEntry")}
                           title={t("chat.removeLocalEntry")}
                           onClick={() => onRemoveAgent(agent.agentId)}
-                          className="absolute -right-1 top-1/2 -translate-y-1/2 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                          className="absolute top-1/2 right-0 size-11 shrink-0 -translate-y-1/2 text-destructive"
                         >
-                          <Trash2Icon
-                            className="size-2.5 text-destructive"
-                            aria-hidden="true"
-                          />
+                          <Trash2Icon className="size-4" aria-hidden="true" />
                         </Button>
                       ) : null}
                     </div>
                   )
-                })}
-              </AnimatedList>
+                })
+              )}
             </div>
           </motion.aside>
         </div>

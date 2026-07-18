@@ -1,5 +1,34 @@
 # Runtime event persistence conventions
 
+## Foundational agent-loop event contracts
+
+- `DurableAgentEvent` and `AgentTelemetryEvent` are local, scope-free events emitted by the
+  foundational `AgentLoop`; they are not wire envelopes and must not acquire run/agent/turn
+  fields merely for a transport adapter.
+- `DurableAgentEvent` names loop correctness boundaries. The loop waits for the injected durable
+  sink acknowledgement before advancing. This does not mean every variant becomes an AgentStore
+  history row; persistence policy belongs to the composition and projection layers.
+- `AgentTelemetryEvent` is best-effort observability. Dropped, timed-out, unsupported, or failed
+  telemetry must never change loop output, tool dispatch, durable frontier, or terminal status.
+- `ToolExecutionStarted` is durable and occurs after tool lookup/input validation/approval but before
+  dispatch. `IterationCompleted` is durable and identifies the exact iteration and cumulative usage
+  whose frontier may advance.
+- Both enums use stable snake_case `type` names. Adding a variant requires updating `event_type()`,
+  serde tests, the scoped projection, protocol docs, and downstream exhaustive projections.
+
+## Wire scope and projection
+
+- `StreamEnvelope` is the transport-facing type. `RuntimeEvent::Agent` nests `AgentEvent`; consumers
+  must inspect the nested event type rather than infer it from metadata.
+- The current hosted-agent projection has no workflow node context, so `ScopedAgentEventSink` uses
+  `EventSource::Run` and carries `agent_id` in `RuntimeEvent::Agent`. Do not rewrite it to
+  `EventSource::Agent` without a real `node_id` supplied by orchestration.
+- `ScopedAgentEventSink` supplies run/agent/turn scope, projects durable loop events to `AgentEvent`,
+  and projects supported telemetry to nested `LlmEvent`. Unsupported telemetry is a safe no-op with
+  a warning; unsupported durable events are an error.
+- `business_seq`, retained `EventCursor`, and loop `iteration` are independent order domains and
+  must never be compared or converted.
+
 ## Hosted model configuration
 
 - `stratum-core` owns the common `ModelConfig` snapshot: a provider-scoped `ModelId` and its
@@ -36,6 +65,9 @@ flowchart LR
 - `business_seq` lives on the committed `StreamEnvelope` and is present only for
   complete `AgentEvent::Message` events. `EventCursor` is an independent
   retained-transport position.
+- `AgentEvent::IterationCompleted` is projected by `StoreEventStreamBus` through
+  `complete_iteration` before retained forwarding. `ToolExecutionStarted` is required by the loop
+  sink contract but is not a complete-message history record and receives no `business_seq`.
 
 ## Complete-message commit
 

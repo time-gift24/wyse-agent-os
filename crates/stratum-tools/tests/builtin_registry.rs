@@ -7,6 +7,7 @@ use stratum_tools::{
     ApplyPatchTool, BuiltinToolRegistry, EchoTool, FileMetadataTool, ListDirTool,
     ReadFileLinesTool, SearchTextTool, ToolError, ToolInput, ToolPermissionMode, ToolRegistry,
 };
+use tokio_util::sync::CancellationToken;
 
 async fn apply_patch_test_filesystem(name: &str) -> (Arc<LocalFilesystem>, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!(
@@ -23,6 +24,196 @@ async fn apply_patch_test_filesystem(name: &str) -> (Arc<LocalFilesystem>, std::
         .expect("filesystem is valid"),
     );
     (filesystem, root)
+}
+
+#[tokio::test]
+async fn builtin_validation_rejects_every_deterministic_invalid_input_without_filesystem_work() {
+    let (filesystem, root) = apply_patch_test_filesystem("validation").await;
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(Arc::new(EchoTool::new()), ToolKind::Read, DangerLevel::Low)
+        .expect("echo should register");
+    registry
+        .register(
+            Arc::new(ReadFileLinesTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("read file lines should register");
+    registry
+        .register(
+            Arc::new(ListDirTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("list dir should register");
+    registry
+        .register(
+            Arc::new(FileMetadataTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("file metadata should register");
+    registry
+        .register(
+            Arc::new(SearchTextTool::new(filesystem.clone())),
+            ToolKind::Read,
+            DangerLevel::Low,
+        )
+        .expect("search text should register");
+    registry
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem)),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
+        .expect("apply patch should register");
+
+    let cases = [
+        ("echo", json!(42), "invalid argument arguments"),
+        (
+            "read_file_lines",
+            json!({"path": "notes.txt", "start_line": 1}),
+            "invalid tool input",
+        ),
+        (
+            "read_file_lines",
+            json!({"path": "notes.txt", "start_line": 0, "line_count": 1}),
+            "invalid tool input",
+        ),
+        (
+            "read_file_lines",
+            json!({"path": "../secret", "start_line": 1, "line_count": 1}),
+            "invalid path",
+        ),
+        ("list_dir", json!({}), "invalid tool input"),
+        ("list_dir", json!({"path": "../secret"}), "invalid path"),
+        ("file_metadata", json!({}), "invalid tool input"),
+        (
+            "file_metadata",
+            json!({"path": "../secret"}),
+            "invalid path",
+        ),
+        (
+            "search_text",
+            json!({"path": "src", "query": ""}),
+            "invalid argument query",
+        ),
+        (
+            "search_text",
+            json!({"path": "src", "query": "needle", "max_results": 0}),
+            "invalid tool input",
+        ),
+        (
+            "search_text",
+            json!({"path": "../secret", "query": "needle"}),
+            "invalid path",
+        ),
+        ("apply_patch", json!({}), "invalid tool input"),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "rename_file", "path": "notes.txt"}}),
+            "invalid tool operation",
+        ),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "delete_file", "path": "../secret"}}),
+            "invalid path",
+        ),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "create_file", "path": "notes.txt"}}),
+            "invalid argument diff",
+        ),
+        (
+            "apply_patch",
+            json!({"operation": {"type": "update_file", "path": "notes.txt"}}),
+            "invalid argument diff",
+        ),
+    ];
+
+    for (name, arguments, expected_prefix) in cases {
+        let input = ToolInput::new(CallId::from("call-invalid"), arguments);
+        let validation_error = registry
+            .validate(&ToolName::from(name), &input)
+            .expect_err("invalid input should fail synchronous validation");
+        assert!(
+            validation_error.to_string().starts_with(expected_prefix),
+            "unexpected {name} validation error: {validation_error}"
+        );
+        let call_error = registry
+            .call(&ToolName::from(name), input, &CancellationToken::new())
+            .await
+            .expect_err("direct calls must revalidate the same invalid input");
+        assert_eq!(
+            rejection_class(&validation_error),
+            rejection_class(&call_error),
+            "validation and call rejection classes differ for {name}"
+        );
+        assert_eq!(
+            validation_error.to_string(),
+            call_error.to_string(),
+            "validation and call rejection messages differ for {name}"
+        );
+    }
+    assert!(
+        tokio::fs::read_dir(&root)
+            .await
+            .expect("validation root should remain readable")
+            .next_entry()
+            .await
+            .expect("reading validation root should succeed")
+            .is_none(),
+        "synchronous validation must not perform filesystem work"
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
+}
+
+fn rejection_class(error: &ToolError) -> &'static str {
+    match error {
+        ToolError::InvalidInput { .. } => "invalid_input",
+        ToolError::InvalidOperation { .. } => "invalid_operation",
+        ToolError::InvalidPath { .. } => "invalid_path",
+        ToolError::InvalidArgument { .. } => "invalid_argument",
+        _ => "unexpected",
+    }
+}
+
+#[tokio::test]
+async fn apply_patch_schema_requires_diff_only_for_create_and_update() {
+    let (filesystem, root) = apply_patch_test_filesystem("schema").await;
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem)),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
+        .expect("apply patch should register");
+
+    let spec = registry
+        .specs()
+        .into_iter()
+        .find(|spec| spec.name == ToolName::from("apply_patch"))
+        .expect("apply patch spec should be registered");
+    let operation_schema = &spec.input_schema["properties"]["operation"];
+
+    assert_eq!(operation_schema["required"], json!(["type", "path"]));
+    assert_eq!(
+        operation_schema["allOf"],
+        json!([{
+            "if": {
+                "properties": {
+                    "type": {"enum": ["create_file", "update_file"]}
+                },
+                "required": ["type"]
+            },
+            "then": {"required": ["diff"]}
+        }])
+    );
+
+    let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test]
@@ -53,6 +244,7 @@ async fn read_file_lines_tool_returns_requested_line_range_through_registry() {
                     "line_count": 2
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -102,6 +294,7 @@ async fn read_file_lines_tool_returns_empty_lines_when_range_starts_after_end() 
                     "line_count": 2
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -143,6 +336,7 @@ async fn read_file_lines_tool_rejects_invalid_relative_path() {
                     "line_count": 1
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("invalid path should fail before reading");
@@ -180,6 +374,7 @@ async fn read_file_lines_tool_returns_typed_error_for_non_utf8_file() {
                     "line_count": 1
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("non-utf8 file should fail");
@@ -222,6 +417,7 @@ async fn list_dir_tool_returns_sorted_directory_entries_through_registry() {
                     "path": "src"
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -274,6 +470,7 @@ async fn file_metadata_tool_returns_file_type_and_length_through_registry() {
                     "path": "notes.txt"
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -335,6 +532,7 @@ async fn search_text_tool_returns_matches_under_directory_through_registry() {
                     "max_results": 10
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -377,6 +575,7 @@ async fn registered_echo_tool_can_be_called_through_registry() {
         .call(
             &ToolName::from("echo"),
             ToolInput::new(CallId::from("call-1"), json!({"message": "hello"})),
+            &CancellationToken::new(),
         )
         .await
         .expect("echo tool should run");
@@ -468,6 +667,7 @@ async fn missing_tool_returns_typed_error() {
         .call(
             &ToolName::from("missing"),
             ToolInput::new(CallId::from("call-1"), json!({})),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("missing tool should fail");
@@ -476,6 +676,59 @@ async fn missing_tool_returns_typed_error() {
         error,
         ToolError::ToolNotFound { ref name } if name == &ToolName::from("missing")
     ));
+}
+
+#[tokio::test]
+async fn cancelled_apply_patch_preserves_existing_content_and_version() {
+    let (filesystem, root) = apply_patch_test_filesystem("cancelled-update").await;
+    let path = VirtualPath::try_from("/notes.txt").expect("path is valid");
+    filesystem
+        .write_file(&path, b"original\n".to_vec())
+        .await
+        .expect("seed file");
+    let before = filesystem
+        .get(&path)
+        .await
+        .expect("get should succeed")
+        .expect("seeded file should exist");
+    let mut registry = BuiltinToolRegistry::default();
+    registry
+        .register(
+            Arc::new(ApplyPatchTool::new(filesystem.clone())),
+            ToolKind::Write,
+            DangerLevel::High,
+        )
+        .expect("apply patch tool should register");
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = registry
+        .call(
+            &ToolName::from("apply_patch"),
+            ToolInput::new(
+                CallId::from("call-cancelled-update"),
+                json!({
+                    "operation": {
+                        "type": "update_file",
+                        "path": "notes.txt",
+                        "diff": "@@\n-original\n+changed\n"
+                    }
+                }),
+            ),
+            &cancellation,
+        )
+        .await
+        .expect_err("cancelled patch should not run");
+
+    assert!(matches!(error, ToolError::Cancelled));
+    let after = filesystem
+        .get(&path)
+        .await
+        .expect("get should succeed")
+        .expect("cancelled patch should preserve the file");
+    assert_eq!(after, before);
+
+    let _ = tokio::fs::remove_dir_all(root).await;
 }
 
 #[tokio::test]
@@ -503,6 +756,7 @@ async fn apply_patch_tool_can_create_file_through_registry() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -548,6 +802,7 @@ async fn apply_patch_tool_updates_existing_file_through_registry() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -591,6 +846,7 @@ async fn apply_patch_tool_deletes_existing_file_through_registry() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -638,6 +894,7 @@ async fn apply_patch_tool_returns_failed_status_for_patch_conflict() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -685,6 +942,7 @@ async fn apply_patch_tool_returns_failed_status_for_existing_create_target() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect("tool should run");
@@ -727,6 +985,7 @@ async fn apply_patch_tool_rejects_invalid_relative_path() {
                     }
                 }),
             ),
+            &CancellationToken::new(),
         )
         .await
         .expect_err("invalid path should fail before patching");

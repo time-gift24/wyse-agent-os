@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use serde_json::json;
 use stratum_core::{DangerLevel, ToolKind, ToolName, ToolSpec};
+use tokio_util::sync::CancellationToken;
 
 use crate::{Tool, ToolError, ToolInput, ToolOutput, ToolPermissionMode, ToolRegistry};
 
@@ -90,6 +91,13 @@ impl ToolRegistry for BuiltinToolRegistry {
         Ok((!allowed).then_some((registered.tool_kind, registered.danger_level)))
     }
 
+    fn validate(&self, name: &ToolName, input: &ToolInput) -> Result<(), ToolError> {
+        let tool = self
+            .get(name)
+            .ok_or_else(|| ToolError::ToolNotFound { name: name.clone() })?;
+        tool.validate(input)
+    }
+
     fn get(&self, name: &ToolName) -> Option<Arc<dyn Tool>> {
         self.tools
             .get(name)
@@ -103,12 +111,17 @@ impl ToolRegistry for BuiltinToolRegistry {
             .collect()
     }
 
-    async fn call(&self, name: &ToolName, input: ToolInput) -> Result<ToolOutput, ToolError> {
+    async fn call(
+        &self,
+        name: &ToolName,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
         let tool = self
             .get(name)
             .ok_or_else(|| ToolError::ToolNotFound { name: name.clone() })?;
 
-        tool.call(input).await
+        tool.call(input, cancellation).await
     }
 }
 
@@ -143,7 +156,26 @@ impl Tool for EchoTool {
         &self.spec
     }
 
-    async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        if input.arguments.is_object() {
+            Ok(())
+        } else {
+            Err(ToolError::InvalidArgument {
+                name: "arguments",
+                reason: "must be an object",
+            })
+        }
+    }
+
+    async fn call(
+        &self,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        self.validate(&input)?;
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         Ok(ToolOutput::new(input.arguments))
     }
 }

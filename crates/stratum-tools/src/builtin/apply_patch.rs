@@ -10,6 +10,7 @@ use stratum_filesystem::{
     ApplyPatchError, ApplyPatchOperation, ApplyPatchOperationKind, Filesystem, FilesystemError,
     apply_patch,
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Tool, ToolError, ToolInput, ToolOutput,
@@ -47,7 +48,18 @@ impl ApplyPatchTool {
                                 },
                                 "path": { "type": "string" },
                                 "diff": { "type": "string" }
-                            }
+                            },
+                            "allOf": [{
+                                "if": {
+                                    "properties": {
+                                        "type": {
+                                            "enum": ["create_file", "update_file"]
+                                        }
+                                    },
+                                    "required": ["type"]
+                                },
+                                "then": { "required": ["diff"] }
+                            }]
                         }
                     }
                 }))
@@ -62,10 +74,19 @@ impl Tool for ApplyPatchTool {
         &self.spec
     }
 
-    async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
-        let raw: ApplyPatchInput = serde_json::from_value(input.arguments)
-            .map_err(|source| ToolError::InvalidInput { source })?;
-        let operation = operation_from_raw(raw.operation)?;
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        parse_operation(input.arguments.clone()).map(|_| ())
+    }
+
+    async fn call(
+        &self,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        let operation = parse_operation(input.arguments)?;
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         let display_path = display_path(&operation.path);
         let (status, output) = match apply_patch(self.filesystem.as_ref(), &operation).await {
             Ok(()) => ("completed", success_output(operation.kind, &display_path)),
@@ -92,6 +113,12 @@ struct RawOperation {
     diff: Option<String>,
 }
 
+fn parse_operation(arguments: serde_json::Value) -> Result<ApplyPatchOperation, ToolError> {
+    let raw: ApplyPatchInput =
+        serde_json::from_value(arguments).map_err(|source| ToolError::InvalidInput { source })?;
+    operation_from_raw(raw.operation)
+}
+
 fn operation_from_raw(raw: RawOperation) -> Result<ApplyPatchOperation, ToolError> {
     let kind = match raw.kind.as_str() {
         "create_file" => ApplyPatchOperationKind::CreateFile,
@@ -104,6 +131,16 @@ fn operation_from_raw(raw: RawOperation) -> Result<ApplyPatchOperation, ToolErro
         }
     };
     let path = normalize_path(&raw.path)?;
+    if matches!(
+        kind,
+        ApplyPatchOperationKind::CreateFile | ApplyPatchOperationKind::UpdateFile
+    ) && raw.diff.is_none()
+    {
+        return Err(ToolError::InvalidArgument {
+            name: "diff",
+            reason: "is required for create_file and update_file",
+        });
+    }
     Ok(ApplyPatchOperation::new(kind, path, raw.diff))
 }
 

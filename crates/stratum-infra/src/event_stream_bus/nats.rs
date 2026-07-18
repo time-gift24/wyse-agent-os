@@ -63,45 +63,17 @@ impl NatsEventStreamBus {
 #[async_trait]
 impl EventStreamBus for NatsEventStreamBus {
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
-        let run_id = envelope.run_id;
-        let event_type = envelope.event.event_type();
-        let agent_id = match &envelope.event {
-            RuntimeEvent::Agent { agent_id, .. } => Some(*agent_id),
-            _ => None,
-        };
-        let result = async {
-            let subject = self.subject_for(&envelope)?;
-            let payload = serde_json::to_vec(&envelope).map_err(EventStreamBusError::Serialize)?;
+        let subject = self.subject_for(&envelope)?;
+        let payload = serde_json::to_vec(&envelope).map_err(EventStreamBusError::Serialize)?;
 
-            self.jetstream
-                .publish(subject, Bytes::from(payload))
-                .await
-                .map_err(EventStreamBusError::nats)?
-                .await
-                .map_err(EventStreamBusError::nats)?;
+        self.jetstream
+            .publish(subject, Bytes::from(payload))
+            .await
+            .map_err(EventStreamBusError::nats)?
+            .await
+            .map_err(EventStreamBusError::nats)?;
 
-            Ok(())
-        }
-        .await;
-
-        if result.is_err() {
-            if let Some(agent_id) = agent_id {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    run_id = %run_id,
-                    event_type,
-                    "agent event publish failed"
-                );
-            } else {
-                tracing::warn!(
-                    run_id = %run_id,
-                    event_type,
-                    "event publish failed before agent routing"
-                );
-            }
-        }
-
-        result
+        Ok(())
     }
 
     async fn subscribe_agent(

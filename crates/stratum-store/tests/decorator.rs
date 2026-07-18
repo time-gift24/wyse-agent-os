@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::future;
 use stratum_core::{
-    AgentEvent, AgentId, ChatMessage, EventCursor, EventSource, HistoryPage, HistoryQuery,
+    AgentEvent, AgentId, CallId, ChatMessage, EventCursor, EventSource, HistoryPage, HistoryQuery,
     LlmCallId, LlmCallRole, LlmEvent, ModelConfig, ModelId, NodeId, ReplayStart, RunId,
-    RuntimeEvent, StreamEnvelope, TokenUsage, TurnId,
+    RuntimeEvent, StreamEnvelope, TokenUsage, ToolName, TurnId,
 };
 use stratum_infra::{EventStream, EventStreamBus, EventStreamBusError};
 use stratum_store::{AgentState, AgentStatus, AgentStore, StoreError, StoreEventStreamBus};
@@ -23,12 +23,29 @@ struct StateUpdate {
     usage: TokenUsage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IterationCommit {
+    run_id: RunId,
+    turn_id: TurnId,
+    iteration: u64,
+    usage: TokenUsage,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ObservedOperation {
+    IterationCommitted(IterationCommit),
+    InnerPublished(StreamEnvelope),
+}
+
 struct RecordingStore {
     state: Mutex<AgentState>,
     loads: Mutex<usize>,
     appended: Mutex<Vec<StreamEnvelope>>,
     updates: Mutex<Vec<StateUpdate>>,
+    iterations: Mutex<Vec<IterationCommit>>,
+    operation_order: Option<Arc<Mutex<Vec<ObservedOperation>>>>,
     fail_append: bool,
+    fail_iteration: bool,
 }
 
 impl RecordingStore {
@@ -38,13 +55,33 @@ impl RecordingStore {
             loads: Mutex::new(0),
             appended: Mutex::new(Vec::new()),
             updates: Mutex::new(Vec::new()),
+            iterations: Mutex::new(Vec::new()),
+            operation_order: None,
             fail_append: false,
+            fail_iteration: false,
         }
     }
 
     fn failing(agent_id: AgentId) -> Self {
         Self {
             fail_append: true,
+            ..Self::new(agent_id)
+        }
+    }
+
+    fn with_operation_order(
+        agent_id: AgentId,
+        operation_order: Arc<Mutex<Vec<ObservedOperation>>>,
+    ) -> Self {
+        Self {
+            operation_order: Some(operation_order),
+            ..Self::new(agent_id)
+        }
+    }
+
+    fn failing_iteration(agent_id: AgentId) -> Self {
+        Self {
+            fail_iteration: true,
             ..Self::new(agent_id)
         }
     }
@@ -115,12 +152,31 @@ impl AgentStore for RecordingStore {
 
     async fn complete_iteration(
         &self,
-        _run_id: RunId,
-        _turn_id: TurnId,
-        _iteration: u64,
-        _usage: TokenUsage,
+        run_id: RunId,
+        turn_id: TurnId,
+        iteration: u64,
+        usage: TokenUsage,
     ) -> Result<AgentState, StoreError> {
-        Err(StoreError::AgentMissing)
+        let commit = IterationCommit {
+            run_id,
+            turn_id,
+            iteration,
+            usage,
+        };
+        self.iterations
+            .lock()
+            .expect("iterations lock")
+            .push(commit);
+        if self.fail_iteration {
+            return Err(StoreError::AgentMissing);
+        }
+        if let Some(operation_order) = &self.operation_order {
+            operation_order
+                .lock()
+                .expect("operation order lock")
+                .push(ObservedOperation::IterationCommitted(commit));
+        }
+        Ok(self.state.lock().expect("state lock").clone())
     }
 
     async fn history_page(&self, _query: HistoryQuery) -> Result<HistoryPage, StoreError> {
@@ -131,6 +187,7 @@ impl AgentStore for RecordingStore {
 struct RecordingBus {
     published: Mutex<Vec<StreamEnvelope>>,
     subscriptions: Mutex<Vec<(AgentId, ReplayStart)>>,
+    operation_order: Option<Arc<Mutex<Vec<ObservedOperation>>>>,
     fail_publish: bool,
 }
 
@@ -156,6 +213,7 @@ impl RecordingBus {
         Self {
             published: Mutex::new(Vec::new()),
             subscriptions: Mutex::new(Vec::new()),
+            operation_order: None,
             fail_publish: false,
         }
     }
@@ -166,11 +224,24 @@ impl RecordingBus {
             ..Self::new()
         }
     }
+
+    fn with_operation_order(operation_order: Arc<Mutex<Vec<ObservedOperation>>>) -> Self {
+        Self {
+            operation_order: Some(operation_order),
+            ..Self::new()
+        }
+    }
 }
 
 #[async_trait]
 impl EventStreamBus for RecordingBus {
     async fn publish(&self, envelope: StreamEnvelope) -> Result<(), EventStreamBusError> {
+        if let Some(operation_order) = &self.operation_order {
+            operation_order
+                .lock()
+                .expect("operation order lock")
+                .push(ObservedOperation::InnerPublished(envelope.clone()));
+        }
         self.published
             .lock()
             .expect("published lock")
@@ -357,6 +428,133 @@ async fn state_events_commit_matching_status_run_turn_and_usage() {
         ]
     );
     assert_eq!(store.state.lock().expect("state lock").next_iteration, 4);
+}
+
+#[tokio::test]
+async fn iteration_completed_persists_exact_frontier_before_forwarding() {
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let usage = TokenUsage {
+        input_tokens: 13,
+        output_tokens: 21,
+        total_tokens: 34,
+    };
+    let iteration = 5;
+    let operation_order = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(RecordingStore::with_operation_order(
+        agent_id,
+        operation_order.clone(),
+    ));
+    let inner = Arc::new(RecordingBus::with_operation_order(operation_order.clone()));
+    let bus = StoreEventStreamBus::new(store.clone(), inner);
+    let requested = envelope(
+        agent_id,
+        run_id,
+        AgentEvent::IterationCompleted {
+            turn_id,
+            iteration,
+            usage,
+        },
+    );
+
+    bus.publish(requested.clone())
+        .await
+        .expect("iteration commits");
+
+    let commit = IterationCommit {
+        run_id,
+        turn_id,
+        iteration,
+        usage,
+    };
+    assert_eq!(
+        *store.iterations.lock().expect("iterations lock"),
+        vec![commit]
+    );
+    assert_eq!(
+        *operation_order.lock().expect("operation order lock"),
+        vec![
+            ObservedOperation::IterationCommitted(commit),
+            ObservedOperation::InnerPublished(requested),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn iteration_completed_store_failure_prevents_forwarding() {
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let usage = TokenUsage {
+        input_tokens: 8,
+        output_tokens: 5,
+        total_tokens: 13,
+    };
+    let iteration = 3;
+    let store = Arc::new(RecordingStore::failing_iteration(agent_id));
+    let inner = Arc::new(RecordingBus::new());
+    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
+    let requested = envelope(
+        agent_id,
+        run_id,
+        AgentEvent::IterationCompleted {
+            turn_id,
+            iteration,
+            usage,
+        },
+    );
+
+    let error = bus
+        .publish(requested)
+        .await
+        .expect_err("iteration store failure");
+
+    assert!(matches!(error, EventStreamBusError::Persistence { .. }));
+    assert_eq!(
+        *store.iterations.lock().expect("iterations lock"),
+        vec![IterationCommit {
+            run_id,
+            turn_id,
+            iteration,
+            usage,
+        }]
+    );
+    assert!(inner.published.lock().expect("published lock").is_empty());
+}
+
+#[tokio::test]
+async fn tool_execution_started_requires_inner_publish_ack() {
+    let agent_id = AgentId::new();
+    let run_id = RunId::new();
+    let turn_id = TurnId::new();
+    let store = Arc::new(RecordingStore::new(agent_id));
+    let inner = Arc::new(RecordingBus::failing());
+    let bus = StoreEventStreamBus::new(store.clone(), inner.clone());
+    let requested = envelope(
+        agent_id,
+        run_id,
+        AgentEvent::ToolExecutionStarted {
+            turn_id,
+            call_id: CallId::from("call-1"),
+            tool_name: ToolName::from("write_file"),
+        },
+    );
+
+    let error = bus
+        .publish(requested.clone())
+        .await
+        .expect_err("inner ack is required");
+
+    assert!(matches!(error, EventStreamBusError::MissingAgentScope));
+    assert!(store.iterations.lock().expect("iterations lock").is_empty());
+    assert!(store.appended.lock().expect("appended lock").is_empty());
+    assert!(store.updates.lock().expect("updates lock").is_empty());
+    assert_eq!(*store.loads.lock().expect("loads lock"), 0);
+    assert_eq!(
+        *inner.published.lock().expect("published lock"),
+        vec![requested]
+    );
 }
 
 #[tokio::test]

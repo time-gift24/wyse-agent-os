@@ -13,7 +13,11 @@ function isLanguage(value: string | null): value is Language {
   return value === "en" || value === "zh"
 }
 
-export function LanguageToggle() {
+type LanguageToggleProps = {
+  compact?: boolean
+}
+
+export function LanguageToggle({ compact = false }: LanguageToggleProps) {
   const { i18n, t } = useTranslation()
   const language: Language = i18n.resolvedLanguage?.startsWith("zh")
     ? "zh"
@@ -37,6 +41,7 @@ export function LanguageToggle() {
     <Button
       variant="ghost"
       size="lg"
+      className={compact ? "size-11 p-0" : "min-h-11"}
       aria-label={label}
       title={label}
       onClick={() => {
@@ -47,7 +52,7 @@ export function LanguageToggle() {
       }}
     >
       <LanguagesIcon data-icon="inline-start" aria-hidden="true" />
-      {language === "en" ? "中" : "EN"}
+      {compact ? null : language === "en" ? "中" : "EN"}
     </Button>
   )
 }

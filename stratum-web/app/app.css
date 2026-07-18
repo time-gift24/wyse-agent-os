@@ -109,6 +109,7 @@
     calc(100vw - var(--page-gutter) * 2),
     clamp(42rem, 64vw, 56rem)
   );
+  --composer-width: var(--content-width);
   --content-half-width: min(
     calc(50vw - var(--page-gutter)),
     clamp(21rem, 32vw, 28rem)
@@ -116,6 +117,7 @@
   --layout-gap: clamp(0.75rem, 1.25vw, 1.5rem);
   --history-width: clamp(12rem, 16vw, 18rem);
   --text-body: clamp(0.9375rem, 0.12vw + 0.9rem, 1.0625rem);
+  --stratum-composer-min-height: 7.25rem;
   --z-grain: 60;
 
   --background: var(--stratum-canvas);
@@ -339,12 +341,21 @@
     max-width: 100%;
   }
 
+  .stratum-composer-width {
+    width: var(--composer-width);
+    max-width: 100%;
+  }
+
+  .stratum-prompt-shell {
+    border-radius: var(--radius-stratum-panel);
+  }
+
   .stratum-history-drawer {
     position: absolute;
-    top: 4.5rem;
-    left: 0;
-    width: min(85vw, 280px);
-    transform-origin: top right;
+    top: max(4.5rem, env(safe-area-inset-top));
+    left: max(var(--page-gutter), env(safe-area-inset-left));
+    width: min(calc(100vw - var(--page-gutter) * 2), 20rem);
+    transform-origin: top left;
   }
 
   @media (min-width: 1536px) {
@@ -352,6 +363,7 @@
       left: auto;
       right: calc(50% + var(--content-half-width) + 1rem);
       width: min(calc(50% - var(--content-half-width) - 2rem), 16rem);
+      transform-origin: top right;
     }
   }
 
@@ -372,15 +384,6 @@
     --navbar-max-width: var(--content-width);
   }
 
-  .navbar-glass .glass-surface__content {
-    align-items: stretch;
-    justify-content: flex-start;
-    padding: 0;
-  }
-
-  .navbar-glass.glass-surface {
-    transition: none;
-  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -459,6 +462,15 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
   .animate-in,
   .animate-out {
     animation-duration: 0.01ms !important;

@@ -1,8 +1,21 @@
 //! Shared helpers for filesystem-backed builtin tools.
 
+use serde::Deserialize;
+use serde_json::Value;
 use stratum_filesystem::{FileType, VirtualPath};
 
 use crate::ToolError;
+
+#[derive(Deserialize)]
+struct PathInput {
+    path: String,
+}
+
+pub(super) fn parse_path(arguments: Value) -> Result<VirtualPath, ToolError> {
+    let raw: PathInput =
+        serde_json::from_value(arguments).map_err(|source| ToolError::InvalidInput { source })?;
+    normalize_path(&raw.path)
+}
 
 pub(super) fn normalize_path(path: &str) -> Result<VirtualPath, ToolError> {
     if path.is_empty() {

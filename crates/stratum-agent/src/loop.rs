@@ -274,7 +274,7 @@ impl Agent {
 
             self.publish_required_agent_event(
                 AgentEvent::Finished {
-                    finish_reason: finish_reason_name(finish_reason).to_owned(),
+                    finish_reason: finish_reason.as_str().to_owned(),
                     usage: self.current_usage(),
                 },
                 None,
@@ -363,7 +363,7 @@ impl Agent {
                 }
                 self.publish_required_agent_event(
                     AgentEvent::Finished {
-                        finish_reason: finish_reason_name(FinishReason::Unknown).to_owned(),
+                        finish_reason: FinishReason::Unknown.as_str().to_owned(),
                         usage: self.current_usage(),
                     },
                     None,
@@ -648,7 +648,7 @@ impl Agent {
                                 turn_index,
                                 llm_call_id.clone(),
                                 LlmEvent::Finished {
-                                    finish_reason: finish_reason_name(finish_reason).to_owned(),
+                                    finish_reason: finish_reason.as_str().to_owned(),
                                     usage: event_usage,
                                 },
                                 None,
@@ -830,20 +830,15 @@ impl Agent {
             }
         }
 
-        let future = self.tool_registry.call(
-            &name,
-            ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
-        );
-        tokio::pin!(future);
         let cancel = self.cancel_token().expect("cancel token should be set");
-        let tool_result = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                self.publish_cancelled().await?;
-                return Err(AgentError::Cancelled);
-            }
-            result = &mut future => result,
-        };
+        let tool_result = self
+            .tool_registry
+            .call(
+                &name,
+                ToolInput::new(tool_call.call_id.clone(), tool_call.arguments.clone()),
+                &cancel,
+            )
+            .await;
 
         match tool_result {
             Ok(output) => {
@@ -937,32 +932,4 @@ fn finalize_tool_calls(
         });
     }
     Ok(tool_calls)
-}
-
-const fn finish_reason_name(finish_reason: FinishReason) -> &'static str {
-    match finish_reason {
-        FinishReason::Stop => "stop",
-        FinishReason::Length => "length",
-        FinishReason::ToolCalls => "tool_calls",
-        FinishReason::ContentFilter => "content_filter",
-        FinishReason::Unknown => "unknown",
-        _ => "unknown",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finish_reason_names_match_protocol_values() {
-        assert_eq!(finish_reason_name(FinishReason::Stop), "stop");
-        assert_eq!(finish_reason_name(FinishReason::Length), "length");
-        assert_eq!(finish_reason_name(FinishReason::ToolCalls), "tool_calls");
-        assert_eq!(
-            finish_reason_name(FinishReason::ContentFilter),
-            "content_filter"
-        );
-        assert_eq!(finish_reason_name(FinishReason::Unknown), "unknown");
-    }
 }

@@ -10,6 +10,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ToolError {
+    /// Tool execution was cancelled.
+    #[error("tool execution cancelled")]
+    Cancelled,
     /// A tool with this name is already registered.
     #[error("tool is already registered: {name}")]
     DuplicateTool {

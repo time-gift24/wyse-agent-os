@@ -33,13 +33,14 @@ export function ThemeToggle() {
   const isDark = theme === "dark"
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex min-h-11 items-center gap-2">
       {isDark ? (
         <MoonIcon className="size-4 text-muted-foreground" aria-hidden="true" />
       ) : (
         <SunIcon className="size-4 text-muted-foreground" aria-hidden="true" />
       )}
       <Switch
+        className="after:-inset-y-3.5"
         checked={isDark}
         aria-label={t("theme.toggle")}
         onCheckedChange={(checked) => {

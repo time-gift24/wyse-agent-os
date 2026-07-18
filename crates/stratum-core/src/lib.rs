@@ -1,5 +1,6 @@
 //! Core protocol types shared across Stratum crates.
 
+pub mod agent_loop_event;
 pub mod error;
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+pub use agent_loop_event::{AgentTelemetryEvent, DurableAgentEvent};
 pub use error::ModelIdParseError;
 
 /// Identity of one workflow run.
@@ -710,6 +712,24 @@ pub enum AgentEvent {
         /// User decision.
         decision: ApprovalDecision,
     },
+    /// A validated and approved tool call began executing.
+    ToolExecutionStarted {
+        /// Turn that owns the tool call.
+        turn_id: TurnId,
+        /// Tool call identity.
+        call_id: CallId,
+        /// Provider-visible tool name.
+        tool_name: ToolName,
+    },
+    /// One agent-loop iteration reached its durable boundary.
+    IterationCompleted {
+        /// Turn whose durable frontier advanced.
+        turn_id: TurnId,
+        /// Completed iteration number.
+        iteration: u64,
+        /// Token usage accumulated through the iteration.
+        usage: TokenUsage,
+    },
     /// Event emitted by one LLM call inside the agent run.
     Llm {
         /// LLM call identity.
@@ -731,6 +751,8 @@ impl AgentEvent {
             Self::Cancelled { .. } => "cancelled",
             Self::ToolApprovalRequested { .. } => "tool_approval_requested",
             Self::ToolApprovalResolved { .. } => "tool_approval_resolved",
+            Self::ToolExecutionStarted { .. } => "tool_execution_started",
+            Self::IterationCompleted { .. } => "iteration_completed",
             Self::Llm { .. } => "llm",
         }
     }
@@ -1255,5 +1277,63 @@ mod tests {
         assert_eq!(requested_json["data"]["danger_level"], "high");
         assert_eq!(resolved_json["type"], "tool_approval_resolved");
         assert_eq!(resolved_json["data"]["decision"], "approve");
+    }
+
+    #[test]
+    fn agent_loop_compatibility_events_have_stable_wire_shapes() -> serde_json::Result<()> {
+        let turn_id = "019f06b7-48f0-7c11-8000-000000000001"
+            .parse::<TurnId>()
+            .expect("fixed turn id should parse");
+        let usage = TokenUsage {
+            input_tokens: 1,
+            output_tokens: 2,
+            total_tokens: 3,
+        };
+        let fixtures = [
+            (
+                AgentEvent::ToolExecutionStarted {
+                    turn_id,
+                    call_id: CallId::from("tool-call-1"),
+                    tool_name: ToolName::from("echo"),
+                },
+                "tool_execution_started",
+                json!({
+                    "type": "tool_execution_started",
+                    "data": {
+                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
+                        "call_id": "tool-call-1",
+                        "tool_name": "echo"
+                    }
+                }),
+            ),
+            (
+                AgentEvent::IterationCompleted {
+                    turn_id,
+                    iteration: 4,
+                    usage,
+                },
+                "iteration_completed",
+                json!({
+                    "type": "iteration_completed",
+                    "data": {
+                        "turn_id": "019f06b7-48f0-7c11-8000-000000000001",
+                        "iteration": 4,
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2,
+                            "total_tokens": 3
+                        }
+                    }
+                }),
+            ),
+        ];
+
+        for (event, event_type, expected) in fixtures {
+            assert_eq!(event.event_type(), event_type);
+            assert_eq!(serde_json::to_value(&event)?, expected);
+            assert_eq!(serde_json::from_value::<AgentEvent>(expected)?, event);
+        }
+
+        Ok(())
     }
 }

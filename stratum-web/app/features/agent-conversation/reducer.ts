@@ -83,16 +83,22 @@ function projectAgentEvent(
     case "started":
       return { ...updateViewStatus(state, "running"), error: null }
     case "finished":
+      return {
+        ...updateViewStatus(state, "finished", event.data.usage),
+        drafts: {},
+        approvals: {},
+        error: null,
+      }
     case "cancelled":
       return {
-        ...updateViewStatus(state, "idle"),
+        ...updateViewStatus(state, "cancelled", event.data.usage),
         drafts: {},
         approvals: {},
         error: null,
       }
     case "failed":
       return {
-        ...updateViewStatus(state, "idle"),
+        ...updateViewStatus(state, "failed", event.data.usage),
         drafts: {},
         approvals: {},
         error: new ApiError("agent_failed", 500, event.data.error_text),
@@ -119,6 +125,12 @@ function projectAgentEvent(
     }
     case "llm":
       return projectLlmEvent(state, event.data.llm_call_id, event.data.event)
+    case "tool_execution_started":
+      return state
+    case "iteration_completed":
+      return updateViewUsage(state, event.data.usage)
+    default:
+      return state
   }
 }
 
@@ -257,6 +269,8 @@ function projectLlmEvent(
     case "finished":
     case "failed":
       return state
+    default:
+      return state
   }
 }
 
@@ -301,9 +315,26 @@ function updateTool(
 
 function updateViewStatus(
   state: ConversationState,
-  status: "idle" | "running"
+  status: NonNullable<ConversationState["view"]>["status"],
+  usage?: NonNullable<ConversationState["view"]>["usage"]
 ): ConversationState {
   return state.view === null
     ? state
-    : { ...state, view: { ...state.view, status } }
+    : {
+        ...state,
+        view: {
+          ...state.view,
+          status,
+          ...(usage === undefined ? {} : { usage }),
+        },
+      }
+}
+
+function updateViewUsage(
+  state: ConversationState,
+  usage: NonNullable<ConversationState["view"]>["usage"]
+): ConversationState {
+  return state.view === null
+    ? state
+    : { ...state, view: { ...state.view, usage } }
 }

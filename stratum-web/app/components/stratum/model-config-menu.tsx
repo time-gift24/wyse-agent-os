@@ -8,17 +8,10 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu"
 import type { ComposerConfiguration } from "~/hooks/use-agent-conversation"
-import {
-  modelDisplayName,
-  supportsThinkingControls,
-} from "~/lib/model-config"
+import { modelDisplayName, supportsThinkingControls } from "~/lib/model-config"
 
 type ConfigurationMenuProps = {
   configuration: ComposerConfiguration
@@ -38,7 +31,7 @@ export function AgentConfigMenu({
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label={triggerText}
-        className="inline-flex h-8 max-w-36 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+        className="inline-flex h-11 max-w-36 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
         disabled={menuDisabled(configuration, commandPending)}
       >
         <span className="truncate">{triggerText}</span>
@@ -60,6 +53,7 @@ export function AgentConfigMenu({
               <DropdownMenuRadioItem
                 key={template.agent_name}
                 value={template.agent_name}
+                className="min-h-11 text-sm"
               >
                 {template.agent_name}
               </DropdownMenuRadioItem>
@@ -85,80 +79,107 @@ export function ModelConfigMenu({
     : selected === null
       ? t("chat.composer.selectAgent")
       : formatModelLabel(selected.model)
+  const selectedThinkingLevel =
+    selected === null ? "disabled" : thinkingLevel(selected.parameters)
+  const thinkingText =
+    selectedThinkingLevel === "max"
+      ? t("chat.composer.max")
+      : selectedThinkingLevel === "high"
+        ? t("chat.composer.high")
+        : t("chat.composer.disabled")
+  const thinkingAvailable =
+    selected !== null &&
+    selectedDescriptor !== undefined &&
+    supportsThinkingControls(selectedDescriptor.parameters_schema)
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        aria-label={triggerText}
-        className="inline-flex h-8 max-w-52 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
-        disabled={
-          configuration.currentModelConfig === null ||
-          menuDisabled(configuration, commandPending)
-        }
-      >
-        <span className="truncate">{triggerText}</span>
-        <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-64">
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>{t("chat.composer.model")}</DropdownMenuLabel>
-          <DropdownMenuRadioGroup
-            value={selected?.model}
-            onValueChange={(model) => {
-              const descriptor = configuration.models.find(
-                (candidate) => candidate.model === model
-              )
-              if (descriptor) configuration.selectModel(descriptor)
-            }}
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          aria-label={triggerText}
+          className="inline-flex h-11 max-w-52 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+          disabled={
+            configuration.currentModelConfig === null ||
+            menuDisabled(configuration, commandPending)
+          }
+        >
+          <span className="truncate">{triggerText}</span>
+          <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-64">
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>{t("chat.composer.model")}</DropdownMenuLabel>
+            <DropdownMenuRadioGroup
+              value={selected?.model}
+              onValueChange={(model) => {
+                const descriptor = configuration.models.find(
+                  (candidate) => candidate.model === model
+                )
+                if (descriptor) configuration.selectModel(descriptor)
+              }}
+            >
+              {configuration.models.map((descriptor) => (
+                <DropdownMenuRadioItem
+                  key={descriptor.model}
+                  value={descriptor.model}
+                  className="min-h-11 text-sm"
+                >
+                  {formatModelLabel(descriptor.model)}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {thinkingAvailable ? (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            aria-label={`${t("chat.composer.thinking")}: ${thinkingText}`}
+            className="inline-flex h-11 max-w-32 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+            disabled={menuDisabled(configuration, commandPending)}
           >
-            {configuration.models.map((descriptor) => (
-              <DropdownMenuRadioItem
-                key={descriptor.model}
-                value={descriptor.model}
+            <span className="truncate">
+              {t("chat.composer.thinking")} · {thinkingText}
+            </span>
+            <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden="true" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-40">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>
+                {t("chat.composer.thinking")}
+              </DropdownMenuLabel>
+              <DropdownMenuRadioGroup
+                value={selectedThinkingLevel}
+                onValueChange={(value) => {
+                  if (
+                    value === "disabled" ||
+                    value === "high" ||
+                    value === "max"
+                  )
+                    configuration.setThinkingLevel(value)
+                }}
               >
-                {formatModelLabel(descriptor.model)}
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </DropdownMenuGroup>
-        {configuration.existingAgent &&
-          selected !== null &&
-          selectedDescriptor !== undefined &&
-          supportsThinkingControls(selectedDescriptor.parameters_schema) && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  {t("chat.composer.thinking")}
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  <DropdownMenuRadioGroup
-                    value={thinkingLevel(selected.parameters)}
-                    onValueChange={(value) => {
-                      if (
-                        value === "disabled" ||
-                        value === "high" ||
-                        value === "max"
-                      )
-                        configuration.setThinkingLevel(value)
-                    }}
-                  >
-                    <DropdownMenuRadioItem value="disabled">
-                      {t("chat.composer.disabled")}
-                    </DropdownMenuRadioItem>
-                    <DropdownMenuRadioItem value="high">
-                      {t("chat.composer.high")}
-                    </DropdownMenuRadioItem>
-                    <DropdownMenuRadioItem value="max">
-                      {t("chat.composer.max")}
-                    </DropdownMenuRadioItem>
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-            </>
-          )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+                <DropdownMenuRadioItem
+                  value="disabled"
+                  className="min-h-11 text-sm"
+                >
+                  {t("chat.composer.disabled")}
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem
+                  value="high"
+                  className="min-h-11 text-sm"
+                >
+                  {t("chat.composer.high")}
+                </DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="max" className="min-h-11 text-sm">
+                  {t("chat.composer.max")}
+                </DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      ) : null}
+    </>
   )
 }
 

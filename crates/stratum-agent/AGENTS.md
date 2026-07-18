@@ -2,8 +2,45 @@
 
 ## Scope
 
-`stratum-agent` owns the active turn loop, turn commands, tool approval events,
-cancellation, conversation history, and turn resumption.
+`stratum-agent` contains the session-independent `AgentLoop` kernel and the
+legacy stateful `Agent` compatibility path.
+
+## AgentLoop Kernel
+
+- `AgentLoop` consumes a caller-preloaded `LoopContext` plus user prompts. It
+  does not own session creation, history loading, an `AgentStore`, or an
+  `EventStreamBus`.
+- Required transitions use `DurableEventSink`; model deltas and non-critical
+  diagnostics use the separate best-effort `TelemetryEventSink`.
+- A durable append must be acknowledged before the kernel mutates its in-memory
+  transcript or starts the next external action.
+- Tool calls execute sequentially through `ToolExecutor`. Lookup and synchronous,
+  side-effect-free deterministic input validation happen before approval.
+  Approval and `ToolExecutionStarted` must be durable before dispatch, and each
+  tool result must be durable before the next tool or model request.
+- Cancellation is rechecked after validation, after approval durability
+  boundaries, and immediately before `ToolExecutionStarted`; before started is
+  acknowledged, cancellation prevents dispatch and maps to loop cancellation.
+- The run's supplied `CancellationToken` controls model-stream acquisition and
+  polling in `AgentLoop`; the same token is passed to approval and tool
+  operations. Cancellation is cooperative: after `ToolExecutionStarted`, the
+  caller must keep polling the loop so it can await and record the outcome.
+  A durable start without a result is an unknown outcome and is never retried
+  automatically by the kernel.
+- Only a provider `FinishReason::ToolCalls` authorizes dispatch. If a response contains tool calls
+  with `length`, `stop`, or another finish reason, commit structured tool-error messages without
+  invoking the tools.
+- `LoopLimits` bounds assistant text, reasoning, and each tool-call argument buffer in addition to
+  iterations and tool-call count. Enforce limits before appending each streamed fragment; never
+  retain an unbounded provider response.
+- `ToolExecutor` is the single source of the durable sink used by `AgentLoop`; the builder must not
+  accept a second sink that could split tool and loop boundaries across transports.
+
+## Legacy Agent Compatibility
+
+The following rules describe the existing `Agent`, session, resume, store, and
+`EventStreamBus` integration. This remains temporary compatibility code and is
+not the ownership model for the new `AgentLoop` kernel.
 
 - The Agent receives an injected `EventStreamBus` for event delivery and an
   injected `AgentStore` for durable resumption.
@@ -13,7 +50,7 @@ cancellation, conversation history, and turn resumption.
   responsibilities; the Agent uses the store to restore durable state and
   advance its resume position.
 
-## Turn Control
+## Turn Control (Legacy Agent)
 
 - Use a bounded MPSC channel for interactive commands sent to an active turn.
 - Keep cancellation on `CancellationToken` and prioritize it in `tokio::select!`.
@@ -21,7 +58,7 @@ cancellation, conversation history, and turn resumption.
 - Publish `tool_approval_requested` successfully before waiting.
 - Keep user-message queuing separate until its behavior is implemented.
 
-## Resume
+## Resume (Legacy Agent)
 
 - `Agent::resume()` takes no user message. It loads the injected store and
   continues the unfinished turn with the same persisted `run_id` and `turn_id`.

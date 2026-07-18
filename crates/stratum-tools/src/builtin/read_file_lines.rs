@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use stratum_core::ToolSpec;
 use stratum_filesystem::{Filesystem, VirtualPath};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     Tool, ToolError, ToolInput, ToolOutput,
@@ -50,10 +51,19 @@ impl Tool for ReadFileLinesTool {
         &self.spec
     }
 
-    async fn call(&self, input: ToolInput) -> Result<ToolOutput, ToolError> {
-        let raw: ReadFileLinesInput = serde_json::from_value(input.arguments)
-            .map_err(|source| ToolError::InvalidInput { source })?;
-        let path = normalize_path(&raw.path)?;
+    fn validate(&self, input: &ToolInput) -> Result<(), ToolError> {
+        parse_input(input.arguments.clone()).map(|_| ())
+    }
+
+    async fn call(
+        &self,
+        input: ToolInput,
+        cancellation: &CancellationToken,
+    ) -> Result<ToolOutput, ToolError> {
+        let (raw, path) = parse_input(input.arguments)?;
+        if cancellation.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         let content = self.filesystem.read_file(&path).await?;
         let text = String::from_utf8(content).map_err(|source| ToolError::InvalidUtf8 {
             path: display_path(&path),
@@ -70,6 +80,13 @@ struct ReadFileLinesInput {
     path: String,
     start_line: NonZeroUsize,
     line_count: NonZeroUsize,
+}
+
+fn parse_input(arguments: Value) -> Result<(ReadFileLinesInput, VirtualPath), ToolError> {
+    let raw: ReadFileLinesInput =
+        serde_json::from_value(arguments).map_err(|source| ToolError::InvalidInput { source })?;
+    let path = normalize_path(&raw.path)?;
+    Ok((raw, path))
 }
 
 fn line_range_output(

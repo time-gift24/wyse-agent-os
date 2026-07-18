@@ -100,6 +100,22 @@ impl EventStreamBus for StoreEventStreamBus {
                 self.forward_committed(envelope).await;
                 Ok(())
             }
+            RuntimeEvent::Agent {
+                event:
+                    AgentEvent::IterationCompleted {
+                        turn_id,
+                        iteration,
+                        usage,
+                    },
+                ..
+            } => {
+                self.store
+                    .complete_iteration(envelope.run_id, *turn_id, *iteration, *usage)
+                    .await
+                    .map_err(EventStreamBusError::persistence)?;
+                self.forward_committed(envelope).await;
+                Ok(())
+            }
             RuntimeEvent::Agent { event, .. } => {
                 let (status, usage) = match event {
                     AgentEvent::Finished { usage, .. } => (AgentStatus::Finished, *usage),

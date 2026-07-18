@@ -10,6 +10,10 @@ use stratum_core::{ModelConfig, ModelId, TokenUsage};
 use crate::{ChatMessage, LlmError, StructuredOutput, ToolCallDelta, ToolSpec};
 
 /// Stream of chat events produced by a provider.
+///
+/// Callers may interrupt an in-progress wait for the next event and then drop the stream.
+/// Implementations must not rely on uninterrupted polling for safety or consistency and should
+/// release any in-flight transport resources when the stream is dropped.
 pub type ChatStream =
     Pin<Box<dyn Stream<Item = Result<ChatStreamEvent, LlmError>> + Send + 'static>>;
 
@@ -23,6 +27,12 @@ pub trait LlmProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
 
     /// Sends a streaming chat request.
+    ///
+    /// # Cancellation safety
+    ///
+    /// Callers may drop the acquisition future before a [`ChatStream`] is returned. Implementations
+    /// must remain safe and consistent when that happens and should cleanly cancel any in-flight
+    /// transport work.
     async fn chat_stream(&self, request: ChatRequest) -> Result<ChatStream, LlmError>;
 }
 
@@ -152,9 +162,23 @@ pub enum FinishReason {
     Unknown,
 }
 
+impl FinishReason {
+    /// Returns the stable protocol name for this finish reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolCalls => "tool_calls",
+            Self::ContentFilter => "content_filter",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{ChatMessage, ChatRequest, StructuredOutput};
+    use crate::{ChatMessage, ChatRequest, FinishReason, StructuredOutput};
     use serde_json::json;
 
     #[test]
@@ -185,5 +209,14 @@ mod tests {
                 "data": { "delta": "thinking" }
             })
         );
+    }
+
+    #[test]
+    fn finish_reason_names_match_protocol_values() {
+        assert_eq!(FinishReason::Stop.as_str(), "stop");
+        assert_eq!(FinishReason::Length.as_str(), "length");
+        assert_eq!(FinishReason::ToolCalls.as_str(), "tool_calls");
+        assert_eq!(FinishReason::ContentFilter.as_str(), "content_filter");
+        assert_eq!(FinishReason::Unknown.as_str(), "unknown");
     }
 }

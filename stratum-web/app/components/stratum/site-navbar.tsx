@@ -1,18 +1,12 @@
 "use client"
 
-import {
-  useEffect,
-  useRef,
-  useState,
-  type MouseEvent,
-  type ReactNode,
-} from "react"
+import { useRef, type MouseEvent, type ReactNode } from "react"
+import { UserPlusIcon } from "lucide-react"
 import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { Link, useNavigate } from "react-router"
 import { useTranslation } from "react-i18next"
 
-import GlassSurface from "~/components/react-bits/GlassSurface"
 import { LanguageToggle } from "~/components/stratum/language-toggle"
 import { StratumMark } from "~/components/stratum/stratum-mark"
 import { ThemeToggle } from "~/components/stratum/theme-toggle"
@@ -28,11 +22,6 @@ import { Separator } from "~/components/ui/separator"
 import { cn } from "~/lib/utils"
 
 gsap.registerPlugin(useGSAP)
-
-const isDarkMode = () => {
-  if (typeof document === "undefined") return false
-  return document.documentElement.classList.contains("dark")
-}
 
 type SiteSection = "overview" | "longzhong"
 
@@ -60,27 +49,6 @@ export function SiteNavbar({
   const { contextSafe } = useGSAP({ scope: navRef })
 
   const isLongzhong = activeSection === "longzhong"
-  const [isDark, setIsDark] = useState(() => isDarkMode())
-
-  useEffect(() => {
-    if (typeof window === "undefined") return
-
-    const update = () => setIsDark(isDarkMode())
-    const media = window.matchMedia("(prefers-color-scheme: dark)")
-    const observer = new MutationObserver(update)
-
-    media.addEventListener("change", update)
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["class"],
-    })
-
-    return () => {
-      media.removeEventListener("change", update)
-      observer.disconnect()
-    }
-  }, [])
-
   const navigateWithTransition = contextSafe(
     (
       event: MouseEvent<HTMLAnchorElement>,
@@ -212,21 +180,23 @@ export function SiteNavbar({
   )
 
   const NavContent = (
-    <div className="relative z-10 flex h-12 w-full items-center gap-4 px-3">
+    <div className="relative z-10 flex h-14 w-full items-center gap-2 px-2 sm:gap-4 sm:px-3">
       {leftSlot ? (
         <div className="flex items-center 2xl:hidden">{leftSlot}</div>
       ) : null}
       <Link
         to="/"
         onClick={(event) => navigateWithTransition(event, "/", "back")}
-        className="relative z-10 flex min-w-0 items-center gap-2 text-sm font-medium md:text-base"
+        className="relative z-10 flex shrink-0 items-center gap-1.5 text-sm font-medium md:text-base"
         aria-label={`运筹 ${t("brand.home")}`}
       >
         <StratumMark animated={false} variant="compact" className="size-7" />
-        <span className="truncate font-heading font-semibold">运筹</span>
+        <span className="hidden font-heading font-semibold sm:inline">
+          运筹
+        </span>
       </Link>
 
-      <div className="relative z-10 ml-auto flex items-center gap-3">
+      <div className="relative z-10 ml-auto flex min-w-0 items-center gap-1 sm:gap-3">
         <div ref={sectionNavRef} className="relative hidden md:block">
           <NavigationMenu className="flex-none">
             <NavigationMenuList>
@@ -281,9 +251,26 @@ export function SiteNavbar({
         </div>
         <Separator orientation="vertical" className="hidden md:block" />
         {rightSlot}
-        <LanguageToggle />
-        <ThemeToggle />
-        <Button size="lg">{t("actions.signUp")}</Button>
+        <div className="sm:hidden">
+          <LanguageToggle compact />
+        </div>
+        <div className="hidden sm:block">
+          <LanguageToggle />
+        </div>
+        <div className="shrink-0">
+          <ThemeToggle />
+        </div>
+        <Button
+          size="icon-lg"
+          className="size-11 sm:hidden"
+          aria-label={t("actions.signUp")}
+          title={t("actions.signUp")}
+        >
+          <UserPlusIcon aria-hidden="true" />
+        </Button>
+        <Button size="lg" className="hidden min-h-11 sm:inline-flex">
+          {t("actions.signUp")}
+        </Button>
       </div>
     </div>
   )
@@ -306,22 +293,9 @@ export function SiteNavbar({
         {isLongzhong && (
           <div
             ref={glassRef}
-            className="absolute inset-0 opacity-0"
+            className="absolute inset-0 rounded-full border border-stratum-line bg-stratum-paper opacity-0 shadow-stratum-soft"
             aria-hidden="true"
-          >
-            <GlassSurface
-              width="100%"
-              height="100%"
-              borderRadius={2}
-              backgroundOpacity={isDark ? 0.35 : 0.1}
-              saturation={isDark ? 1.6 : 1.1}
-              brightness={isDark ? 28 : 78}
-              opacity={isDark ? 0.78 : 0.72}
-              blur={isDark ? 16 : 14}
-              displace={4}
-              className="navbar-glass"
-            />
-          </div>
+          />
         )}
         {NavContent}
       </div>
