@@ -13,8 +13,10 @@ use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use serde_json::json;
 use stratum_agent::{
-    AgentLoop, AgentLoopBuildError, AgentLoopError, AllowAllToolApproval, LoopContext, LoopLimits,
-    ProtocolError, ToolApproval, ToolApprovalError, ToolApprovalRequest, ToolExecutor,
+    AgentLoop, AgentLoopBuildError, AgentLoopError, AgentLoopHook, AgentLoopHookError,
+    AgentLoopHookStage, AllowAllToolApproval, IterationHookContext, LlmCallHookContext,
+    LlmCallOutput, LlmErrorAction, LoopContext, LoopLimits, ProtocolError, ToolApproval,
+    ToolApprovalError, ToolApprovalRequest, ToolCallHookContext, ToolExecutor,
 };
 use stratum_core::{
     AgentTelemetryEvent, ApprovalDecision, CallId, ChatContent, ChatMessage, ChatRole, DangerLevel,
@@ -344,6 +346,26 @@ fn assemble_agent_loop(
     durable: Arc<dyn DurableEventSink>,
     operations: Arc<Mutex<Vec<Operation>>>,
 ) -> AgentLoop {
+    assemble_agent_loop_with_hooks(
+        behaviors,
+        limits,
+        registry,
+        approval,
+        durable,
+        operations,
+        Vec::new(),
+    )
+}
+
+fn assemble_agent_loop_with_hooks(
+    behaviors: VecDeque<ProviderBehavior>,
+    limits: LoopLimits,
+    registry: Arc<dyn ToolRegistry>,
+    approval: Arc<dyn ToolApproval>,
+    durable: Arc<dyn DurableEventSink>,
+    operations: Arc<Mutex<Vec<Operation>>>,
+    hooks: Vec<Arc<dyn AgentLoopHook>>,
+) -> AgentLoop {
     let telemetry: Arc<dyn TelemetryEventSink> = Arc::new(RecordingTelemetrySink {
         operations: Arc::clone(&operations),
     });
@@ -355,11 +377,15 @@ fn assemble_agent_loop(
             .expect("static model id should parse"),
     });
     let tool_executor = ToolExecutor::new(registry, approval, Arc::clone(&durable));
-    AgentLoop::builder()
+    let mut builder = AgentLoop::builder()
         .llm_provider(provider)
         .tool_executor(tool_executor)
         .telemetry(telemetry)
-        .limits(limits)
+        .limits(limits);
+    for hook in hooks {
+        builder = builder.hook(hook);
+    }
+    builder
         .build()
         .expect("all agent loop fields should be present")
 }
@@ -3030,4 +3056,493 @@ async fn cancelled_terminal_usage_saturates_only_completed_finished_frames() {
                     }
             ))
     );
+}
+
+struct RewritingHook {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl RewritingHook {
+    fn record(&self, call: impl Into<String>) {
+        self.calls
+            .lock()
+            .expect("hook call lock should not be poisoned")
+            .push(call.into());
+    }
+}
+
+#[async_trait]
+impl AgentLoopHook for RewritingHook {
+    async fn before_iteration(
+        &self,
+        context: IterationHookContext<'_>,
+    ) -> Result<(), AgentLoopHookError> {
+        self.record(format!("before_iteration:{}", context.iteration));
+        Ok(())
+    }
+
+    async fn before_llm_call(
+        &self,
+        context: LlmCallHookContext<'_>,
+        request: &mut ChatRequest,
+    ) -> Result<(), AgentLoopHookError> {
+        self.record(format!(
+            "before_llm_call:{}:{}",
+            context.iteration, context.attempt
+        ));
+        request
+            .messages
+            .push(ChatMessage::system("hook instruction"));
+        Ok(())
+    }
+
+    async fn after_llm_call(
+        &self,
+        context: LlmCallHookContext<'_>,
+        output: &mut LlmCallOutput,
+    ) -> Result<(), AgentLoopHookError> {
+        self.record(format!(
+            "after_llm_call:{}:{}",
+            context.iteration, context.attempt
+        ));
+        if let ChatContent::Text(text) = output.content_mut() {
+            text.push_str(" [hooked]");
+        }
+        for tool_call in output.tool_calls_mut() {
+            tool_call.arguments = json!({"value": "rewritten"});
+        }
+        Ok(())
+    }
+
+    async fn before_tool_call(
+        &self,
+        context: ToolCallHookContext<'_>,
+    ) -> Result<(), AgentLoopHookError> {
+        self.record(format!(
+            "before_tool_call:{}:{}",
+            context.iteration, context.tool_call.call_id
+        ));
+        Ok(())
+    }
+
+    async fn after_tool_call(
+        &self,
+        context: ToolCallHookContext<'_>,
+        result: &mut serde_json::Value,
+    ) -> Result<(), AgentLoopHookError> {
+        self.record(format!(
+            "after_tool_call:{}:{}",
+            context.iteration, context.tool_call.call_id
+        ));
+        *result = json!({"hooked": std::mem::take(result)});
+        Ok(())
+    }
+
+    async fn after_iteration(
+        &self,
+        context: IterationHookContext<'_>,
+    ) -> Result<(), AgentLoopHookError> {
+        self.record(format!("after_iteration:{}", context.iteration));
+        Ok(())
+    }
+}
+
+struct RetryHook {
+    attempts: Arc<Mutex<Vec<usize>>>,
+}
+
+#[async_trait]
+impl AgentLoopHook for RetryHook {
+    async fn on_llm_error(
+        &self,
+        context: LlmCallHookContext<'_>,
+        _error: &LlmError,
+    ) -> Result<LlmErrorAction, AgentLoopHookError> {
+        self.attempts
+            .lock()
+            .expect("retry attempt lock should not be poisoned")
+            .push(context.attempt);
+        Ok(LlmErrorAction::Retry)
+    }
+}
+
+struct RequestMarkerHook(&'static str);
+
+#[async_trait]
+impl AgentLoopHook for RequestMarkerHook {
+    async fn before_llm_call(
+        &self,
+        _context: LlmCallHookContext<'_>,
+        request: &mut ChatRequest,
+    ) -> Result<(), AgentLoopHookError> {
+        request.messages.push(ChatMessage::system(self.0));
+        Ok(())
+    }
+}
+
+struct FailingBeforeToolHook;
+
+#[async_trait]
+impl AgentLoopHook for FailingBeforeToolHook {
+    async fn before_tool_call(
+        &self,
+        _context: ToolCallHookContext<'_>,
+    ) -> Result<(), AgentLoopHookError> {
+        Err(AgentLoopHookError::new(std::io::Error::other(
+            "scripted hook failure",
+        )))
+    }
+}
+
+struct FailingAfterToolHook;
+
+#[async_trait]
+impl AgentLoopHook for FailingAfterToolHook {
+    async fn after_tool_call(
+        &self,
+        _context: ToolCallHookContext<'_>,
+        result: &mut serde_json::Value,
+    ) -> Result<(), AgentLoopHookError> {
+        *result = json!({"must_not_commit": true});
+        Err(AgentLoopHookError::new(std::io::Error::other(
+            "scripted post-tool hook failure",
+        )))
+    }
+}
+
+fn hooked_agent_loop(
+    behaviors: VecDeque<ProviderBehavior>,
+    limits: LoopLimits,
+    hooks: Vec<Arc<dyn AgentLoopHook>>,
+) -> (AgentLoop, Arc<Mutex<Vec<Operation>>>) {
+    let operations = Arc::new(Mutex::new(Vec::new()));
+    let durable: Arc<dyn DurableEventSink> = Arc::new(RecordingDurableSink {
+        operations: Arc::clone(&operations),
+        fail_at: None,
+        attempts: AtomicUsize::new(0),
+    });
+    let registry = recording_registry(
+        &operations,
+        &[("echo", RecordingToolBehavior::Echo)],
+        ToolPermissionMode::Allow,
+    );
+    let agent_loop = assemble_agent_loop_with_hooks(
+        behaviors,
+        limits,
+        registry,
+        Arc::new(AllowAllToolApproval),
+        durable,
+        Arc::clone(&operations),
+        hooks,
+    );
+    (agent_loop, operations)
+}
+
+#[tokio::test]
+async fn hooks_rewrite_llm_requests_assistant_output_and_tool_results_at_each_boundary() {
+    let hook_calls = Arc::new(Mutex::new(Vec::new()));
+    let hook: Arc<dyn AgentLoopHook> = Arc::new(RewritingHook {
+        calls: Arc::clone(&hook_calls),
+    });
+    let (agent_loop, operations) = hooked_agent_loop(
+        VecDeque::from([
+            tool_call_turn(
+                &[("call-hook", "echo", json!({"value": "original"}))],
+                FinishReason::ToolCalls,
+                None,
+            ),
+            stop_turn("done", None),
+        ]),
+        LoopLimits::new(2, 1),
+        vec![hook],
+    );
+
+    let outcome = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("use hook")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("hooked loop should finish");
+
+    assert_eq!(
+        outcome.new_messages[1].tool_calls[0].arguments,
+        json!({"value": "rewritten"})
+    );
+    assert_eq!(
+        outcome.new_messages[2],
+        ChatMessage::tool("call-hook", json!({"hooked": {"value": "rewritten"}}))
+    );
+    assert_eq!(
+        outcome.new_messages[3],
+        ChatMessage::assistant("done [hooked]")
+    );
+    assert_eq!(
+        *hook_calls
+            .lock()
+            .expect("hook call lock should not be poisoned"),
+        vec![
+            "before_iteration:0",
+            "before_llm_call:0:0",
+            "after_llm_call:0:0",
+            "before_tool_call:0:call-hook",
+            "after_tool_call:0:call-hook",
+            "after_iteration:0",
+            "before_iteration:1",
+            "before_llm_call:1:0",
+            "after_llm_call:1:0",
+            "after_iteration:1",
+        ]
+    );
+    let recorded = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    let requests = recorded
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::ChatStream(request) => Some(request),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .messages
+            .iter()
+            .filter(|message| message == &&ChatMessage::system("hook instruction"))
+            .count()
+            == 1
+    }));
+}
+
+#[tokio::test]
+async fn multiple_hooks_mutate_requests_in_registration_order() {
+    let hooks: Vec<Arc<dyn AgentLoopHook>> = vec![
+        Arc::new(RequestMarkerHook("first")),
+        Arc::new(RequestMarkerHook("second")),
+    ];
+    let (agent_loop, operations) = hooked_agent_loop(
+        VecDeque::from([stop_turn("done", None)]),
+        LoopLimits::new(1, 1),
+        hooks,
+    );
+
+    agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("ordered hooks")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("ordered hooks should finish");
+
+    let recorded = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    let request = recorded
+        .iter()
+        .find_map(|operation| match operation {
+            Operation::ChatStream(request) => Some(request),
+            _ => None,
+        })
+        .expect("provider request should be recorded");
+    assert_eq!(
+        &request.messages[request.messages.len() - 2..],
+        &[ChatMessage::system("first"), ChatMessage::system("second")]
+    );
+}
+
+#[tokio::test]
+async fn llm_error_hook_retries_with_a_fresh_attempt_and_request() {
+    let retry_attempts = Arc::new(Mutex::new(Vec::new()));
+    let hook: Arc<dyn AgentLoopHook> = Arc::new(RetryHook {
+        attempts: Arc::clone(&retry_attempts),
+    });
+    let (agent_loop, operations) = hooked_agent_loop(
+        VecDeque::from([ProviderBehavior::SetupError, stop_turn("recovered", None)]),
+        LoopLimits::new(1, 1).with_llm_retries(1),
+        vec![hook],
+    );
+
+    let outcome = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("retry")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("one configured retry should recover");
+
+    assert_eq!(
+        outcome.new_messages.last(),
+        Some(&ChatMessage::assistant("recovered"))
+    );
+    assert_eq!(
+        *retry_attempts
+            .lock()
+            .expect("retry attempt lock should not be poisoned"),
+        vec![0]
+    );
+    assert_eq!(
+        operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ChatStream(_)))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn llm_error_hook_cannot_exceed_the_configured_retry_budget() {
+    let retry_attempts = Arc::new(Mutex::new(Vec::new()));
+    let hook: Arc<dyn AgentLoopHook> = Arc::new(RetryHook {
+        attempts: Arc::clone(&retry_attempts),
+    });
+    let (agent_loop, operations) = hooked_agent_loop(
+        VecDeque::from([
+            ProviderBehavior::SetupError,
+            ProviderBehavior::SetupError,
+            stop_turn("must not run", None),
+        ]),
+        LoopLimits::new(1, 1).with_llm_retries(1),
+        vec![hook],
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("bounded retry")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the second failure should exhaust one retry");
+
+    assert!(matches!(error, AgentLoopError::Llm { .. }));
+    assert_eq!(
+        *retry_attempts
+            .lock()
+            .expect("retry attempt lock should not be poisoned"),
+        vec![0, 1]
+    );
+    assert_eq!(
+        operations
+            .lock()
+            .expect("operation lock should not be poisoned")
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ChatStream(_)))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn before_tool_hook_failure_is_typed_and_prevents_tool_dispatch() {
+    let hook: Arc<dyn AgentLoopHook> = Arc::new(FailingBeforeToolHook);
+    let (agent_loop, operations) = hooked_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[("call-rejected-by-hook", "echo", json!({}))],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(1, 1),
+        vec![hook],
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("fail before tool")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("hook failure should stop the loop");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::Hook {
+            stage: AgentLoopHookStage::BeforeToolCall,
+            ..
+        }
+    ));
+    let recorded = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    assert!(!recorded.iter().any(|operation| matches!(
+        operation,
+        Operation::ToolCall { .. }
+            | Operation::Durable(DurableAgentEvent::ToolExecutionStarted { .. })
+    )));
+    assert!(recorded.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+    )));
+}
+
+#[tokio::test]
+async fn after_tool_hook_failure_commits_the_original_result_before_failing() {
+    let hook: Arc<dyn AgentLoopHook> = Arc::new(FailingAfterToolHook);
+    let (agent_loop, operations) = hooked_agent_loop(
+        VecDeque::from([tool_call_turn(
+            &[(
+                "call-post-hook-failure",
+                "echo",
+                json!({"value": "preserved"}),
+            )],
+            FinishReason::ToolCalls,
+            None,
+        )]),
+        LoopLimits::new(1, 1),
+        vec![hook],
+    );
+
+    let error = agent_loop
+        .run(
+            LoopContext::new("be precise"),
+            vec![ChatMessage::user("preserve tool outcome")],
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("post-tool hook failure should fail the loop");
+
+    assert!(matches!(
+        error,
+        AgentLoopError::Hook {
+            stage: AgentLoopHookStage::AfterToolCall,
+            ..
+        }
+    ));
+    let recorded = operations
+        .lock()
+        .expect("operation lock should not be poisoned");
+    let result_position = recorded
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::MessageAppended { message })
+                    if message == &ChatMessage::tool(
+                        "call-post-hook-failure",
+                        json!({"value": "preserved"})
+                    )
+            )
+        })
+        .expect("the original tool result should be committed");
+    let failure_position = recorded
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation,
+                Operation::Durable(DurableAgentEvent::LoopFailed { .. })
+            )
+        })
+        .expect("the hook failure should be committed");
+    assert!(result_position < failure_position);
+    assert!(!recorded.iter().any(|operation| matches!(
+        operation,
+        Operation::Durable(DurableAgentEvent::MessageAppended { message })
+            if message.content == ChatContent::Json(json!({"must_not_commit": true}))
+    )));
 }

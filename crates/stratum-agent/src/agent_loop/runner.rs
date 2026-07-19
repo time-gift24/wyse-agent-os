@@ -3,8 +3,8 @@
 use std::{collections::HashSet, sync::Arc};
 
 use stratum_core::{
-    AgentTelemetryEvent, CallId, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId, TokenUsage,
-    ToolCall,
+    AgentTelemetryEvent, CallId, ChatContent, ChatMessage, ChatRole, DurableAgentEvent, LlmCallId,
+    TokenUsage, ToolCall,
 };
 use stratum_infra::{DurableEventSink, TelemetryEventSink};
 use stratum_llm::{ChatRequest, FinishReason, LlmProvider};
@@ -13,8 +13,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{ToolApprovalError, ToolExecutor, ToolExecutorError};
 
 use super::{
-    AgentLoopBuildError, AgentLoopError, LoopContext, LoopLimits, LoopOutcome,
-    stream::consume_assistant_stream,
+    AgentLoopBuildError, AgentLoopError, AgentLoopHook, AgentLoopHookError, AgentLoopHookStage,
+    IterationHookContext, LlmCallHookContext, LlmCallOutput, LlmErrorAction, LoopContext,
+    LoopLimits, LoopOutcome, ToolCallHookContext, stream::consume_assistant_stream,
 };
 
 /// Executes the foundational LLM and tool control flow without owning session state.
@@ -23,6 +24,7 @@ pub struct AgentLoop {
     tool_executor: ToolExecutor,
     durable_events: Arc<dyn DurableEventSink>,
     telemetry: Arc<dyn TelemetryEventSink>,
+    hooks: Vec<Arc<dyn AgentLoopHook>>,
     limits: LoopLimits,
 }
 
@@ -136,42 +138,29 @@ impl AgentLoop {
             if cancellation.is_cancelled() {
                 return Err(AgentLoopError::Cancelled);
             }
-            let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
-            self.telemetry.emit(AgentTelemetryEvent::LlmStarted {
-                llm_call_id: llm_call_id.clone(),
-            });
-            let request = ChatRequest {
-                model: self.llm_provider.model_id(),
-                messages: request_messages(&context.system_prompt, &context.messages),
-                tools: self.tool_executor.specs(),
-                structured_output: None,
-            };
-            let stream = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Err(AgentLoopError::Cancelled),
-                stream = self.llm_provider.chat_stream(request) => stream?,
-            };
-            let assistant = consume_assistant_stream(
-                stream,
-                &llm_call_id,
-                self.telemetry.as_ref(),
+            let iteration = u64::try_from(iteration).unwrap_or(u64::MAX);
+            self.run_before_iteration_hooks(IterationHookContext {
+                iteration,
+                messages: &context.messages,
+                usage: *usage,
                 cancellation,
-                self.limits,
-                usage,
-            )
+            })
             .await?;
-            let finish_reason = assistant.finish_reason;
-            let tool_calls = assistant.message.tool_calls.clone();
+            let (assistant_message, finish_reason) = self
+                .run_llm_call(iteration, &context, cancellation, usage)
+                .await?
+                .into_parts();
+            let tool_calls = assistant_message.tool_calls.clone();
             let new_tool_call_ids = validate_new_tool_call_ids(&tool_calls, &seen_tool_call_ids)?;
 
             self.durable_events
                 .append(DurableAgentEvent::MessageAppended {
-                    message: assistant.message.clone(),
+                    message: assistant_message.clone(),
                 })
                 .await?;
             seen_tool_call_ids.extend(new_tool_call_ids);
-            context.messages.push(assistant.message.clone());
-            new_messages.push(assistant.message);
+            context.messages.push(assistant_message.clone());
+            new_messages.push(assistant_message);
 
             if !tool_calls.is_empty() {
                 context.messages.reserve(tool_calls.len());
@@ -183,6 +172,15 @@ impl AgentLoop {
                     let message = if finish_reason != FinishReason::ToolCalls {
                         unexecutable_tool_result(tool_call, finish_reason)
                     } else {
+                        self.run_before_tool_call_hooks(ToolCallHookContext {
+                            iteration,
+                            tool_call,
+                            cancellation,
+                        })
+                        .await?;
+                        if cancellation.is_cancelled() {
+                            return Err(AgentLoopError::Cancelled);
+                        }
                         match self.tool_executor.execute(tool_call, cancellation).await {
                             Ok(message) => message,
                             Err(ToolExecutorError::Durability { source }) => {
@@ -194,6 +192,37 @@ impl AgentLoop {
                             Err(source) => return Err(AgentLoopError::ToolExecution { source }),
                         }
                     };
+                    let message = if self.hooks.is_empty() {
+                        message
+                    } else {
+                        let original_message = message;
+                        let mut hooked_message = original_message.clone();
+                        let ChatContent::Json(result) = &mut hooked_message.content else {
+                            return Err(super::ProtocolError::InvalidToolResultContent {
+                                call_id: tool_call.call_id.clone(),
+                            }
+                            .into());
+                        };
+                        if let Err(hook_error) = self
+                            .run_after_tool_call_hooks(
+                                ToolCallHookContext {
+                                    iteration,
+                                    tool_call,
+                                    cancellation,
+                                },
+                                result,
+                            )
+                            .await
+                        {
+                            self.durable_events
+                                .append(DurableAgentEvent::MessageAppended {
+                                    message: original_message,
+                                })
+                                .await?;
+                            return Err(hook_error);
+                        }
+                        hooked_message
+                    };
                     self.durable_events
                         .append(DurableAgentEvent::MessageAppended {
                             message: message.clone(),
@@ -204,7 +233,13 @@ impl AgentLoop {
                 }
             }
 
-            let iteration = u64::try_from(iteration).unwrap_or(u64::MAX);
+            self.run_after_iteration_hooks(IterationHookContext {
+                iteration,
+                messages: &context.messages,
+                usage: *usage,
+                cancellation,
+            })
+            .await?;
             self.durable_events
                 .append(DurableAgentEvent::IterationCompleted {
                     iteration,
@@ -234,6 +269,149 @@ impl AgentLoop {
             maximum: self.limits.max_iterations,
         })
     }
+
+    async fn run_llm_call(
+        &self,
+        iteration: u64,
+        context: &LoopContext,
+        cancellation: &CancellationToken,
+        usage: &mut TokenUsage,
+    ) -> Result<LlmCallOutput, AgentLoopError> {
+        let mut attempt = 0;
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(AgentLoopError::Cancelled);
+            }
+            let llm_call_id = LlmCallId::from(uuid::Uuid::now_v7().to_string());
+            let hook_context = LlmCallHookContext {
+                iteration,
+                attempt,
+                llm_call_id: &llm_call_id,
+                cancellation,
+            };
+            let mut request = ChatRequest {
+                model: self.llm_provider.model_id(),
+                messages: request_messages(&context.system_prompt, &context.messages),
+                tools: self.tool_executor.specs(),
+                structured_output: None,
+            };
+            for hook in &self.hooks {
+                hook.before_llm_call(hook_context, &mut request)
+                    .await
+                    .map_err(|source| hook_failure(AgentLoopHookStage::BeforeLlmCall, source))?;
+            }
+            if cancellation.is_cancelled() {
+                return Err(AgentLoopError::Cancelled);
+            }
+            self.telemetry.emit(AgentTelemetryEvent::LlmStarted {
+                llm_call_id: llm_call_id.clone(),
+            });
+            let result = async {
+                let stream = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return Err(AgentLoopError::Cancelled),
+                    stream = self.llm_provider.chat_stream(request) => stream?,
+                };
+                consume_assistant_stream(
+                    stream,
+                    &llm_call_id,
+                    self.telemetry.as_ref(),
+                    cancellation,
+                    self.limits,
+                    usage,
+                )
+                .await
+            }
+            .await;
+            match result {
+                Ok(mut output) => {
+                    if !self.hooks.is_empty() {
+                        for hook in &self.hooks {
+                            hook.after_llm_call(hook_context, &mut output)
+                                .await
+                                .map_err(|source| {
+                                    hook_failure(AgentLoopHookStage::AfterLlmCall, source)
+                                })?;
+                        }
+                        validate_hook_output_limits(&output, self.limits)?;
+                    }
+                    if cancellation.is_cancelled() {
+                        return Err(AgentLoopError::Cancelled);
+                    }
+                    return Ok(output);
+                }
+                Err(AgentLoopError::Llm { source }) => {
+                    let mut retry = false;
+                    for hook in &self.hooks {
+                        if hook.on_llm_error(hook_context, &source).await.map_err(
+                            |hook_source| hook_failure(AgentLoopHookStage::OnLlmError, hook_source),
+                        )? == LlmErrorAction::Retry
+                        {
+                            retry = true;
+                        }
+                    }
+                    if cancellation.is_cancelled() {
+                        return Err(AgentLoopError::Cancelled);
+                    }
+                    if retry && attempt < self.limits.max_llm_retries_per_iteration {
+                        attempt = attempt.saturating_add(1);
+                        continue;
+                    }
+                    return Err(AgentLoopError::Llm { source });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn run_before_iteration_hooks(
+        &self,
+        context: IterationHookContext<'_>,
+    ) -> Result<(), AgentLoopError> {
+        for hook in &self.hooks {
+            hook.before_iteration(context)
+                .await
+                .map_err(|source| hook_failure(AgentLoopHookStage::BeforeIteration, source))?;
+        }
+        Ok(())
+    }
+
+    async fn run_after_iteration_hooks(
+        &self,
+        context: IterationHookContext<'_>,
+    ) -> Result<(), AgentLoopError> {
+        for hook in &self.hooks {
+            hook.after_iteration(context)
+                .await
+                .map_err(|source| hook_failure(AgentLoopHookStage::AfterIteration, source))?;
+        }
+        Ok(())
+    }
+
+    async fn run_before_tool_call_hooks(
+        &self,
+        context: ToolCallHookContext<'_>,
+    ) -> Result<(), AgentLoopError> {
+        for hook in &self.hooks {
+            hook.before_tool_call(context)
+                .await
+                .map_err(|source| hook_failure(AgentLoopHookStage::BeforeToolCall, source))?;
+        }
+        Ok(())
+    }
+
+    async fn run_after_tool_call_hooks(
+        &self,
+        context: ToolCallHookContext<'_>,
+        result: &mut serde_json::Value,
+    ) -> Result<(), AgentLoopError> {
+        for hook in &self.hooks {
+            hook.after_tool_call(context, result)
+                .await
+                .map_err(|source| hook_failure(AgentLoopHookStage::AfterToolCall, source))?;
+        }
+        Ok(())
+    }
 }
 
 /// Builder for [`AgentLoop`].
@@ -242,6 +420,7 @@ pub struct AgentLoopBuilder {
     llm_provider: Option<Arc<dyn LlmProvider>>,
     tool_executor: Option<ToolExecutor>,
     telemetry: Option<Arc<dyn TelemetryEventSink>>,
+    hooks: Vec<Arc<dyn AgentLoopHook>>,
     limits: LoopLimits,
 }
 
@@ -264,6 +443,13 @@ impl AgentLoopBuilder {
     #[must_use]
     pub fn telemetry(mut self, telemetry: Arc<dyn TelemetryEventSink>) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Appends one lifecycle hook to the ordered callback chain.
+    #[must_use]
+    pub fn hook(mut self, hook: Arc<dyn AgentLoopHook>) -> Self {
+        self.hooks.push(hook);
         self
     }
 
@@ -295,9 +481,53 @@ impl AgentLoopBuilder {
             telemetry: self
                 .telemetry
                 .ok_or(AgentLoopBuildError::MissingTelemetry)?,
+            hooks: self.hooks,
             limits: self.limits,
         })
     }
+}
+
+fn hook_failure(stage: AgentLoopHookStage, source: AgentLoopHookError) -> AgentLoopError {
+    AgentLoopError::Hook { stage, source }
+}
+
+fn validate_hook_output_limits(
+    output: &LlmCallOutput,
+    limits: LoopLimits,
+) -> Result<(), AgentLoopError> {
+    if let ChatContent::Text(text) = &output.message().content
+        && text.len() > limits.max_text_bytes
+    {
+        return Err(AgentLoopError::TextByteLimitExceeded {
+            maximum: limits.max_text_bytes,
+        });
+    }
+    if output
+        .message()
+        .reasoning_content
+        .as_ref()
+        .is_some_and(|reasoning| reasoning.len() > limits.max_reasoning_bytes)
+    {
+        return Err(AgentLoopError::ReasoningByteLimitExceeded {
+            maximum: limits.max_reasoning_bytes,
+        });
+    }
+    if output.message().tool_calls.len() > limits.max_tool_calls_per_iteration {
+        return Err(AgentLoopError::ToolCallLimitExceeded {
+            maximum: limits.max_tool_calls_per_iteration,
+        });
+    }
+    for tool_call in &output.message().tool_calls {
+        let argument_bytes = serde_json::to_vec(&tool_call.arguments)
+            .expect("serde_json::Value always serializes")
+            .len();
+        if argument_bytes > limits.max_tool_argument_bytes {
+            return Err(AgentLoopError::ToolArgumentByteLimitExceeded {
+                maximum: limits.max_tool_argument_bytes,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn request_messages(system_prompt: &str, history: &[ChatMessage]) -> Vec<ChatMessage> {

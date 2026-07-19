@@ -36,6 +36,27 @@ legacy stateful `Agent` compatibility path.
 - `ToolExecutor` is the single source of the durable sink used by `AgentLoop`; the builder must not
   accept a second sink that could split tool and loop boundaries across transports.
 
+## AgentLoop Hooks
+
+- `AgentLoopHook` callbacks execute sequentially in builder registration order. Keep the chain
+  explicit on `AgentLoopBuilder`; do not add a hook registry, priority system, or global hooks.
+- Hooks are control-flow extensions, not replacements for `DurableAgentEvent` or
+  `AgentTelemetryEvent`. A hook callback failure is typed with its lifecycle stage and becomes a
+  normal loop failure unless a durable sink failure takes precedence.
+- `before_llm_call` may rewrite only the attempt-local `ChatRequest`. `after_llm_call` may rewrite
+  assistant content, reasoning, and tool calls before commit, but cannot rewrite runtime-owned role,
+  finish reason, usage, or tool-result identity. Revalidate loop limits and tool-call identities
+  after hook rewrites.
+- LLM retries are requested only through `on_llm_error`, rebuild a fresh canonical request and call
+  identity for every attempt, and remain bounded by `LoopLimits::max_llm_retries_per_iteration`.
+  Never retry durability, approval, tool-orchestration, cancellation, limit, or protocol failures.
+- `before_tool_call` observes the committed tool call read-only. Tool arguments must be rewritten in
+  `after_llm_call` before the assistant message is committed. `after_tool_call` may rewrite only the
+  model-visible JSON result before commit.
+- Once a tool has been dispatched, an `after_tool_call` failure must not discard its outcome. Commit
+  the original unmodified tool result first, then fail the loop. Hook implementations receive the
+  run cancellation token and must cooperate with cancellation during asynchronous work.
+
 ## Legacy Agent Compatibility
 
 The following rules describe the existing `Agent`, session, resume, store, and

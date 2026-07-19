@@ -6,15 +6,10 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use stratum_core::{AgentTelemetryEvent, CallId, ChatMessage, LlmCallId, TokenUsage, ToolCall};
 use stratum_infra::TelemetryEventSink;
-use stratum_llm::{ChatStream, ChatStreamEvent, FinishReason};
+use stratum_llm::{ChatStream, ChatStreamEvent};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentLoopError, LoopLimits, ProtocolError};
-
-pub(super) struct AssistantStreamResult {
-    pub(super) message: ChatMessage,
-    pub(super) finish_reason: FinishReason,
-}
+use super::{AgentLoopError, LlmCallOutput, LoopLimits, ProtocolError};
 
 #[derive(Debug, Default)]
 struct PendingToolCall {
@@ -31,11 +26,11 @@ pub(super) async fn consume_assistant_stream(
     cancellation: &CancellationToken,
     limits: LoopLimits,
     total_usage: &mut TokenUsage,
-) -> Result<AssistantStreamResult, AgentLoopError> {
+) -> Result<LlmCallOutput, AgentLoopError> {
     let mut text = String::new();
     let mut reasoning = String::new();
     let mut pending_tool_calls = BTreeMap::<usize, PendingToolCall>::new();
-    let finish_reason = loop {
+    let (finish_reason, call_usage) = loop {
         let event = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(AgentLoopError::Cancelled),
@@ -140,7 +135,7 @@ pub(super) async fn consume_assistant_stream(
                     finish_reason: finish_reason.as_str().to_owned(),
                     usage,
                 });
-                break finish_reason;
+                break (finish_reason, usage);
             }
             _ => {}
         }
@@ -154,10 +149,7 @@ pub(super) async fn consume_assistant_stream(
     if !tool_calls.is_empty() {
         message = message.with_tool_calls(tool_calls);
     }
-    Ok(AssistantStreamResult {
-        message,
-        finish_reason,
-    })
+    Ok(LlmCallOutput::new(message, finish_reason, call_usage))
 }
 
 fn ensure_fits(current: usize, additional: usize, maximum: usize) -> Result<(), ()> {

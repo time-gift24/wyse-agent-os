@@ -1,11 +1,65 @@
 //! Typed failures that stop the agent loop kernel.
 
+use std::{error::Error as StdError, fmt};
+
 use stratum_core::{CallId, ChatRole};
 use stratum_infra::DurableEventSinkError;
 use stratum_llm::LlmError;
 use thiserror::Error;
 
 use crate::ToolExecutorError;
+
+/// Failure returned by an [`AgentLoopHook`](super::AgentLoopHook) callback.
+#[derive(Debug, Error)]
+#[error("agent loop hook callback failed")]
+pub struct AgentLoopHookError {
+    #[source]
+    source: Box<dyn StdError + Send + Sync + 'static>,
+}
+
+impl AgentLoopHookError {
+    /// Wraps a concrete hook failure while preserving its source chain.
+    #[must_use]
+    pub fn new(source: impl StdError + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+/// Lifecycle callback that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentLoopHookStage {
+    /// [`AgentLoopHook::before_iteration`](super::AgentLoopHook::before_iteration).
+    BeforeIteration,
+    /// [`AgentLoopHook::before_llm_call`](super::AgentLoopHook::before_llm_call).
+    BeforeLlmCall,
+    /// [`AgentLoopHook::after_llm_call`](super::AgentLoopHook::after_llm_call).
+    AfterLlmCall,
+    /// [`AgentLoopHook::on_llm_error`](super::AgentLoopHook::on_llm_error).
+    OnLlmError,
+    /// [`AgentLoopHook::before_tool_call`](super::AgentLoopHook::before_tool_call).
+    BeforeToolCall,
+    /// [`AgentLoopHook::after_tool_call`](super::AgentLoopHook::after_tool_call).
+    AfterToolCall,
+    /// [`AgentLoopHook::after_iteration`](super::AgentLoopHook::after_iteration).
+    AfterIteration,
+}
+
+impl fmt::Display for AgentLoopHookStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::BeforeIteration => "before_iteration",
+            Self::BeforeLlmCall => "before_llm_call",
+            Self::AfterLlmCall => "after_llm_call",
+            Self::OnLlmError => "on_llm_error",
+            Self::BeforeToolCall => "before_tool_call",
+            Self::AfterToolCall => "after_tool_call",
+            Self::AfterIteration => "after_iteration",
+        })
+    }
+}
 
 /// Failure to construct an [`AgentLoop`](super::AgentLoop).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -89,12 +143,27 @@ pub enum ProtocolError {
         #[source]
         source: serde_json::Error,
     },
+    /// A tool executor returned a non-JSON tool result message.
+    #[error("tool result {call_id} does not contain JSON")]
+    InvalidToolResultContent {
+        /// Tool call whose result violated the executor contract.
+        call_id: CallId,
+    },
 }
 
 /// Failure that prevents the agent loop from preserving its invariants.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AgentLoopError {
+    /// A lifecycle hook rejected or failed an agent-loop boundary.
+    #[error("agent loop hook {stage} failed")]
+    Hook {
+        /// Callback boundary that failed.
+        stage: AgentLoopHookStage,
+        /// Hook implementation failure.
+        #[source]
+        source: AgentLoopHookError,
+    },
     /// A required durable event was not acknowledged.
     #[error("durable agent event was not acknowledged")]
     Durability {
@@ -237,5 +306,29 @@ mod tests {
                 .and_then(|source| source.downcast_ref::<ProtocolError>()),
             Some(ProtocolError::StreamEndedWithoutFinish)
         ));
+    }
+
+    #[test]
+    fn hook_failure_preserves_stage_and_source_chain() {
+        let error = AgentLoopError::Hook {
+            stage: AgentLoopHookStage::BeforeLlmCall,
+            source: AgentLoopHookError::new(std::io::Error::other("hook unavailable")),
+        };
+
+        assert!(matches!(
+            &error,
+            AgentLoopError::Hook {
+                stage: AgentLoopHookStage::BeforeLlmCall,
+                ..
+            }
+        ));
+        assert_eq!(error.to_string(), "agent loop hook before_llm_call failed");
+        assert_eq!(
+            error
+                .source()
+                .and_then(std::error::Error::source)
+                .map(ToString::to_string),
+            Some("hook unavailable".to_owned())
+        );
     }
 }

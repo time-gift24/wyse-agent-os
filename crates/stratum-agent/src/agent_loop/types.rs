@@ -39,6 +39,8 @@ pub struct LoopLimits {
     pub max_iterations: usize,
     /// Maximum tool calls accepted from one model iteration.
     pub max_tool_calls_per_iteration: usize,
+    /// Maximum model-call retries after the first attempt in one iteration.
+    pub max_llm_retries_per_iteration: usize,
     /// Maximum streamed assistant text bytes in one model response.
     pub max_text_bytes: usize,
     /// Maximum streamed reasoning bytes in one model response.
@@ -58,10 +60,18 @@ impl LoopLimits {
         Self {
             max_iterations,
             max_tool_calls_per_iteration,
+            max_llm_retries_per_iteration: 0,
             max_text_bytes: Self::DEFAULT_MAX_TEXT_BYTES,
             max_reasoning_bytes: Self::DEFAULT_MAX_REASONING_BYTES,
             max_tool_argument_bytes: Self::DEFAULT_MAX_TOOL_ARGUMENT_BYTES,
         }
+    }
+
+    /// Overrides the model-call retry budget for each iteration.
+    #[must_use]
+    pub const fn with_llm_retries(mut self, max_llm_retries_per_iteration: usize) -> Self {
+        self.max_llm_retries_per_iteration = max_llm_retries_per_iteration;
+        self
     }
 
     /// Overrides the streamed response byte limits.

@@ -8,8 +8,10 @@ pub mod tool_executor;
 pub(crate) mod r#loop;
 
 pub use agent_loop::{
-    AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, LoopContext, LoopLimits,
-    LoopOutcome, ProtocolError,
+    AgentLoop, AgentLoopBuildError, AgentLoopBuilder, AgentLoopError, AgentLoopHook,
+    AgentLoopHookError, AgentLoopHookStage, IterationHookContext, LlmCallHookContext,
+    LlmCallOutput, LlmErrorAction, LoopContext, LoopLimits, LoopOutcome, ProtocolError,
+    ToolCallHookContext,
 };
 pub use definition::{Agent, AgentBuilder, AgentConfig};
 pub use error::AgentError;
