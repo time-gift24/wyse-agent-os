@@ -105,6 +105,28 @@ export const clearCursor = (storage: StorageLike, agentId: string): void => {
   }
 }
 
+export const formatRelativeTime = (iso: string, locale: string): string => {
+  try {
+    const date = new Date(iso)
+    const now = new Date()
+    const seconds = Math.floor((now.getTime() - date.getTime()) / 1000)
+    const formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto" })
+
+    if (seconds < 60) return formatter.format(-seconds, "second")
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return formatter.format(-minutes, "minute")
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return formatter.format(-hours, "hour")
+    const days = Math.floor(hours / 24)
+    if (days < 30) return formatter.format(-days, "day")
+    const months = Math.floor(days / 30)
+    if (months < 12) return formatter.format(-months, "month")
+    return formatter.format(-Math.floor(months / 12), "year")
+  } catch {
+    return iso
+  }
+}
+
 const saveRecentAgents = (
   storage: StorageLike,
   agents: readonly RecentAgent[]

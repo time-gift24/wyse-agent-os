@@ -6,12 +6,10 @@ import {
 } from "~/features/agent-conversation/reducer"
 import { recoverConversation } from "~/features/agent-conversation/recovery"
 import type { ConversationState } from "~/features/agent-conversation/types"
+import { useProductWorkbench } from "~/components/stratum/product-shell"
 import {
   clearCursor,
   loadCursor,
-  loadRecentAgents,
-  rememberRecentAgent,
-  removeRecentAgent as removeStoredRecentAgent,
   saveCursor,
   type RecentAgent,
   type StorageLike,
@@ -24,10 +22,12 @@ import {
   type ModelConfig,
   type ModelDescriptor,
 } from "~/lib/model-config"
-import { createStratumApi, ApiError } from "~/lib/stratum-api"
+import {
+  createStratumApi,
+  ApiError,
+  STRATUM_API_BASE_URL,
+} from "~/lib/stratum-api"
 import { subscribeToAgentEvents } from "~/lib/stratum-event-stream"
-
-const STRATUM_API_BASE_URL = "http://127.0.0.1:18080"
 
 export type ComposerConfiguration = {
   agentTemplates: readonly AgentTemplateView[]
@@ -64,19 +64,24 @@ export type AgentConversation = {
 }
 
 export function useAgentConversation(): AgentConversation {
+  const {
+    templates,
+    models,
+    recentAgents,
+    metadataLoading,
+    metadataError,
+    rememberRecentAgent,
+    removeRecentAgent: removeWorkbenchRecentAgent,
+    setActiveAgentId,
+    setMissingAgentId,
+  } = useProductWorkbench()
+  const agentTemplates = templates.items
   const [state, dispatch] = useReducer(
     conversationReducer,
     initialConversationState
   )
-  const [recentAgents, setRecentAgents] = useState<readonly RecentAgent[]>([])
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [reconnectVersion, setReconnectVersion] = useState(0)
-  const [agentTemplates, setAgentTemplates] = useState<
-    readonly AgentTemplateView[]
-  >([])
-  const [models, setModels] = useState<readonly ModelDescriptor[]>([])
-  const [metadataLoading, setMetadataLoading] = useState(true)
-  const [metadataError, setMetadataError] = useState<ApiError | null>(null)
   const [selectedTemplate, setSelectedTemplate] =
     useState<AgentTemplateView | null>(null)
   const [requestedModelConfig, setRequestedModelConfig] =
@@ -86,41 +91,22 @@ export function useAgentConversation(): AgentConversation {
   const selectedAgentRef = useRef<string | null>(null)
   const selectionGeneration = useRef(0)
 
-  useEffect(() => {
-    const storage = browserStorage()
-    if (storage) setRecentAgents(loadRecentAgents(storage))
-  }, [])
+  const selectAgent = useCallback(
+    (agentId: string | null) => {
+      selectionGeneration.current += 1
+      selectedAgentRef.current = agentId
+      setActiveAgentId(agentId)
+      setMissingAgentId(null)
+      if (agentId === null) setSelectedTemplate(null)
+      setSelectedAgentId(agentId)
+      dispatch({ type: "agent_selected", agentId })
+    },
+    [setActiveAgentId, setMissingAgentId]
+  )
 
   useEffect(() => {
-    let active = true
-    const api = createStratumApi({ baseUrl: STRATUM_API_BASE_URL })
-    void Promise.all([api.getAgentTemplates(), api.getModels()]).then(
-      ([templates, descriptors]) => {
-        if (!active) return
-        setAgentTemplates(templates)
-        setModels(descriptors)
-        setMetadataError(null)
-        setMetadataLoading(false)
-      },
-      (error: unknown) => {
-        if (!active) return
-        setMetadataError(toApiError(error))
-        setMetadataLoading(false)
-      }
-    )
-
-    return () => {
-      active = false
-    }
-  }, [])
-
-  const selectAgent = useCallback((agentId: string | null) => {
-    selectionGeneration.current += 1
-    selectedAgentRef.current = agentId
-    if (agentId === null) setSelectedTemplate(null)
-    setSelectedAgentId(agentId)
-    dispatch({ type: "agent_selected", agentId })
-  }, [])
+    setMissingAgentId(state.phase === "missing" ? state.agentId : null)
+  }, [setMissingAgentId, state.agentId, state.phase])
 
   useEffect(() => {
     if (state.agentId !== null || selectedTemplate !== null) return
@@ -230,16 +216,7 @@ export function useAgentConversation(): AgentConversation {
           title: prompt,
           lastOpenedAt: new Date().toISOString(),
         }
-        const storage = browserStorage()
-        if (storage) {
-          rememberRecentAgent(storage, recentAgent)
-          setRecentAgents(loadRecentAgents(storage))
-        } else {
-          setRecentAgents((agents) => [
-            recentAgent,
-            ...agents.filter((agent) => agent.agentId !== recentAgent.agentId),
-          ])
-        }
+        rememberRecentAgent(recentAgent)
         selectAgent(created.agent_id)
         return true
       } catch (error) {
@@ -247,7 +224,13 @@ export function useAgentConversation(): AgentConversation {
         return false
       }
     },
-    [reportError, requestedModelConfig, selectAgent, selectedTemplate]
+    [
+      rememberRecentAgent,
+      reportError,
+      requestedModelConfig,
+      selectAgent,
+      selectedTemplate,
+    ]
   )
 
   const selectedClient = useCallback(() => {
@@ -362,18 +345,6 @@ export function useAgentConversation(): AgentConversation {
     [reportError, selectedClient]
   )
 
-  const removeRecentAgent = useCallback((agentId: string) => {
-    const storage = browserStorage()
-    if (storage) {
-      removeStoredRecentAgent(storage, agentId)
-      setRecentAgents(loadRecentAgents(storage))
-      return
-    }
-    setRecentAgents((agents) =>
-      agents.filter((agent) => agent.agentId !== agentId)
-    )
-  }, [])
-
   const selectTemplate = useCallback(
     (template: AgentTemplateView) => {
       if (selectedAgentRef.current !== null) selectAgent(null)
@@ -410,7 +381,7 @@ export function useAgentConversation(): AgentConversation {
 
   const composerConfiguration: ComposerConfiguration = {
     agentTemplates,
-    models,
+    models: models.items,
     metadataLoading,
     metadataError,
     selectedTemplate,
@@ -439,7 +410,7 @@ export function useAgentConversation(): AgentConversation {
     cancel,
     resolveApproval,
     reconnect,
-    removeRecentAgent,
+    removeRecentAgent: removeWorkbenchRecentAgent,
   }
 }
 

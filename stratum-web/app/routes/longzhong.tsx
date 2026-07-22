@@ -1,46 +1,67 @@
 "use client"
 
-import { useState } from "react"
-import { HistoryIcon } from "lucide-react"
-import { useTranslation } from "react-i18next"
+import { useEffect, useRef } from "react"
+import { useLocation, useNavigate } from "react-router"
 
 import { ChatWorkspace } from "~/components/stratum/chat-workspace"
-import { cn } from "~/lib/utils"
 import { RouteTransition } from "~/components/stratum/route-transition"
-import { SiteNavbar } from "~/components/stratum/site-navbar"
-import { Button } from "~/components/ui/button"
+import { useAgentConversation } from "~/hooks/use-agent-conversation"
 
 export default function Longzhong() {
-  const { t } = useTranslation()
-  const [historyOpen, setHistoryOpen] = useState(false)
+  const location = useLocation()
+  const navigate = useNavigate()
+  const conversation = useAgentConversation()
+  const { selectAgent, composerConfiguration } = conversation
+  const handledSearchRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (location.search === "") {
+      handledSearchRef.current = null
+      return
+    }
+    if (handledSearchRef.current === location.search) return
+
+    const parameters = new URLSearchParams(location.search)
+    const agentId = parameters.get("agent")
+    const templateName = parameters.get("template")
+    const startNew = parameters.get("new") === "1"
+
+    if (startNew) {
+      handledSearchRef.current = location.search
+      selectAgent(null)
+      navigate("/longzhong", { replace: true })
+      return
+    }
+
+    if (agentId) {
+      handledSearchRef.current = location.search
+      selectAgent(agentId)
+      return
+    }
+
+    if (templateName) {
+      if (composerConfiguration.metadataLoading) return
+      handledSearchRef.current = location.search
+      const template = composerConfiguration.agentTemplates.find(
+        (candidate) => candidate.agent_name === templateName
+      )
+      if (template) composerConfiguration.selectTemplate(template)
+      return
+    }
+
+    handledSearchRef.current = location.search
+  }, [
+    composerConfiguration.agentTemplates,
+    composerConfiguration.metadataLoading,
+    composerConfiguration.selectTemplate,
+    location.search,
+    navigate,
+    selectAgent,
+  ])
 
   return (
     <RouteTransition>
-      <main>
-        <SiteNavbar
-          activeSection="longzhong"
-          leftSlot={
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={t("chat.history.title")}
-              aria-expanded={historyOpen}
-              aria-controls="chat-history-drawer"
-              onClick={() => setHistoryOpen((open) => !open)}
-              className={cn(
-                "size-11 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground",
-                historyOpen && "bg-muted text-foreground"
-              )}
-            >
-              <HistoryIcon className="size-4" aria-hidden="true" />
-            </Button>
-          }
-        />
-        <ChatWorkspace
-          historyOpen={historyOpen}
-          onHistoryOpenChange={setHistoryOpen}
-        />
-      </main>
+      <ChatWorkspace conversation={conversation} />
     </RouteTransition>
   )
 }

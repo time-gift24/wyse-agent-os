@@ -7,7 +7,6 @@ import { useGSAP } from "@gsap/react"
 import gsap from "gsap"
 import { cn } from "~/lib/utils"
 
-import { ChatHistory } from "~/components/stratum/chat-history"
 import {
   AgentConfigMenu,
   ModelConfigMenu,
@@ -27,13 +26,13 @@ import {
   PromptInputTextarea,
   PromptInputTools,
 } from "~/components/ai-elements/prompt-input"
-import { useAgentConversation } from "~/hooks/use-agent-conversation"
+import { Button } from "~/components/ui/button"
+import type { AgentConversation } from "~/hooks/use-agent-conversation"
 
 gsap.registerPlugin(useGSAP)
 
 type ChatWorkspaceProps = {
-  historyOpen?: boolean
-  onHistoryOpenChange?(open: boolean): void
+  conversation: AgentConversation
 }
 
 type AutoFollowScrollPosition = {
@@ -58,12 +57,8 @@ function resolveAutoFollowPaused({
   return scrollTop < previousScrollTop && !atBottom
 }
 
-export function ChatWorkspace({
-  historyOpen = false,
-  onHistoryOpenChange,
-}: ChatWorkspaceProps) {
+export function ChatWorkspace({ conversation }: ChatWorkspaceProps) {
   const { t } = useTranslation()
-  const conversation = useAgentConversation()
   const [composerText, setComposerText] = useState("")
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [autoFollowPaused, setAutoFollowPaused] = useState(false)
@@ -79,7 +74,7 @@ export function ChatWorkspace({
   const autoFollowPausedRef = useRef(false)
   const previousScrollTopRef = useRef(0)
 
-  const { state, recentAgents, selectAgent, removeRecentAgent } = conversation
+  const { state } = conversation
   const isNewConversation = state.agentId === null
   const initialComposerBottom = useRef(
     isNewConversation ? "50%" : "max(1rem, env(safe-area-inset-bottom))"
@@ -87,6 +82,7 @@ export function ChatWorkspace({
   const isAgentBusy =
     state.phase === "recovering" || state.view?.status === "running"
   const composerRunning = isSubmitting || isAgentBusy
+  const composerUnavailable = state.phase === "missing"
   const canCancel = state.agentId !== null && state.view?.status === "running"
   const liveStatus = isSubmitting
     ? t("chat.sending")
@@ -94,9 +90,17 @@ export function ChatWorkspace({
       ? t("chat.connecting")
       : state.phase === "connection_error"
         ? t("chat.connectionFailed")
-        : state.view?.status === "running"
-          ? t("chat.thinking")
-          : t("chat.ready")
+        : state.phase === "missing"
+          ? t("chat.missingConversation")
+          : state.view?.status === "running"
+            ? t("chat.thinking")
+            : state.agentId === null &&
+                conversation.composerConfiguration.metadataLoading
+              ? t("productShell.status.loading")
+              : state.agentId === null &&
+                  conversation.composerConfiguration.metadataError
+                ? t("productShell.status.error")
+                : t("chat.ready")
 
   // 选择对话（包括新建）后聚焦输入框
   useEffect(() => {
@@ -123,11 +127,6 @@ export function ChatWorkspace({
     },
     [scrollToBottom]
   )
-  const closeHistory = useCallback(
-    () => onHistoryOpenChange?.(false),
-    [onHistoryOpenChange]
-  )
-
   useEffect(() => {
     if (typeof document === "undefined") return
     const scrollElement = document.documentElement
@@ -299,18 +298,8 @@ export function ChatWorkspace({
     <section
       ref={workspaceRef}
       id="longzhong"
-      className="min-h-[100dvh] w-full px-4 pt-20 pb-[calc(13rem+env(safe-area-inset-bottom))] md:px-8 md:pt-24 md:pb-[calc(14rem+env(safe-area-inset-bottom))]"
+      className="min-h-[calc(100dvh-107px)] w-full px-4 pt-2 pb-[calc(13rem+env(safe-area-inset-bottom))] sm:px-6 md:px-8 md:pt-4 md:pb-[calc(14rem+env(safe-area-inset-bottom))]"
     >
-      <ChatHistory
-        open={historyOpen}
-        onClose={closeHistory}
-        state={state}
-        recentAgents={recentAgents}
-        onSelectAgent={selectAgent}
-        onRemoveAgent={removeRecentAgent}
-        onNewConversation={() => selectAgent(null)}
-      />
-
       <div className="stratum-content-width mx-auto">
         <div data-slot="chat-main" className="flex min-w-0 flex-col">
           <div
@@ -319,7 +308,7 @@ export function ChatWorkspace({
             role="log"
             aria-live={state.phase === "recovering" ? "off" : "polite"}
             aria-relevant="additions text"
-            className="type-body w-full px-1 py-6 [overflow-anchor:none] md:px-6"
+            className="type-body w-full px-1 py-4 [overflow-anchor:none] sm:px-3 md:px-4 md:py-6"
           >
             <AgentMessageList
               messages={state.messages}
@@ -337,21 +326,23 @@ export function ChatWorkspace({
       </div>
 
       {autoFollowPaused && (
-        <button
+        <Button
           type="button"
+          size="icon"
+          variant="outline"
           onClick={() => resumeAutoFollow("smooth")}
-          className="fixed bottom-[calc(var(--stratum-composer-min-height)+max(1.75rem,env(safe-area-inset-bottom)))] left-1/2 z-50 size-11 -translate-x-1/2 rounded-full border border-stratum-line-strong bg-stratum-paper text-foreground shadow-stratum-soft transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
+          className="stratum-floating-center fixed bottom-[calc(var(--stratum-composer-min-height)+max(1.75rem,env(safe-area-inset-bottom)))] z-40 size-11 -translate-x-1/2 rounded-full border-stratum-line-strong bg-stratum-paper text-foreground shadow-stratum-soft transition-transform duration-200 hover:-translate-y-0.5 hover:bg-stratum-paper active:translate-y-px motion-reduce:transition-none"
           aria-label={t("chat.scrollToBottom")}
         >
           <ArrowDownIcon className="size-4" aria-hidden="true" />
-        </button>
+        </Button>
       )}
 
       <div
         ref={inputContainerRef}
         data-slot="chat-composer-positioner"
         data-composer-position={isNewConversation ? "centered" : "docked"}
-        className="stratum-composer-width fixed inset-x-0 z-40 mx-auto"
+        className="stratum-composer-positioner fixed z-30"
         style={{ bottom: initialComposerBottom.current }}
       >
         <div
@@ -376,7 +367,7 @@ export function ChatWorkspace({
                   ref={composerRef}
                   aria-label={t("chat.composer.label")}
                   className="max-h-48 min-h-14 px-4 pt-3 pb-2 text-base! leading-6! placeholder:text-muted-foreground md:px-5"
-                  disabled={composerRunning}
+                  disabled={composerRunning || composerUnavailable}
                   onChange={(event) => setComposerText(event.target.value)}
                   placeholder={t("chat.composer.placeholder")}
                   value={composerText}
@@ -418,7 +409,9 @@ export function ChatWorkspace({
                     )}
                     disabled={
                       !canCancel &&
-                      (composerRunning || composerText.trim() === "")
+                      (composerRunning ||
+                        composerUnavailable ||
+                        composerText.trim() === "")
                     }
                     onClick={
                       canCancel ? () => void conversation.cancel() : undefined

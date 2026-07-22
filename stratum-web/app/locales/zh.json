@@ -16,11 +16,47 @@
     "signUp": "注册"
   },
   "theme": {
-    "toggle": "切换深色主题"
+    "toggle": "切换深色主题",
+    "useDark": "使用深色主题",
+    "useLight": "使用浅色主题"
   },
   "language": {
     "switchToChinese": "切换至中文",
     "switchToEnglish": "切换至英文"
+  },
+  "productShell": {
+    "skipToContent": "跳到主要内容",
+    "navigation": "产品导航",
+    "openNavigation": "打开产品导航",
+    "closeNavigation": "关闭产品导航",
+    "recent": "最近对话",
+    "noRecent": "开始一次对话后，最近工作会显示在这里。",
+    "newConversation": "新建对话",
+    "status": {
+      "loading": "正在检查运行环境",
+      "ready": "模型与智能体已就绪",
+      "incomplete": "运行配置尚不完整",
+      "error": "无法确认运行状态"
+    }
+  },
+  "overview": {
+    "title": "从真实问题开始运筹",
+    "description": "选择可用智能体，继续最近对话，或直接进入隆中对处理一个需要深入推演的任务。",
+    "startConversation": "开始对话",
+    "models": "可用模型",
+    "agentTemplates": "智能体模板",
+    "noneAvailable": "暂不可用",
+    "chooseAgent": "选择智能体",
+    "chooseAgentDescription": "模板和默认模型均来自当前运行环境。",
+    "recentConversations": "最近对话",
+    "recentDescription": "从本地记录继续未完成的工作。",
+    "retry": "重试",
+    "templatesError": "无法读取智能体模板。隆中对仍可打开，你也可以稍后重试。",
+    "modelsError": "无法读取模型配置。发送消息前请确认后端已经启动。",
+    "noTemplates": "暂无可用智能体",
+    "noTemplatesDescription": "启动后端并配置智能体模板后，这里会显示真实可用项。",
+    "noRecent": "暂无最近对话",
+    "noRecentDescription": "开始第一次对话后，可以从这里或侧栏继续。"
   },
   "chat": {
     "assistant": "隆中对",
@@ -49,7 +85,7 @@
     "sending": "正在发送……",
     "connecting": "正在连接……",
     "connectionFailed": "连接失败",
-    "ready": "已连接",
+    "ready": "就绪",
     "continue": "继续",
     "cancel": "取消",
     "scrollToBottom": "滚动到底部",

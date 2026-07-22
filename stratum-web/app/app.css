@@ -9,22 +9,25 @@
 :root {
   color-scheme: light;
 
-  /* Lovable 产品层 */
-  --stratum-canvas: #f7f4ed;
-  --stratum-canvas-soft: rgb(28 28 28 / 3%);
-  --stratum-paper: #f7f4ed;
-  --stratum-paper-soft: rgb(28 28 28 / 4%);
-  --stratum-paper-wash: #fcfbf8;
-  --stratum-ink: #1c1c1c;
-  --stratum-ink-soft: rgb(28 28 28 / 83%);
-  --stratum-ink-muted: #5f5f5d;
-  --stratum-line: #eceae4;
-  --stratum-line-strong: rgb(28 28 28 / 40%);
-  --stratum-action: #1c1c1c;
-  --stratum-action-ink: #fcfbf8;
-  --stratum-accent: rgb(28 28 28 / 4%);
-  --stratum-accent-ink: #1c1c1c;
-  --stratum-focus: rgb(59 130 246 / 50%);
+  /* Tavily 衍生产品层，Lovable 作为暖中性基础。 */
+  --stratum-canvas: #fefcf5;
+  --stratum-canvas-soft: rgb(31 30 30 / 3%);
+  --stratum-sidebar: #fdf8ec;
+  --stratum-paper: #fffcf6;
+  --stratum-paper-soft: #f4f0e6;
+  --stratum-paper-wash: #fffcf6;
+  --stratum-ink: #1f1e1e;
+  --stratum-ink-soft: rgb(31 30 30 / 86%);
+  --stratum-ink-muted: #625f59;
+  --stratum-line: rgb(31 30 30 / 10%);
+  --stratum-line-strong: rgb(31 30 30 / 20%);
+  --stratum-brand-blue: #2677ff;
+  --stratum-action: #1e65d9;
+  --stratum-action-hover: #1958c1;
+  --stratum-action-ink: #ffffff;
+  --stratum-accent: #edf3ff;
+  --stratum-accent-ink: #1f1e1e;
+  --stratum-focus: #2677ff;
 
   /* 语义状态层 */
   --stratum-success: #257a47;
@@ -53,21 +56,23 @@
 
   --stratum-bg-canvas: var(--stratum-canvas);
   --stratum-bg-paper: var(--stratum-paper);
-  --stratum-shadow-panel: 0 12px 32px rgb(28 28 28 / 12%);
-  --stratum-shadow-soft: 0 8px 24px rgb(28 28 28 / 8%);
-  --stratum-shadow-pressed: inset 0 1px 2px rgb(28 28 28 / 12%);
+  --stratum-shadow-panel: 0 8px 16px rgb(50 43 31 / 10%);
+  --stratum-shadow-soft: 0 4px 8px rgb(50 43 31 / 8%);
+  --stratum-shadow-rail: 0 2px 8px rgb(50 43 31 / 8%);
+  --stratum-shadow-topbar: 0 2px 8px rgb(50 43 31 / 6%);
+  --stratum-shadow-drawer: 8px 0 16px rgb(50 43 31 / 12%);
+  --stratum-shadow-pressed: inset 0 1px 2px rgb(31 30 30 / 12%);
 
-  --radius: 0.375rem;
-  --radius-stratum-control: 0.375rem;
+  --radius: 0.5rem;
+  --radius-stratum-control: 0.5625rem;
   --radius-stratum-panel: 0.75rem;
   --radius-stratum-shell: 1rem;
-  --radius-stratum-field: 0.375rem;
+  --radius-stratum-field: 0.5625rem;
   --page-gutter: clamp(0.75rem, 2vw, 2rem);
-  --content-width: min(
-    calc(100vw - var(--page-gutter) * 2),
-    clamp(42rem, 64vw, 56rem)
-  );
-  --composer-width: var(--content-width);
+  --content-width: 50rem;
+  --composer-width: 56rem;
+  --workbench-width: 64rem;
+  --product-shell-sidebar-offset: 0px;
   --content-half-width: min(
     calc(50vw - var(--page-gutter)),
     clamp(21rem, 32vw, 28rem)
@@ -100,7 +105,7 @@
   --chart-3: var(--stratum-golden-mist);
   --chart-4: var(--stratum-peach-dust);
   --chart-5: var(--stratum-quiet-violet);
-  --sidebar: var(--stratum-paper);
+  --sidebar: var(--stratum-sidebar);
   --sidebar-foreground: var(--stratum-ink);
   --sidebar-primary: var(--stratum-action);
   --sidebar-primary-foreground: var(--stratum-action-ink);
@@ -112,28 +117,34 @@
 
 .dark {
   color-scheme: dark;
-  --stratum-canvas: #1c1c1c;
-  --stratum-canvas-soft: rgb(247 244 237 / 3%);
-  --stratum-paper: color-mix(in srgb, #f7f4ed 4%, #1c1c1c);
-  --stratum-paper-soft: rgb(247 244 237 / 8%);
-  --stratum-paper-wash: color-mix(in srgb, #f7f4ed 8%, #1c1c1c);
-  --stratum-ink: #fcfbf8;
-  --stratum-ink-soft: rgb(252 251 248 / 83%);
-  --stratum-ink-muted: rgb(247 244 237 / 64%);
-  --stratum-line: rgb(247 244 237 / 12%);
-  --stratum-line-strong: rgb(247 244 237 / 40%);
-  --stratum-action: #f7f4ed;
-  --stratum-action-ink: #1c1c1c;
-  --stratum-accent: rgb(247 244 237 / 8%);
-  --stratum-accent-ink: #fcfbf8;
-  --stratum-focus: rgb(59 130 246 / 62%);
+  --stratum-canvas: #161515;
+  --stratum-canvas-soft: rgb(255 252 246 / 3%);
+  --stratum-sidebar: #1f1e1e;
+  --stratum-paper: #242222;
+  --stratum-paper-soft: #2b2929;
+  --stratum-paper-wash: #242222;
+  --stratum-ink: #fffcf6;
+  --stratum-ink-soft: rgb(255 252 246 / 86%);
+  --stratum-ink-muted: #c0b9ae;
+  --stratum-line: rgb(255 252 246 / 12%);
+  --stratum-line-strong: rgb(255 252 246 / 22%);
+  --stratum-brand-blue: #4d8dff;
+  --stratum-action: #4d8dff;
+  --stratum-action-hover: #73a5ff;
+  --stratum-action-ink: #161515;
+  --stratum-accent: rgb(77 141 255 / 14%);
+  --stratum-accent-ink: #fffcf6;
+  --stratum-focus: #4d8dff;
   --stratum-success: #63c489;
   --stratum-warning: #e0ad4d;
   --stratum-danger: #ff8a80;
   --stratum-info: #8ab4ff;
   --stratum-mark-compact: var(--stratum-ink-muted);
-  --stratum-shadow-panel: 0 12px 32px rgb(0 0 0 / 28%);
-  --stratum-shadow-soft: 0 8px 24px rgb(0 0 0 / 20%);
+  --stratum-shadow-panel: 0 8px 16px rgb(0 0 0 / 28%);
+  --stratum-shadow-soft: 0 4px 8px rgb(0 0 0 / 22%);
+  --stratum-shadow-rail: 0 2px 8px rgb(0 0 0 / 24%);
+  --stratum-shadow-topbar: 0 2px 8px rgb(0 0 0 / 20%);
+  --stratum-shadow-drawer: 8px 0 16px rgb(0 0 0 / 32%);
   --stratum-shadow-pressed: inset 0 1px 2px rgb(0 0 0 / 28%);
 }
 
@@ -181,6 +192,8 @@
   --color-stratum-line: var(--stratum-line);
   --color-stratum-line-strong: var(--stratum-line-strong);
   --color-stratum-action: var(--stratum-action);
+  --color-stratum-action-hover: var(--stratum-action-hover);
+  --color-stratum-brand-blue: var(--stratum-brand-blue);
   --color-stratum-accent: var(--stratum-accent);
   --color-stratum-success: var(--stratum-success);
   --color-stratum-warning: var(--stratum-warning);
@@ -212,6 +225,9 @@
   --radius-control: var(--radius-stratum-control);
   --shadow-stratum-panel: var(--stratum-shadow-panel);
   --shadow-stratum-soft: var(--stratum-shadow-soft);
+  --shadow-stratum-rail: var(--stratum-shadow-rail);
+  --shadow-stratum-topbar: var(--stratum-shadow-topbar);
+  --shadow-stratum-drawer: var(--stratum-shadow-drawer);
   --shadow-stratum-pressed: var(--stratum-shadow-pressed);
 }
 
@@ -241,38 +257,40 @@
 @layer components {
   .type-hero {
     font-family: "Noto Sans Variable", sans-serif;
-    font-size: 2.25rem;
+    font-size: 2rem;
     font-weight: 600;
     line-height: 1.08;
-    letter-spacing: -0.9px;
+    letter-spacing: -0.03em;
+    text-wrap: balance;
   }
 
   .type-section {
     font-family: "Noto Sans Variable", sans-serif;
-    font-size: 3rem;
+    font-size: 2rem;
     font-weight: 600;
-    line-height: 1;
-    letter-spacing: -1.2px;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
   }
 
   .type-subheading {
     font-family: "Noto Sans Variable", sans-serif;
-    font-size: 2.25rem;
+    font-size: 1.25rem;
     font-weight: 600;
-    line-height: 1.1;
-    letter-spacing: -0.9px;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
   }
 
   .type-card-title {
-    font-size: 1.25rem;
-    font-weight: 400;
-    line-height: 1.25;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.4;
   }
 
   .type-body-large {
-    font-size: 1.125rem;
+    font-size: 1rem;
     font-weight: 400;
-    line-height: 1.38;
+    line-height: 1.55;
   }
 
   .type-body,
@@ -283,9 +301,9 @@
   }
 
   .type-caption {
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     font-weight: 400;
-    line-height: 1.5;
+    line-height: 1.45;
   }
 
   .stratum-page-shell {
@@ -299,13 +317,30 @@
   }
 
   .stratum-content-width {
-    width: var(--content-width);
-    max-width: 100%;
+    width: 100%;
+    max-width: var(--content-width);
+  }
+
+  .stratum-workbench-width {
+    width: 100%;
+    max-width: var(--workbench-width);
+  }
+
+  .stratum-composer-positioner {
+    right: max(1rem, env(safe-area-inset-right));
+    left: max(1rem, env(safe-area-inset-left));
+    width: auto;
+    max-width: var(--composer-width);
+    margin-inline: auto;
+  }
+
+  .stratum-floating-center {
+    left: calc((100vw + var(--product-shell-sidebar-offset)) / 2);
   }
 
   .stratum-composer-width {
-    width: var(--composer-width);
-    max-width: 100%;
+    width: 100%;
+    max-width: var(--composer-width);
   }
 
   .stratum-prompt-shell {
@@ -340,17 +375,23 @@
 
 @media (min-width: 640px) {
   .type-hero {
-    font-size: 3rem;
-    line-height: 1.05;
-    letter-spacing: -1.2px;
+    font-size: 2.25rem;
   }
 }
 
 @media (min-width: 1024px) {
   .type-hero {
-    font-size: 3.75rem;
-    line-height: 1.05;
-    letter-spacing: -1.5px;
+    font-size: 2.75rem;
+  }
+}
+
+@media (min-width: 1280px) {
+  :root {
+    --product-shell-sidebar-offset: 19.8125rem;
+  }
+
+  .stratum-composer-positioner {
+    left: calc(19.8125rem + max(1rem, env(safe-area-inset-left)));
   }
 }
 
@@ -368,6 +409,10 @@
   outline-style: solid !important;
   outline-width: 2px !important;
   outline-offset: 2px !important;
+}
+
+main[tabindex="-1"]:focus-visible {
+  outline: none !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

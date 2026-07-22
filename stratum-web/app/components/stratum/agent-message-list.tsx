@@ -243,7 +243,13 @@ export function AgentMessageList({
           <Message from="assistant">
             <MessageContent className="text-base! leading-6!">
               <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-                <p className="font-semibold">{t("chat.connectionFailed")}</p>
+                <p className="font-semibold">
+                  {t(
+                    error.status === 404
+                      ? "chat.missingConversation"
+                      : "chat.connectionFailed"
+                  )}
+                </p>
                 {error.message ? (
                   <p className="mt-1 text-destructive/80">{error.message}</p>
                 ) : null}

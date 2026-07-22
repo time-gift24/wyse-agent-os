@@ -1,59 +1,78 @@
-# Product
+# 产品说明：运筹 Stratum
 
-## Register
+## 产品类型
 
-product
+`product`
 
-## Platform
+## 平台
 
-web
+`web`
 
-## Users
+## 用户
 
-Primary audience: end-users who interact with deployed agents through the Longzhong chat. They arrive with a real task — strategic, operational, or analytical — and want an agent that handles it with depth, not a chatbot that deflects. They are not developers; they should never need to understand the runtime, the event protocol, or the tool registry to get their work done.
+主要用户是通过隆中对处理真实任务的最终用户。他们带着战略、运营或分析问题而来，希望 Agent 能够深入推进工作，而不是把问题退回给用户。他们不需要理解 Runtime、事件协议、工具注册或开发者术语。
 
-Secondary audience: developers and operators who configure agent templates, compose workflows, and deploy agents behind the scenes. They need visibility into execution, approval flows, and recovery — but their workflow is configuration and orchestration, not chat. A future visual orchestration page (Dify-style workflow composition) will serve this audience directly.
+次要用户是配置 Agent 模板、编排工作流和部署 Agent 的开发者与运维人员。他们需要执行可见性、审批与恢复能力，但其核心任务是配置和编排，不是聊天。未来的可视化编排页会面向这类用户。
 
-The web frontend serves both from one product. The chat surface leads for end-users; the orchestration surface (planned) leads for developers. Neither audience is forced into the other's workflow.
+前端属于同一个产品。概览负责展示真实就绪状态、可用 Agent 与最近工作，隆中对负责最终用户的对话任务，未来编排界面负责开发者工作流。所有页面共享产品壳层和视觉语言，但每个页面只呈现与当前任务有关的信息。
 
-## Product Purpose
+## 产品目的
 
-Stratum is a Rust-first agent runtime for composing agents, tools, and reliable execution paths. The web frontend, 运筹 Stratum, is the human surface of that runtime: end-users converse with agents through the Longzhong chat, and developers compose and deploy those agents through a future orchestration page.
+Stratum 是一个 Rust 优先的 Agent Runtime，用于组合 Agent、工具与可靠执行路径。运筹 Stratum 是它面向人的产品界面：用户通过隆中对完成复杂任务，并在需要时查看思考、工具执行、审批与恢复信息。
 
-Success looks like trust through transparency. The user trusts the agent to handle a real task end-to-end, with the ability to see what is happening whenever they want to. Thinking, tool execution, and intermediate steps are collapsed by default — the user trusts the agent to proceed — but any step can be expanded on demand to inspect reasoning, tool calls, and results in detail.
+成功标准是通过可观察、可控制的执行建立信任。思考、工具调用和中间步骤默认折叠，用户不必持续观看过程，但可以随时展开真实细节。概览与隆中对使用同一个稳定工作台，使用户能够理解当前可用能力、继续最近工作并快速开始新的任务。
 
-## Positioning
+## 定位
 
-Strategic depth — composable agents for complex, high-stakes work. Not a chatbot, not a cloud console, not a developer tool. An agent product that earns trust through observable, controllable execution, where every interaction leaves the user with a better plan, not just a completed task.
+运筹强调战略深度与可靠执行。它不是换皮聊天机器人，不是云控制台，也不是面向最终用户的开发者工具。每次交互都应让用户获得更清晰的问题理解、可执行方案与下一步，而不仅是一个孤立答案。
 
-## Brand Personality
+## 产品结构
 
-Restrained, trustworthy, engineering-workbench. The product carries the quiet confidence of serious infrastructure — not loud, not playful, not personality-forward. The agent is a capable colleague, not a character.
+### 共享产品壳层
 
-The brand name 运筹 (strategize, lay plans) and the chat name 隆中对 (Longzhong Plan, a famous Chinese strategic dialogue) carry a literary and strategic dimension. How central this dimension is to the visual and verbal identity remains an open tension — the product is exploring whether the strategic heritage is a brand pillar or an ambient accent. The positioning already commits to the strategic register; the literary treatment is being discovered through design.
+桌面端使用固定侧栏、顶部状态区和受控宽度的主内容画布。侧栏承载品牌、一级导航与真实最近会话；顶部状态区只显示前端能够确认的模型、模板或连接就绪状态。移动端将侧栏收进可访问抽屉，不创建第二套导航逻辑。
 
-Motion is purposeful and interaction-driven. GSAP-powered animations respond to clicks, state changes, and transitions — not ambient decoration. The product moves when movement communicates something; it stays still when stillness is the right answer.
+### 概览
 
-## Anti-references
+概览是产品工作台首页，不再是营销 Hero。它组合现有 API 与本地持久化事实，展示真实 Agent 模板、模型可用性、最近会话、加载状态、空状态和错误状态。没有真实数据时必须诚实留空或提供配置提示，不得伪造用量、额度、运行指标或示例会话。
 
-Generic SaaS chatbot UIs — ChatGPT-clones, Intercom-style support chat, reskinned "AI assistant" widgets. The product must not read as a chatbot with a skin on top. The Longzhong chat is a workspace for real work, not a support channel.
+### 隆中对
 
-Visual anti-references (detailed in `stratum-web/DESIGN.md`): no emoji, no Inter, no generic serif, no pure black, no purple/blue neon, no glow, no high-saturation gradients, no card-in-card, no three-equal-cards, no side-stripe borders.
+隆中对是最终用户的主要任务界面。它位于共享产品壳层内，同时保留可读的单列对话、文档滚动、固定 Composer、真实历史恢复和渐进式透明。侧栏只提供产品导航与最近会话，不展示工具日志、空事件列或编排控制面板。
 
-Positive reference for the future orchestration page: Dify's visual workflow editor — a node-based composition surface where agent workflows are built by connecting typed components.
+### 未来编排界面
 
-## Design Principles
+未来的开发者界面参考 Dify 的可视化工作流编辑器，使用节点和类型化连接构建 Agent 工作流。该界面与隆中对共享品牌与产品壳层，但不会把开发者控制项塞进最终用户的聊天流程。
 
-1. **Progressive transparency.** Default to trust — collapse thinking, tool execution, and intermediate steps. Let the user expand any step on demand. The user trusts because they *can* see, not because they *must* watch.
+## 品牌人格
 
-2. **Strategic depth over task completion.** Every interaction should leave the user with a better understanding of their problem, not just a completed task. The agent surfaces insight, trade-offs, and next steps — not just output.
+克制、可信、工程工作台。产品体现严肃基础设施的安静信心，不喧闹、不玩具化，也不依靠人物性格吸引注意力。Agent 是能力可靠的同事，不是拟人角色。
 
-3. **Engineering rigor in service of end-users.** The Rust foundation delivers reliability, observability, and control, but the UI must never feel like a developer tool. Restrained, not dense; capable, not overwhelming. The runtime's strength is invisible; the conversation is the product.
+“运筹”与“隆中对”提供战略与中文文化语境。这种语境通过命名、文案和少量品牌标识表达，不转化为仿古装饰、通用衬线字体或表演性诗意文案。
 
-4. **Motion with purpose.** GSAP-driven interactions respond to clicks, state changes, and transitions. Movement communicates state, not decoration. Reduced-motion is respected; when motion is removed, the state change still reads clearly.
+当前视觉结果以本地 Tavily 复刻站点为参考，提炼固定侧栏、顶部状态区、暖色画布、低对比边界、紧凑排版和单一产品蓝。Lovable 继续提供暖中性色与克制纵深的底层基础。不得复制 Tavily 的品牌、Logo、业务文案、图片、虚构数据或未经确认授权的字体文件。
 
-5. **One product, two surfaces, no forced context-switching.** End-users converse (chat); developers compose (orchestration). The product serves both from one brand, but neither audience is forced through the other's workflow. Both surfaces share a visual language but not a layout.
+## 设计原则
 
-## Accessibility & Inclusion
+1. **渐进式透明。** 默认折叠思考、工具执行和中间步骤，用户可以按需展开真实信息。信任来自随时可见，而不是持续暴露。
+2. **战略深度优先。** 每次交互都应帮助用户更好地理解问题、权衡方案并采取下一步，而不仅是完成一个动作。
+3. **工程严谨服务最终用户。** Rust 基础负责可靠性、可观察性与控制，界面保持克制、清晰，不把 Runtime 术语变成用户负担。
+4. **一个产品壳层。** 概览、隆中对和未来编排界面共享稳定导航、状态与视觉语言，避免路由之间像不同产品。
+5. **任务界面各守边界。** 聊天面向最终用户，编排面向开发者。共享壳层不等于共享全部信息密度或控制项。
+6. **动效只表达状态。** 点击、开合、选择、路由切换和运行状态可以使用短促反馈；不使用环境式、循环式或纯装饰动画。
+7. **真实数据优先。** 任何状态、会话、Agent、模型、审批和执行结果都必须来自 API、事件或本地持久化事实。
 
-Practical commitment: body text contrast ≥ 4.5:1, full keyboard navigation, and reduced-motion alternatives for every animation. Glass surfaces are not part of the target design; any retained third-party glass component must provide an opaque fallback, including for reduced-transparency preferences, before it is used in product UI. These are product requirements, not a claim that every current component already satisfies them. No formal WCAG audit target is set yet; revisit when the product matures beyond the current chat surface.
+## 反面参考
+
+- 通用 ChatGPT 克隆、客服聊天窗口和换皮 AI 助手。
+- 面向最终用户暴露 Runtime、事件流、工具注册或空调试面板。
+- 临时营销 Hero 加三张等宽功能卡片。
+- 伪造额度、用量、成功状态、最近会话或示例任务。
+- emoji、Inter、通用衬线字体、纯黑、紫蓝霓虹、外发光、高饱和渐变、玻璃拟态、全局颗粒、厚阴影、卡片套卡片和侧边彩色粗线。
+- 使用文本字符、手写 SVG 或多套图标库模拟菜单、关闭、下拉、发送与滚动操作。
+
+## 可访问性与包容性
+
+正文对比度至少为 4.5:1，大号文本至少为 3:1；占位符、辅助文案和错误信息同样需要可读。所有主要流程支持键盘导航、屏幕阅读器名称和至少 44px 的触控目标。移动抽屉正确管理焦点与 Escape 关闭，路由切换不把焦点留在隐藏控件中。
+
+所有动效都提供 `prefers-reduced-motion` 结果。玻璃表面不属于目标设计；任何残留第三方透明效果必须有不依赖模糊的可读背景。主题支持浅色与暗色，并在两种主题中保持相同的信息层级和语义颜色职责。

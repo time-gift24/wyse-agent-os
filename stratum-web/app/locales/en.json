@@ -16,11 +16,47 @@
     "signUp": "Sign up"
   },
   "theme": {
-    "toggle": "Toggle dark theme"
+    "toggle": "Toggle dark theme",
+    "useDark": "Use dark theme",
+    "useLight": "Use light theme"
   },
   "language": {
     "switchToChinese": "Switch to Chinese",
     "switchToEnglish": "Switch to English"
+  },
+  "productShell": {
+    "skipToContent": "Skip to main content",
+    "navigation": "Product navigation",
+    "openNavigation": "Open product navigation",
+    "closeNavigation": "Close product navigation",
+    "recent": "Recent conversations",
+    "noRecent": "Your recent work will appear here after you start a conversation.",
+    "newConversation": "New conversation",
+    "status": {
+      "loading": "Checking runtime",
+      "ready": "Models and agents are ready",
+      "incomplete": "Runtime configuration is incomplete",
+      "error": "Runtime status is unavailable"
+    }
+  },
+  "overview": {
+    "title": "Start with the problem that matters",
+    "description": "Choose an available agent, continue recent work, or open Longzhong for a task that needs careful reasoning.",
+    "startConversation": "Start conversation",
+    "models": "Available models",
+    "agentTemplates": "Agent templates",
+    "noneAvailable": "Unavailable",
+    "chooseAgent": "Choose an agent",
+    "chooseAgentDescription": "Templates and default models come from the current runtime.",
+    "recentConversations": "Recent conversations",
+    "recentDescription": "Continue work saved on this device.",
+    "retry": "Retry",
+    "templatesError": "Agent templates could not be loaded. You can still open Longzhong or retry later.",
+    "modelsError": "Model configuration could not be loaded. Confirm that the backend is running before sending a message.",
+    "noTemplates": "No agents available",
+    "noTemplatesDescription": "Start the backend and configure an agent template to see real options here.",
+    "noRecent": "No recent conversations",
+    "noRecentDescription": "After your first conversation, you can continue it here or from the sidebar."
   },
   "chat": {
     "assistant": "Longzhong",
@@ -49,7 +85,7 @@
     "sending": "Sending…",
     "connecting": "Connecting…",
     "connectionFailed": "Connection failed",
-    "ready": "Connected",
+    "ready": "Ready",
     "continue": "Continue",
     "cancel": "Cancel",
     "scrollToBottom": "Scroll to bottom",

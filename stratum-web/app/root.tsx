@@ -11,6 +11,7 @@ import {
 } from "react-router"
 
 import type { Route } from "./+types/root"
+import { ProductShell } from "./components/stratum/product-shell"
 import { createI18n } from "./lib/i18n"
 import { getRequestLanguage } from "./lib/locale"
 import "./app.css"
@@ -57,7 +58,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  return <Outlet />
+  return (
+    <ProductShell>
+      <Outlet />
+    </ProductShell>
+  )
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {

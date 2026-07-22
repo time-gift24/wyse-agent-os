@@ -4,6 +4,8 @@ import type {
   ModelDescriptor,
 } from "./model-config"
 
+export const STRATUM_API_BASE_URL = "http://127.0.0.1:18080"
+
 export class ApiError extends Error {
   constructor(
     readonly code: string,
