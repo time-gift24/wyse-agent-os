@@ -39,8 +39,6 @@ export function SiteNavbar({
   const { t } = useTranslation()
   const navigate = useNavigate()
   const navRef = useRef<HTMLElement>(null)
-  const shellRef = useRef<HTMLDivElement>(null)
-  const glassRef = useRef<HTMLDivElement>(null)
   const sectionNavRef = useRef<HTMLDivElement>(null)
   const leftSlotRef = useRef<HTMLDivElement>(null)
   const overviewLinkRef = useRef<HTMLAnchorElement>(null)
@@ -125,69 +123,22 @@ export function SiteNavbar({
       })
       gsap.to(indicator, {
         scaleX: linkBounds.width,
-        duration: reduceMotion ? 0 : 0.28,
+        duration: reduceMotion ? 0 : 0.2,
         ease: "power2.out",
       })
     },
     { dependencies: [activeSection], scope: navRef, revertOnUpdate: true }
   )
 
-  useGSAP(
-    () => {
-      const shell = shellRef.current
-      if (!shell) return
-
-      const glass = glassRef.current
-      const leftSlotEl = leftSlotRef.current
-      const reduceMotion = window.matchMedia(
-        "(prefers-reduced-motion: reduce)"
-      ).matches
-
-      if (!isLongzhong) {
-        gsap.set(shell, { "--navbar-max-width": "90rem" })
-        if (glass) gsap.set(glass, { opacity: 0 })
-        if (leftSlotEl) gsap.set(leftSlotEl, { autoAlpha: 0, x: -8 })
-        return
-      }
-
-      if (glass) gsap.set(glass, { opacity: 0 })
-      if (leftSlotEl) gsap.set(leftSlotEl, { autoAlpha: 0, x: -8 })
-
-      const tl = gsap.timeline()
-      tl.to(
-        glass,
-        {
-          opacity: 1,
-          duration: reduceMotion ? 0 : 0.4,
-          ease: "sine.inOut",
-        },
-        "-=0.45"
-      )
-      if (leftSlotEl) {
-        tl.to(
-          leftSlotEl,
-          {
-            autoAlpha: 1,
-            x: 0,
-            duration: reduceMotion ? 0 : 0.3,
-            ease: "sine.out",
-          },
-          "-=0.3"
-        )
-      }
-    },
-    { dependencies: [isLongzhong], scope: navRef, revertOnUpdate: true }
-  )
-
   const NavContent = (
-    <div className="relative z-10 flex h-14 w-full items-center gap-2 px-2 sm:gap-4 sm:px-3">
+    <div className="flex h-14 w-full items-center gap-2 px-2 sm:gap-4 sm:px-3">
       {leftSlot ? (
         <div className="flex items-center 2xl:hidden">{leftSlot}</div>
       ) : null}
       <Link
         to="/"
         onClick={(event) => navigateWithTransition(event, "/", "back")}
-        className="relative z-10 flex shrink-0 items-center gap-1.5 text-sm font-medium md:text-base"
+        className="flex shrink-0 items-center gap-1.5 text-sm font-normal md:text-base"
         aria-label={`运筹 ${t("brand.home")}`}
       >
         <StratumMark animated={false} variant="compact" className="size-7" />
@@ -213,7 +164,7 @@ export function SiteNavbar({
                   }
                   className={cn(
                     navigationMenuTriggerStyle(),
-                    "text-muted-foreground data-[active=true]:text-foreground"
+                    "h-11 rounded-md px-3 text-sm font-normal text-muted-foreground data-[active=true]:text-foreground"
                   )}
                   data-active={activeSection === "overview"}
                 >
@@ -233,7 +184,7 @@ export function SiteNavbar({
                   }
                   className={cn(
                     navigationMenuTriggerStyle(),
-                    "text-muted-foreground data-[active=true]:text-foreground"
+                    "h-11 rounded-md px-3 text-sm font-normal text-muted-foreground data-[active=true]:text-foreground"
                   )}
                   data-active={activeSection === "longzhong"}
                 >
@@ -262,13 +213,16 @@ export function SiteNavbar({
         </div>
         <Button
           size="icon-lg"
-          className="size-11 sm:hidden"
+          className="size-11 rounded-md sm:hidden"
           aria-label={t("actions.signUp")}
           title={t("actions.signUp")}
         >
           <UserPlusIcon aria-hidden="true" />
         </Button>
-        <Button size="lg" className="hidden min-h-11 sm:inline-flex">
+        <Button
+          size="lg"
+          className="hidden h-11 rounded-md px-4 text-base font-normal shadow-[inset_0_0.5px_0_rgb(255_255_255/20%),inset_0_0_0_0.5px_rgb(0_0_0/20%),0_1px_2px_rgb(0_0_0/5%)] sm:inline-flex"
+        >
           {t("actions.signUp")}
         </Button>
       </div>
@@ -276,27 +230,13 @@ export function SiteNavbar({
   )
 
   return (
-    <header
-      ref={navRef}
-      className={cn(
-        "fixed inset-x-0 top-0 z-50 mt-4 md:mt-6",
-        isLongzhong ? "px-0" : "px-4 md:px-8"
-      )}
-    >
+    <header ref={navRef} className="fixed inset-x-0 top-0 z-50 mt-3 md:mt-4">
       <div
-        ref={shellRef}
         className={cn(
-          "navbar-shell relative isolate mx-auto flex items-stretch overflow-hidden rounded-full",
+          "navbar-shell mx-auto flex items-stretch overflow-hidden rounded-xl border border-stratum-line bg-stratum-paper",
           isLongzhong && "navbar-shell--longzhong"
         )}
       >
-        {isLongzhong && (
-          <div
-            ref={glassRef}
-            className="absolute inset-0 rounded-full border border-stratum-line bg-stratum-paper opacity-0 shadow-stratum-soft"
-            aria-hidden="true"
-          />
-        )}
         {NavContent}
       </div>
 

@@ -75,6 +75,7 @@ export function ChatWorkspace({
   const workspaceRef = useRef<HTMLElement>(null)
   const messageListRef = useRef<HTMLDivElement>(null)
   const inputContainerRef = useRef<HTMLDivElement>(null)
+  const composerSurfaceRef = useRef<HTMLDivElement>(null)
   const autoFollowPausedRef = useRef(false)
   const previousScrollTopRef = useRef(0)
 
@@ -175,44 +176,40 @@ export function ChatWorkspace({
     resumeAutoFollow("auto")
   }, [resumeAutoFollow, state.agentId])
 
-  // workspace 入场动画：与 navbar 收缩完全同步
   useGSAP(
     () => {
       const reduceMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
       ).matches
       const messageList = messageListRef.current
-      const inputContainer = inputContainerRef.current
-      if (!messageList || !inputContainer) return
+      const composerSurface = composerSurfaceRef.current
+      if (!messageList || !composerSurface) return
 
-      gsap.set([messageList, inputContainer], {
-        autoAlpha: 0,
-        y: 12,
-      })
-
-      const tl = gsap.timeline({ delay: 0.12 }) // 与 navbar timeline 错开 120ms
-      tl.to(messageList, {
-        autoAlpha: 1,
-        y: 0,
-        duration: reduceMotion ? 0 : 0.45,
-        ease: "sine.out",
-      })
-      tl.to(
-        inputContainer,
+      const tl = gsap.timeline()
+      tl.fromTo(
+        messageList,
+        { autoAlpha: 0, y: 8 },
         {
           autoAlpha: 1,
           y: 0,
-          duration: reduceMotion ? 0 : 0.35,
-          ease: "sine.out",
+          duration: reduceMotion ? 0 : 0.2,
+          ease: "power2.out",
+        }
+      ).fromTo(
+        composerSurface,
+        { autoAlpha: 0, y: 8 },
+        {
+          autoAlpha: 1,
+          y: 0,
+          duration: reduceMotion ? 0 : 0.2,
+          ease: "power2.out",
         },
-        "-=0.3"
+        reduceMotion ? 0 : "-=0.12"
       )
     },
     { scope: workspaceRef }
   )
 
-  // 输入框位置切换动画：居中 <-> 底部
-  // 只用 bottom 属性控制，避免 top/bottom 切换导致的跳动
   useGSAP(
     () => {
       const container = inputContainerRef.current
@@ -221,22 +218,25 @@ export function ChatWorkspace({
       const reduceMotion = window.matchMedia(
         "(prefers-reduced-motion: reduce)"
       ).matches
+      const previousTop = container.getBoundingClientRect().top
+      const bottom = isNewConversation
+        ? "50%"
+        : "max(1rem, env(safe-area-inset-bottom))"
 
-      if (isNewConversation) {
-        // 居中状态 - 内层负责垂直偏移，避免与入场动画争用 transform。
-        gsap.to(container, {
-          bottom: "50%",
-          duration: reduceMotion ? 0 : 0.5,
-          ease: "sine.inOut",
-        })
-      } else {
-        // 底部状态
-        gsap.to(container, {
-          bottom: "max(1rem, env(safe-area-inset-bottom))",
-          duration: reduceMotion ? 0 : 0.5,
-          ease: "sine.inOut",
-        })
-      }
+      gsap.set(container, { bottom, y: 0 })
+      const nextTop = container.getBoundingClientRect().top
+      if (reduceMotion) return
+
+      gsap.fromTo(
+        container,
+        { y: previousTop - nextTop, willChange: "transform" },
+        {
+          y: 0,
+          duration: 0.22,
+          ease: "power2.inOut",
+          clearProps: "transform,willChange",
+        }
+      )
     },
     { dependencies: [isNewConversation], scope: workspaceRef }
   )
@@ -255,7 +255,7 @@ export function ChatWorkspace({
       }
 
       if (isSubmitting) {
-        gsap.to(btn, { scale: 0.92, duration: 0.1, ease: "power2.out" })
+        gsap.to(btn, { scale: 0.94, duration: 0.15, ease: "power2.out" })
       } else {
         gsap.to(btn, { scale: 1, duration: 0.2, ease: "expo.out" })
       }
@@ -319,7 +319,7 @@ export function ChatWorkspace({
             role="log"
             aria-live={state.phase === "recovering" ? "off" : "polite"}
             aria-relevant="additions text"
-            className="w-full px-1 py-6 [overflow-anchor:none] md:px-6"
+            className="type-body w-full px-1 py-6 [overflow-anchor:none] md:px-6"
           >
             <AgentMessageList
               messages={state.messages}
@@ -340,7 +340,7 @@ export function ChatWorkspace({
         <button
           type="button"
           onClick={() => resumeAutoFollow("smooth")}
-          className="fixed bottom-[calc(var(--stratum-composer-min-height)+max(1.75rem,env(safe-area-inset-bottom)))] left-1/2 z-50 size-11 -translate-x-1/2 rounded-full border border-border bg-background/95 text-foreground shadow-stratum-soft transition-transform hover:scale-105 motion-reduce:transition-none"
+          className="fixed bottom-[calc(var(--stratum-composer-min-height)+max(1.75rem,env(safe-area-inset-bottom)))] left-1/2 z-50 size-11 -translate-x-1/2 rounded-full border border-stratum-line-strong bg-stratum-paper text-foreground shadow-stratum-soft transition-transform duration-200 hover:-translate-y-0.5 motion-reduce:transition-none"
           aria-label={t("chat.scrollToBottom")}
         >
           <ArrowDownIcon className="size-4" aria-hidden="true" />
@@ -355,15 +355,17 @@ export function ChatWorkspace({
         style={{ bottom: initialComposerBottom.current }}
       >
         <div
+          ref={composerSurfaceRef}
+          data-slot="chat-composer-surface"
           className={cn(
-            "transition-transform duration-500 ease-in-out motion-reduce:transition-none",
+            "transition-transform duration-200 ease-in-out motion-reduce:transition-none",
             isNewConversation ? "translate-y-1/2" : "translate-y-0"
           )}
         >
           <div className="stratum-prompt-shell relative">
             <PromptInput
               aria-busy={composerRunning}
-              className="[&_[data-slot=input-group]]:min-h-[var(--stratum-composer-min-height)] [&_[data-slot=input-group]]:rounded-[var(--radius-stratum-panel)]! [&_[data-slot=input-group]]:border-stratum-line! [&_[data-slot=input-group]]:bg-stratum-paper! [&_[data-slot=input-group]]:shadow-none! [&_[data-slot=input-group]]:backdrop-blur-none!"
+              className="[&_[data-slot=input-group]]:min-h-[var(--stratum-composer-min-height)] [&_[data-slot=input-group]]:rounded-[var(--radius-stratum-panel)]! [&_[data-slot=input-group]]:border-stratum-line-strong! [&_[data-slot=input-group]]:bg-stratum-paper! [&_[data-slot=input-group]]:shadow-none! [&_[data-slot=input-group]]:backdrop-blur-none!"
               onSubmit={(event) => {
                 event.preventDefault()
                 void submitMessage()
@@ -373,7 +375,7 @@ export function ChatWorkspace({
                 <PromptInputTextarea
                   ref={composerRef}
                   aria-label={t("chat.composer.label")}
-                  className="max-h-48 min-h-14 px-4 pt-3 pb-2 text-base! leading-6! md:px-5"
+                  className="max-h-48 min-h-14 px-4 pt-3 pb-2 text-base! leading-6! placeholder:text-muted-foreground md:px-5"
                   disabled={composerRunning}
                   onChange={(event) => setComposerText(event.target.value)}
                   placeholder={t("chat.composer.placeholder")}

@@ -23,7 +23,6 @@ export function RouteTransition({ children }: RouteTransitionProps) {
       ).matches
       const direction = document.documentElement.dataset.navigationDirection
 
-      // 与 navbar 收缩同步：0.55s sine.inOut 更丝滑
       gsap.fromTo(
         page,
         {
@@ -34,8 +33,8 @@ export function RouteTransition({ children }: RouteTransitionProps) {
         {
           xPercent: 0,
           autoAlpha: 1,
-          duration: reduceMotion ? 0 : 0.55,
-          ease: "sine.inOut",
+          duration: reduceMotion ? 0 : 0.2,
+          ease: "power2.out",
           clearProps: "transform,willChange",
         }
       )

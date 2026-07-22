@@ -9,6 +9,30 @@
 :root {
   color-scheme: light;
 
+  /* Lovable 产品层 */
+  --stratum-canvas: #f7f4ed;
+  --stratum-canvas-soft: rgb(28 28 28 / 3%);
+  --stratum-paper: #f7f4ed;
+  --stratum-paper-soft: rgb(28 28 28 / 4%);
+  --stratum-paper-wash: #fcfbf8;
+  --stratum-ink: #1c1c1c;
+  --stratum-ink-soft: rgb(28 28 28 / 83%);
+  --stratum-ink-muted: #5f5f5d;
+  --stratum-line: #eceae4;
+  --stratum-line-strong: rgb(28 28 28 / 40%);
+  --stratum-action: #1c1c1c;
+  --stratum-action-ink: #fcfbf8;
+  --stratum-accent: rgb(28 28 28 / 4%);
+  --stratum-accent-ink: #1c1c1c;
+  --stratum-focus: rgb(59 130 246 / 50%);
+
+  /* 语义状态层 */
+  --stratum-success: #257a47;
+  --stratum-warning: #8a5a00;
+  --stratum-danger: #b42318;
+  --stratum-info: #2563eb;
+
+  /* Stratum 特效层：仅供标识与后续有目的的特效使用。 */
   --stratum-cloud-dancer: oklch(0.965 0.005 95);
   --stratum-lemon-icing: oklch(0.922 0.052 96);
   --stratum-nimbus-cloud: oklch(0.879 0.006 255);
@@ -24,86 +48,20 @@
   --stratum-cloud-cover: oklch(0.646 0.012 43);
   --stratum-hematite: oklch(0.488 0.013 73);
   --stratum-blue-fusion: oklch(0.468 0.058 236);
-
-  --stratum-canvas: var(--stratum-cloud-dancer);
-  --stratum-canvas-soft: oklch(0.925 0.012 238);
-  --stratum-paper: oklch(0.982 0.004 105);
-  --stratum-paper-soft: oklch(0.934 0.018 154);
-  --stratum-paper-wash: oklch(0.955 0.025 91);
-  --stratum-ink: oklch(0.255 0.014 236);
-  --stratum-ink-soft: var(--stratum-hematite);
-  --stratum-ink-muted: oklch(0.522 0.017 235);
-  --stratum-line: oklch(0.55 0.028 236 / 16%);
-  --stratum-line-strong: oklch(0.47 0.032 236 / 24%);
-  --stratum-action: var(--stratum-blue-fusion);
-  --stratum-action-ink: var(--stratum-cloud-dancer);
-  --stratum-accent: var(--stratum-almost-aqua);
-  --stratum-accent-ink: oklch(0.265 0.02 166);
-  --stratum-focus: var(--stratum-baltic-sea);
   --stratum-mark-core: var(--stratum-blue-fusion);
   --stratum-mark-compact: var(--stratum-ink-muted);
-  --stratum-danger: oklch(0.58 0.135 24);
 
-  --stratum-bg-canvas:
-    radial-gradient(
-      circle at 12% 6%,
-      color-mix(in oklch, var(--stratum-lemon-icing) 76%, transparent),
-      transparent 30rem
-    ),
-    radial-gradient(
-      circle at 88% 10%,
-      color-mix(in oklch, var(--stratum-ice-melt) 70%, transparent),
-      transparent 34rem
-    ),
-    radial-gradient(
-      circle at 18% 88%,
-      color-mix(in oklch, var(--stratum-raindrops-rose) 58%, transparent),
-      transparent 28rem
-    ),
-    radial-gradient(
-      circle at 82% 78%,
-      color-mix(in oklch, var(--stratum-almost-aqua) 54%, transparent),
-      transparent 30rem
-    ),
-    linear-gradient(135deg, var(--stratum-canvas), var(--stratum-canvas-soft));
-  --stratum-bg-paper:
-    radial-gradient(
-      circle at 22% 0%,
-      color-mix(in oklch, var(--stratum-paper-wash) 84%, transparent),
-      transparent 26rem
-    ),
-    radial-gradient(
-      circle at 100% 80%,
-      color-mix(in oklch, var(--stratum-ice-melt) 42%, transparent),
-      transparent 30rem
-    ),
-    linear-gradient(180deg, var(--stratum-paper), var(--stratum-paper-soft));
-  --stratum-bg-grain:
-    radial-gradient(
-      circle at 20% 30%,
-      oklch(0.35 0.012 235 / 7%) 0 1px,
-      transparent 1px
-    ),
-    radial-gradient(
-      circle at 70% 60%,
-      oklch(1 0 0 / 46%) 0 1px,
-      transparent 1px
-    );
-  --stratum-grain-size: 5px 7px;
-  --stratum-grain-opacity: 0.18;
-  --stratum-grain-blend: multiply;
+  --stratum-bg-canvas: var(--stratum-canvas);
+  --stratum-bg-paper: var(--stratum-paper);
+  --stratum-shadow-panel: 0 12px 32px rgb(28 28 28 / 12%);
+  --stratum-shadow-soft: 0 8px 24px rgb(28 28 28 / 8%);
+  --stratum-shadow-pressed: inset 0 1px 2px rgb(28 28 28 / 12%);
 
-  --stratum-shadow-panel:
-    0 3rem 7rem oklch(0.48 0.04 236 / 12%), inset 0 1px 0 oklch(1 0 0 / 72%);
-  --stratum-shadow-soft:
-    0 1.25rem 4rem oklch(0.48 0.04 236 / 9%), inset 0 1px 0 oklch(1 0 0 / 58%);
-  --stratum-shadow-pressed: inset 0 1px 2px oklch(0.35 0.02 236 / 12%);
-
-  --radius: 1rem;
-  --radius-stratum-control: 999rem;
+  --radius: 0.375rem;
+  --radius-stratum-control: 0.375rem;
   --radius-stratum-panel: 0.75rem;
   --radius-stratum-shell: 1rem;
-  --radius-stratum-field: 0.5rem;
+  --radius-stratum-field: 0.375rem;
   --page-gutter: clamp(0.75rem, 2vw, 2rem);
   --content-width: min(
     calc(100vw - var(--page-gutter) * 2),
@@ -116,9 +74,8 @@
   );
   --layout-gap: clamp(0.75rem, 1.25vw, 1.5rem);
   --history-width: clamp(12rem, 16vw, 18rem);
-  --text-body: clamp(0.9375rem, 0.12vw + 0.9rem, 1.0625rem);
+  --text-body: 1rem;
   --stratum-composer-min-height: 7.25rem;
-  --z-grain: 60;
 
   --background: var(--stratum-canvas);
   --foreground: var(--stratum-ink);
@@ -155,75 +112,29 @@
 
 .dark {
   color-scheme: dark;
-
-  --stratum-canvas: oklch(0.205 0.018 235);
-  --stratum-canvas-soft: oklch(0.278 0.016 76);
-  --stratum-paper: oklch(0.302 0.018 235);
-  --stratum-paper-soft: oklch(0.255 0.016 235);
-  --stratum-paper-wash: oklch(0.372 0.018 74);
-  --stratum-ink: oklch(0.94 0.006 100);
-  --stratum-ink-soft: oklch(0.802 0.014 93);
-  --stratum-ink-muted: oklch(0.685 0.015 238);
-  --stratum-line: oklch(0.94 0.006 100 / 13%);
-  --stratum-line-strong: oklch(0.94 0.006 100 / 21%);
-  --stratum-action: var(--stratum-baltic-sea);
-  --stratum-action-ink: oklch(0.18 0.03 236);
-  --stratum-accent: color-mix(
-    in oklch,
-    var(--stratum-quiet-violet) 48%,
-    var(--stratum-cloud-cover)
-  );
-  --stratum-accent-ink: var(--stratum-cloud-dancer);
-  --stratum-focus: var(--stratum-baltic-sea);
-  --stratum-mark-core: var(--stratum-baltic-sea);
-  --stratum-danger: oklch(0.704 0.12 25);
-  --stratum-bg-canvas:
-    radial-gradient(
-      circle at 12% 0%,
-      color-mix(in oklch, var(--stratum-blue-fusion) 42%, transparent),
-      transparent 34rem
-    ),
-    radial-gradient(
-      circle at 90% 18%,
-      color-mix(in oklch, var(--stratum-cloud-cover) 36%, transparent),
-      transparent 30rem
-    ),
-    radial-gradient(
-      circle at 22% 86%,
-      color-mix(in oklch, var(--stratum-quiet-violet) 22%, transparent),
-      transparent 30rem
-    ),
-    linear-gradient(145deg, var(--stratum-canvas-soft), var(--stratum-canvas));
-  --stratum-bg-paper:
-    radial-gradient(
-      circle at 22% 0%,
-      color-mix(in oklch, var(--stratum-cloud-cover) 30%, transparent),
-      transparent 28rem
-    ),
-    radial-gradient(
-      circle at 100% 82%,
-      color-mix(in oklch, var(--stratum-blue-fusion) 24%, transparent),
-      transparent 30rem
-    ),
-    linear-gradient(180deg, var(--stratum-paper), var(--stratum-paper-soft));
-  --stratum-bg-grain:
-    radial-gradient(
-      circle at 20% 30%,
-      oklch(1 0 0 / 7%) 0 1px,
-      transparent 1px
-    ),
-    radial-gradient(
-      circle at 70% 60%,
-      oklch(0 0 0 / 20%) 0 1px,
-      transparent 1px
-    );
-  --stratum-grain-opacity: 0.16;
-  --stratum-grain-blend: screen;
-  --stratum-shadow-panel:
-    0 3rem 7rem oklch(0 0 0 / 32%), inset 0 1px 0 oklch(1 0 0 / 12%);
-  --stratum-shadow-soft:
-    0 1.25rem 4rem oklch(0 0 0 / 25%), inset 0 1px 0 oklch(1 0 0 / 10%);
-  --stratum-shadow-pressed: inset 0 1px 2px oklch(0 0 0 / 24%);
+  --stratum-canvas: #1c1c1c;
+  --stratum-canvas-soft: rgb(247 244 237 / 3%);
+  --stratum-paper: color-mix(in srgb, #f7f4ed 4%, #1c1c1c);
+  --stratum-paper-soft: rgb(247 244 237 / 8%);
+  --stratum-paper-wash: color-mix(in srgb, #f7f4ed 8%, #1c1c1c);
+  --stratum-ink: #fcfbf8;
+  --stratum-ink-soft: rgb(252 251 248 / 83%);
+  --stratum-ink-muted: rgb(247 244 237 / 64%);
+  --stratum-line: rgb(247 244 237 / 12%);
+  --stratum-line-strong: rgb(247 244 237 / 40%);
+  --stratum-action: #f7f4ed;
+  --stratum-action-ink: #1c1c1c;
+  --stratum-accent: rgb(247 244 237 / 8%);
+  --stratum-accent-ink: #fcfbf8;
+  --stratum-focus: rgb(59 130 246 / 62%);
+  --stratum-success: #63c489;
+  --stratum-warning: #e0ad4d;
+  --stratum-danger: #ff8a80;
+  --stratum-info: #8ab4ff;
+  --stratum-mark-compact: var(--stratum-ink-muted);
+  --stratum-shadow-panel: 0 12px 32px rgb(0 0 0 / 28%);
+  --stratum-shadow-soft: 0 8px 24px rgb(0 0 0 / 20%);
+  --stratum-shadow-pressed: inset 0 1px 2px rgb(0 0 0 / 28%);
 }
 
 @theme inline {
@@ -268,8 +179,12 @@
   --color-stratum-ink-soft: var(--stratum-ink-soft);
   --color-stratum-ink-muted: var(--stratum-ink-muted);
   --color-stratum-line: var(--stratum-line);
+  --color-stratum-line-strong: var(--stratum-line-strong);
   --color-stratum-action: var(--stratum-action);
   --color-stratum-accent: var(--stratum-accent);
+  --color-stratum-success: var(--stratum-success);
+  --color-stratum-warning: var(--stratum-warning);
+  --color-stratum-info: var(--stratum-info);
   --color-stratum-cloud-dancer: var(--stratum-cloud-dancer);
   --color-stratum-lemon-icing: var(--stratum-lemon-icing);
   --color-stratum-nimbus-cloud: var(--stratum-nimbus-cloud);
@@ -285,13 +200,13 @@
   --color-stratum-cloud-cover: var(--stratum-cloud-cover);
   --color-stratum-hematite: var(--stratum-hematite);
   --color-stratum-blue-fusion: var(--stratum-blue-fusion);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
+  --radius-sm: calc(var(--radius) * 0.67);
+  --radius-md: var(--radius);
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-xl: var(--radius-stratum-panel);
+  --radius-2xl: var(--radius-stratum-shell);
+  --radius-3xl: var(--radius-stratum-shell);
+  --radius-4xl: var(--radius-stratum-shell);
   --radius-5xl: var(--radius-stratum-panel);
   --radius-shell: var(--radius-stratum-shell);
   --radius-control: var(--radius-stratum-control);
@@ -304,36 +219,83 @@
   * {
     @apply border-border outline-ring/50;
   }
-  body {
-    @apply min-h-dvh text-foreground antialiased;
-    overflow-x: hidden;
-    font-size: var(--text-body);
-    background: var(--stratum-bg-canvas);
-    text-rendering: optimizeLegibility;
-  }
-  body::before {
-    @apply pointer-events-none fixed inset-0;
-    content: "";
-    z-index: var(--z-grain);
-    background-image: var(--stratum-bg-grain);
-    background-size: var(--stratum-grain-size);
-    opacity: var(--stratum-grain-opacity);
-    mix-blend-mode: var(--stratum-grain-blend);
-  }
+
   html {
     @apply font-sans;
+  }
+
+  body {
+    @apply min-h-dvh bg-background text-foreground antialiased;
+    overflow-x: hidden;
+    font-size: var(--text-body);
+    line-height: 1.5;
+    text-rendering: optimizeLegibility;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--stratum-focus);
+    outline-offset: 2px;
   }
 }
 
 @layer components {
+  .type-hero {
+    font-family: "Noto Sans Variable", sans-serif;
+    font-size: 2.25rem;
+    font-weight: 600;
+    line-height: 1.08;
+    letter-spacing: -0.9px;
+  }
+
+  .type-section {
+    font-family: "Noto Sans Variable", sans-serif;
+    font-size: 3rem;
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -1.2px;
+  }
+
+  .type-subheading {
+    font-family: "Noto Sans Variable", sans-serif;
+    font-size: 2.25rem;
+    font-weight: 600;
+    line-height: 1.1;
+    letter-spacing: -0.9px;
+  }
+
+  .type-card-title {
+    font-size: 1.25rem;
+    font-weight: 400;
+    line-height: 1.25;
+  }
+
+  .type-body-large {
+    font-size: 1.125rem;
+    font-weight: 400;
+    line-height: 1.38;
+  }
+
+  .type-body,
+  .type-action {
+    font-size: 1rem;
+    font-weight: 400;
+    line-height: 1.5;
+  }
+
+  .type-caption {
+    font-size: 0.875rem;
+    font-weight: 400;
+    line-height: 1.5;
+  }
+
   .stratum-page-shell {
-    @apply overflow-hidden rounded-shell border border-stratum-line shadow-stratum-panel;
-    background: var(--stratum-bg-paper);
+    @apply overflow-hidden rounded-shell border border-stratum-line;
+    background: var(--stratum-paper);
   }
 
   .stratum-paper-surface {
-    @apply rounded-5xl border border-stratum-line shadow-stratum-soft;
-    background: var(--stratum-bg-paper);
+    @apply rounded-5xl border border-stratum-line;
+    background: var(--stratum-paper);
   }
 
   .stratum-content-width {
@@ -358,15 +320,6 @@
     transform-origin: top left;
   }
 
-  @media (min-width: 1536px) {
-    .stratum-history-drawer {
-      left: auto;
-      right: calc(50% + var(--content-half-width) + 1rem);
-      width: min(calc(50% - var(--content-half-width) - 2rem), 16rem);
-      transform-origin: top right;
-    }
-  }
-
   .stratum-mark--compact path {
     fill: var(--stratum-mark-compact);
     stroke: var(--stratum-mark-compact);
@@ -383,82 +336,38 @@
   .navbar-shell--longzhong {
     --navbar-max-width: var(--content-width);
   }
-
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not(.light) {
-    color-scheme: dark;
-
-    --stratum-canvas: oklch(0.205 0.018 235);
-    --stratum-canvas-soft: oklch(0.278 0.016 76);
-    --stratum-paper: oklch(0.302 0.018 235);
-    --stratum-paper-soft: oklch(0.255 0.016 235);
-    --stratum-paper-wash: oklch(0.372 0.018 74);
-    --stratum-ink: oklch(0.94 0.006 100);
-    --stratum-ink-soft: oklch(0.802 0.014 93);
-    --stratum-ink-muted: oklch(0.685 0.015 238);
-    --stratum-line: oklch(0.94 0.006 100 / 13%);
-    --stratum-line-strong: oklch(0.94 0.006 100 / 21%);
-    --stratum-action: var(--stratum-baltic-sea);
-    --stratum-action-ink: oklch(0.18 0.03 236);
-    --stratum-accent: color-mix(
-      in oklch,
-      var(--stratum-quiet-violet) 48%,
-      var(--stratum-cloud-cover)
-    );
-    --stratum-accent-ink: var(--stratum-cloud-dancer);
-    --stratum-focus: var(--stratum-baltic-sea);
-    --stratum-mark-core: var(--stratum-baltic-sea);
-    --stratum-danger: oklch(0.704 0.12 25);
-    --stratum-bg-canvas:
-      radial-gradient(
-        circle at 12% 0%,
-        color-mix(in oklch, var(--stratum-blue-fusion) 42%, transparent),
-        transparent 34rem
-      ),
-      radial-gradient(
-        circle at 90% 18%,
-        color-mix(in oklch, var(--stratum-cloud-cover) 36%, transparent),
-        transparent 30rem
-      ),
-      radial-gradient(
-        circle at 22% 86%,
-        color-mix(in oklch, var(--stratum-quiet-violet) 22%, transparent),
-        transparent 30rem
-      ),
-      linear-gradient(145deg, var(--stratum-canvas-soft), var(--stratum-canvas));
-    --stratum-bg-paper:
-      radial-gradient(
-        circle at 22% 0%,
-        color-mix(in oklch, var(--stratum-cloud-cover) 30%, transparent),
-        transparent 28rem
-      ),
-      radial-gradient(
-        circle at 100% 82%,
-        color-mix(in oklch, var(--stratum-blue-fusion) 24%, transparent),
-        transparent 30rem
-      ),
-      linear-gradient(180deg, var(--stratum-paper), var(--stratum-paper-soft));
-    --stratum-bg-grain:
-      radial-gradient(
-        circle at 20% 30%,
-        oklch(1 0 0 / 7%) 0 1px,
-        transparent 1px
-      ),
-      radial-gradient(
-        circle at 70% 60%,
-        oklch(0 0 0 / 20%) 0 1px,
-        transparent 1px
-      );
-    --stratum-grain-opacity: 0.16;
-    --stratum-grain-blend: screen;
-    --stratum-shadow-panel:
-      0 3rem 7rem oklch(0 0 0 / 32%), inset 0 1px 0 oklch(1 0 0 / 12%);
-    --stratum-shadow-soft:
-      0 1.25rem 4rem oklch(0 0 0 / 25%), inset 0 1px 0 oklch(1 0 0 / 10%);
-    --stratum-shadow-pressed: inset 0 1px 2px oklch(0 0 0 / 24%);
+@media (min-width: 640px) {
+  .type-hero {
+    font-size: 3rem;
+    line-height: 1.05;
+    letter-spacing: -1.2px;
   }
+}
+
+@media (min-width: 1024px) {
+  .type-hero {
+    font-size: 3.75rem;
+    line-height: 1.05;
+    letter-spacing: -1.5px;
+  }
+}
+
+@media (min-width: 1536px) {
+  .stratum-history-drawer {
+    right: calc(50% + var(--content-half-width) + 1rem);
+    left: auto;
+    width: min(calc(50% - var(--content-half-width) - 2rem), 16rem);
+    transform-origin: top right;
+  }
+}
+
+:where(a, button, [role="button"], [tabindex]):focus-visible {
+  outline-color: var(--stratum-focus) !important;
+  outline-style: solid !important;
+  outline-width: 2px !important;
+  outline-offset: 2px !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

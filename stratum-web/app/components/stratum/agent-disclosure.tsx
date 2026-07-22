@@ -32,14 +32,14 @@ export function AgentDisclosure({
     >
       <CollapsibleTrigger
         data-slot="agent-disclosure-trigger"
-        className="flex w-full items-center gap-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+        className="flex w-full items-center gap-2 text-left text-sm font-normal text-muted-foreground transition-colors duration-200 hover:text-foreground"
       >
         {icon}
         {label}
         <ChevronDownIcon
           aria-hidden="true"
           className={cn(
-            "size-4 transition-transform",
+            "size-4 transition-transform duration-200",
             open ? "rotate-180" : "rotate-0"
           )}
         />

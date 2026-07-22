@@ -31,7 +31,7 @@ export function AgentConfigMenu({
     <DropdownMenu>
       <DropdownMenuTrigger
         aria-label={triggerText}
-        className="inline-flex h-11 max-w-36 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+        className="inline-flex h-11 max-w-36 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm font-normal text-muted-foreground transition-colors duration-200 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
         disabled={menuDisabled(configuration, commandPending)}
       >
         <span className="truncate">{triggerText}</span>
@@ -39,7 +39,9 @@ export function AgentConfigMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-56">
         <DropdownMenuGroup>
-          <DropdownMenuLabel>{t("chat.composer.agent")}</DropdownMenuLabel>
+          <DropdownMenuLabel className="text-sm font-semibold">
+            {t("chat.composer.agent")}
+          </DropdownMenuLabel>
           <DropdownMenuRadioGroup
             value={configuration.agentName ?? undefined}
             onValueChange={(agentName) => {
@@ -97,7 +99,7 @@ export function ModelConfigMenu({
       <DropdownMenu>
         <DropdownMenuTrigger
           aria-label={triggerText}
-          className="inline-flex h-11 max-w-52 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+          className="inline-flex h-11 max-w-52 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm font-normal text-muted-foreground transition-colors duration-200 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
           disabled={
             configuration.currentModelConfig === null ||
             menuDisabled(configuration, commandPending)
@@ -108,7 +110,9 @@ export function ModelConfigMenu({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-64">
           <DropdownMenuGroup>
-            <DropdownMenuLabel>{t("chat.composer.model")}</DropdownMenuLabel>
+            <DropdownMenuLabel className="text-sm font-semibold">
+              {t("chat.composer.model")}
+            </DropdownMenuLabel>
             <DropdownMenuRadioGroup
               value={selected?.model}
               onValueChange={(model) => {
@@ -135,7 +139,7 @@ export function ModelConfigMenu({
         <DropdownMenu>
           <DropdownMenuTrigger
             aria-label={`${t("chat.composer.thinking")}: ${thinkingText}`}
-            className="inline-flex h-11 max-w-32 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
+            className="inline-flex h-11 max-w-32 min-w-0 flex-1 items-center gap-1 rounded-md px-2 text-sm font-normal text-muted-foreground transition-colors duration-200 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 sm:flex-none"
             disabled={menuDisabled(configuration, commandPending)}
           >
             <span className="truncate">
@@ -145,7 +149,7 @@ export function ModelConfigMenu({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-40">
             <DropdownMenuGroup>
-              <DropdownMenuLabel>
+              <DropdownMenuLabel className="text-sm font-semibold">
                 {t("chat.composer.thinking")}
               </DropdownMenuLabel>
               <DropdownMenuRadioGroup

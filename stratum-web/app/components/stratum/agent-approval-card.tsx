@@ -37,12 +37,12 @@ export function AgentApprovalCard({
   return (
     <section
       aria-labelledby={titleId}
-      className="mt-2 rounded-xl bg-primary/[0.055] px-4 py-4"
+      className="mt-2 rounded-xl border border-stratum-warning/30 bg-stratum-warning/5 px-4 py-4"
     >
       <div className="flex items-start gap-3">
         <ShieldCheckIcon
           aria-hidden="true"
-          className="mt-0.5 size-4 shrink-0 text-primary"
+          className="mt-0.5 size-4 shrink-0 text-stratum-warning"
         />
         <div className="min-w-0 flex-1">
           <h3 id={titleId} className="text-sm font-semibold text-foreground">
@@ -54,7 +54,7 @@ export function AgentApprovalCard({
       <div className="mt-4 flex justify-end gap-2">
         <Button
           type="button"
-          className="h-9 px-3"
+          className="h-11 rounded-md px-3 text-sm font-normal"
           disabled={submitting}
           onClick={() => onDecision("reject")}
           variant="ghost"
@@ -65,7 +65,7 @@ export function AgentApprovalCard({
         </Button>
         <Button
           type="button"
-          className="h-9 px-3"
+          className="h-11 rounded-md px-3 text-sm font-normal"
           disabled={submitting}
           onClick={() => onDecision("approve")}
         >

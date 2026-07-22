@@ -149,14 +149,14 @@ export function ChatHistory({
             className={cn(
               "stratum-history-drawer",
               "flex flex-col gap-2 overflow-hidden",
-              "rounded-2xl border border-stratum-line shadow-stratum-soft [background:var(--stratum-bg-paper)]",
+              "rounded-2xl border border-stratum-line bg-popover shadow-stratum-soft",
               "max-h-[calc(100dvh-9rem)]"
             )}
           >
             <div className="flex items-center justify-between px-3 pt-2.5">
               <div className="flex items-center gap-2 text-muted-foreground">
                 <HistoryIcon className="size-4" aria-hidden="true" />
-                <span className="text-sm font-medium">
+                <span className="text-sm font-normal">
                   {t("chat.history.title")}
                 </span>
               </div>
@@ -184,7 +184,7 @@ export function ChatHistory({
                     })
                   })
                 }}
-                className="mx-2.5 flex min-h-11 items-center gap-2 rounded-lg bg-secondary/50 px-3 py-2 text-left transition-colors hover:bg-secondary/70"
+                className="mx-2.5 flex min-h-11 items-center gap-2 rounded-md bg-secondary/50 px-3 py-2 text-left transition-colors duration-200 hover:bg-secondary/70"
               >
                 <div className="flex flex-col items-center gap-1">
                   <span
@@ -196,7 +196,7 @@ export function ChatHistory({
                   <span className="w-px flex-1 bg-stratum-line/50" />
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="text-xs font-medium text-stratum-action">
+                  <span className="text-sm font-semibold text-foreground">
                     {t("chat.history.activeNow")}
                   </span>
                   <span className="truncate text-sm text-foreground">
@@ -212,10 +212,10 @@ export function ChatHistory({
                 variant="ghost"
                 aria-current={state.agentId === null ? "true" : undefined}
                 className={cn(
-                  "min-h-11 w-full justify-start gap-2 rounded-lg px-3 text-sm font-medium",
+                  "min-h-11 w-full justify-start gap-2 rounded-md px-3 text-sm font-normal",
                   state.agentId === null
-                    ? "bg-stratum-action/10 text-stratum-action"
-                    : "text-stratum-action hover:bg-stratum-action/5"
+                    ? "bg-secondary text-foreground"
+                    : "text-foreground hover:bg-secondary/70"
                 )}
                 onClick={() => {
                   onNewConversation()
@@ -250,7 +250,7 @@ export function ChatHistory({
                           onClose()
                         }}
                         className={cn(
-                          "flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-3 text-left text-sm transition-colors",
+                          "flex min-h-11 min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-3 text-left text-sm transition-colors duration-200",
                           isMissing && "pr-12",
                           isCurrent
                             ? "bg-secondary/50"
@@ -261,13 +261,13 @@ export function ChatHistory({
                           className={cn(
                             "truncate text-sm",
                             isCurrent
-                              ? "font-medium text-foreground"
+                              ? "font-semibold text-foreground"
                               : "text-foreground/80"
                           )}
                         >
                           {agent.title}
                         </span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
+                        <span className="shrink-0 text-sm text-muted-foreground">
                           {formatRelativeTime(
                             agent.lastOpenedAt,
                             i18n.resolvedLanguage ?? "en"

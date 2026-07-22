@@ -41,7 +41,11 @@ export function LanguageToggle({ compact = false }: LanguageToggleProps) {
     <Button
       variant="ghost"
       size="lg"
-      className={compact ? "size-11 p-0" : "min-h-11"}
+      className={
+        compact
+          ? "size-11 rounded-md p-0"
+          : "min-h-11 rounded-md px-3 text-sm font-normal"
+      }
       aria-label={label}
       title={label}
       onClick={() => {

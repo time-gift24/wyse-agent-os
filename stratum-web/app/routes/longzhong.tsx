@@ -28,8 +28,8 @@ export default function Longzhong() {
               aria-controls="chat-history-drawer"
               onClick={() => setHistoryOpen((open) => !open)}
               className={cn(
-                "size-11 text-muted-foreground hover:bg-stratum-paper/60 hover:text-foreground",
-                historyOpen && "text-stratum-action"
+                "size-11 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground",
+                historyOpen && "bg-muted text-foreground"
               )}
             >
               <HistoryIcon className="size-4" aria-hidden="true" />

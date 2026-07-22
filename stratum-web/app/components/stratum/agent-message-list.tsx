@@ -156,7 +156,7 @@ export function AgentMessageList({
                   {message.reasoning}
                 </ReasoningDisclosure>
               ) : null}
-              <MessageContent>
+              <MessageContent className="text-base! leading-6! group-[.is-user]:rounded-xl!">
                 <MessageResponse>{text}</MessageResponse>
               </MessageContent>
               <ExecutionTraceGroup
@@ -169,8 +169,8 @@ export function AgentMessageList({
                 dateTime={message.timestamp}
                 className={
                   isUser
-                    ? "self-end px-1 text-[0.625rem] text-muted-foreground"
-                    : "px-1 text-[0.625rem] text-muted-foreground"
+                    ? "self-end px-1 text-sm text-muted-foreground"
+                    : "px-1 text-sm text-muted-foreground"
                 }
               >
                 {dateTimeFormat.format(new Date(message.timestamp))}
@@ -195,7 +195,7 @@ export function AgentMessageList({
               </ReasoningDisclosure>
             ) : null}
             {draft.text ? (
-              <MessageContent>
+              <MessageContent className="text-base! leading-6!">
                 <MessageResponse>{draft.text}</MessageResponse>
               </MessageContent>
             ) : null}
@@ -241,9 +241,9 @@ export function AgentMessageList({
       {error ? (
         <div className="animate-in duration-200 fade-in-0 slide-in-from-bottom-2">
           <Message from="assistant">
-            <MessageContent>
-              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-                <p className="font-medium">{t("chat.connectionFailed")}</p>
+            <MessageContent className="text-base! leading-6!">
+              <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                <p className="font-semibold">{t("chat.connectionFailed")}</p>
                 {error.message ? (
                   <p className="mt-1 text-destructive/80">{error.message}</p>
                 ) : null}
