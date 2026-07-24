@@ -22,6 +22,18 @@
     "hooks": "~/hooks"
   },
   "registries": {
-    "@react-bits": "https://reactbits.dev/r/{name}.json"
+    "@react-bits": "https://reactbits.dev/r/{name}.json",
+    "@reactbits-starter": {
+      "url": "https://proxy.collectui.pro/api/r/reactbits/starter/{name}.json",
+      "headers": {
+        "Authorization": "Bearer ${REACTBITS_LICENSE_KEY}"
+      }
+    },
+    "@reactbits-pro": {
+      "url": "https://proxy.collectui.pro/api/r/reactbits/pro/{name}.json",
+      "headers": {
+        "Authorization": "Bearer ${REACTBITS_LICENSE_KEY}"
+      }
+    }
   }
 }
